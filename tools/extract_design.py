@@ -84,6 +84,21 @@ def main():
                 if L[y][x][3] > 0:
                     fur[y][x] = L[y][x]
 
+    # 移除烙在家具層的原畫人物：從同排無人隔間（bay 週期重複）複製等位像素蓋掉
+    # (x0, y0, x1, y1, dx)：dest 矩形 [x0,x1)×[y0,y1) ← 來源同座標平移 dx
+    PATCHES = {
+        "Office_Design_2": [
+            (64, 16, 92, 57, +32),    # 上排 bay1 棕髮筆電男 ← bay2 左區
+            (174, 50, 192, 81, -48),  # 上排 bay3 紙堆後紅髮 ← bay2 右區
+            (155, 106, 174, 139, -96),  # 下排 bay3 北側紅棕髮 ← bay1 等位
+            (136, 118, 161, 161, -48),  # 下排第 9 欄椅上背影（含椅子修復）← bay2/椅6
+        ],
+    }
+    for (px0, py0, px1, py1, pdx) in PATCHES.get(name, []):
+        for y in range(py0, py1):
+            for x in range(px0, px1):
+                fur[y][x] = fur[y][x + pdx]
+
     ys = [y for y in range(H) for x in range(W) if base[y][x][3] > 0 or fur[y][x][3] > 0]
     H_art = max(ys) + 1
     write_png(f"{out}/bg_base.png", [row[:] for row in base[:H_art]])
@@ -108,16 +123,53 @@ def main():
                                 stack.append((nx, ny))
                 comps.append(pts)
 
+    # Y-sort 物件化：以「角色不可能站立的封鎖列」為全域水平切線，跨線的元件就地切帶，
+    # 帶內再跑連通元件 → 每把椅子/每段桌帶都是獨立 sprite，純 Y-sort 天然正確。
+    # 按幾何切、不按元件編號——編號會隨內容變動位移，幾何不會
+    CUTS = {
+        "Office_Design_2": [80, 112, 144],
+    }
+    cuts_global = CUTS.get(name, [])
+
+    def components_of(pts_set):
+        seen = set()
+        result = []
+        for p in pts_set:
+            if p in seen:
+                continue
+            stack = [p]
+            seen.add(p)
+            cur = []
+            while stack:
+                cx, cy = stack.pop()
+                cur.append((cx, cy))
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        q = (cx + dx, cy + dy)
+                        if q in pts_set and q not in seen:
+                            seen.add(q)
+                            stack.append(q)
+            result.append(cur)
+        return result
+
     meta = []
-    for i, pts in enumerate(comps, 1):
-        x0 = min(p[0] for p in pts); x1 = max(p[0] for p in pts)
-        y0 = min(p[1] for p in pts); y1 = max(p[1] for p in pts)
-        img = [[(0, 0, 0, 0)] * (x1 - x0 + 1) for _ in range(y1 - y0 + 1)]
-        for (px_, py_) in pts:
-            img[py_ - y0][px_ - x0] = fur[py_][px_]
-        cname = f"fur_{i:02d}"
-        write_png(f"{out}/{cname}.png", img)
-        meta.append({"name": cname, "x": x0, "y": y0, "w": x1 - x0 + 1, "h": y1 - y0 + 1})
+    counter = 0
+    for pts in comps:
+        y0all = min(p[1] for p in pts)
+        y1all = max(p[1] for p in pts)
+        cuts = [y0all] + [c for c in cuts_global if y0all < c <= y1all] + [y1all + 1]
+        for bi in range(len(cuts) - 1):
+            band = {p for p in pts if cuts[bi] <= p[1] < cuts[bi + 1]}
+            for sub in sorted(components_of(band), key=lambda c: min(p[0] for p in c)):
+                counter += 1
+                bname = f"obj_{counter:02d}"
+                x0 = min(p[0] for p in sub); x1 = max(p[0] for p in sub)
+                y0 = min(p[1] for p in sub); y1 = max(p[1] for p in sub)
+                img = [[(0, 0, 0, 0)] * (x1 - x0 + 1) for _ in range(y1 - y0 + 1)]
+                for (px_, py_) in sub:
+                    img[py_ - y0][px_ - x0] = fur[py_][px_]
+                write_png(f"{out}/{bname}.png", img)
+                meta.append({"name": bname, "x": x0, "y": y0, "w": x1 - x0 + 1, "h": y1 - y0 + 1})
 
     json.dump({"canvasW": W, "artH": H_art, "items": meta},
               open(f"{out}/furniture.json", "w"), indent=1)

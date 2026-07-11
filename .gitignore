@@ -1,2 +1,3 @@
 limezu/
 .DS_Store
+__pycache__/
