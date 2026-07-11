@@ -1,4 +1,19 @@
+# LimeZu 授權素材與其衍生物（可用 tools/ 腳本 + Unity Tools 選單重生）
 limezu/
+unity/Assets/Sprites/LimeZu/
+unity/Assets/Sprites/LimeZu.meta
+
+# Unity 快取（開專案自動重生）
+unity/Library/
+unity/Temp/
+unity/Logs/
+unity/UserSettings/
+unity/obj/
+unity/*.csproj
+unity/*.slnx
+unity/*.sln
+
+# 一般
 .DS_Store
 __pycache__/
 .venv/
