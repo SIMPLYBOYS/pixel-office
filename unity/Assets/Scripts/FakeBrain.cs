@@ -26,10 +26,8 @@ public class FakeBrain : MonoBehaviour
                 continue;
             }
 
+            // move_to 到點會自動入座（NPCAgent 的身體知識），不用再下 use
             yield return agent.Execute(new AgentCommand { action = "move_to", target = wp.key });
-
-            if (!meeting.Busy && wp.action != null)
-                yield return agent.Execute(new AgentCommand { action = "use", target = wp.action });
 
             float dwell = Random.Range(5f, 15f);
             while (dwell > 0f)

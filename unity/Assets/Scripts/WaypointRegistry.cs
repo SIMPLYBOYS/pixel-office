@@ -40,6 +40,12 @@ public static class WaypointRegistry
         return entries.FirstOrDefault(e => e.key == key);
     }
 
+    public static List<Entry> All()
+    {
+        Init();
+        return entries;
+    }
+
     public static Entry ClaimRandom(object who)
     {
         Init();

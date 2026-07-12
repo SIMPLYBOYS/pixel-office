@@ -15,6 +15,10 @@ class PixelSpriteImporter : AssetPostprocessor
         importer.textureCompression = TextureImporterCompression.Uncompressed;
         importer.mipmapEnabled = false;
 
+        // 對話框底圖：9-slice 邊界（拉伸不變形圓角）
+        if (assetPath.EndsWith("speech_panel.png"))
+            importer.spriteBorder = new Vector4(4, 4, 4, 4);
+
         // LimeZu 件已裁到 16 倍數、底部對齊 → pivot 左下，配合 tilemap tileAnchor (0,0)
         // 角色例外：pivot 腳底中心（transform = 腳的位置，Y-sort 以腳判定）
         if (assetPath.Contains("/LimeZu/"))

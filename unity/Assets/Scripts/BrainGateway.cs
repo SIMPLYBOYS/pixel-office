@@ -35,6 +35,7 @@ public class BrainGateway : MonoBehaviour
                 remote = true;
                 RemoteMode = true;
                 ToggleFakeBrains(false);
+                SendHandshake(); // 告訴後端有哪些 agent 和互動點 → 後端動態生成 tool enum
                 Debug.Log("BrainGateway: 已連上後端，假大腦停用");
             };
             ws.OnClose += _ =>
@@ -83,6 +84,13 @@ public class BrainGateway : MonoBehaviour
     async void Send(string json)
     {
         if (ws != null && ws.State == WebSocketState.Open) await ws.SendText(json);
+    }
+
+    void SendHandshake()
+    {
+        var ids = string.Join(",", agents.Keys.Select(k => $"\"{k}\""));
+        var wps = string.Join(",", WaypointRegistry.All().Select(e => $"\"{e.key}\""));
+        Send($"{{\"type\":\"waypoints\",\"agents\":[{ids}],\"list\":[{wps}]}}");
     }
 
     void ToggleFakeBrains(bool on)

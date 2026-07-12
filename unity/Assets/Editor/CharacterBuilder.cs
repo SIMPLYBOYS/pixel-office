@@ -90,12 +90,40 @@ public static class CharacterBuilder
         bubbleSr.sortingOrder = 50;
         bubbleSr.enabled = false;
 
+        // 頭上文字對話框（TextMesh 動態字型 + 9-slice 白底）
+        var speechGo = new GameObject("Speech");
+        speechGo.transform.SetParent(go.transform, false);
+        speechGo.transform.localPosition = new Vector3(0, 2.55f, 0);
+        var panelGo = new GameObject("Panel");
+        panelGo.transform.SetParent(speechGo.transform, false);
+        var panelSr = panelGo.AddComponent<SpriteRenderer>();
+        panelSr.sprite = FindSprite("speech_panel");
+        panelSr.drawMode = SpriteDrawMode.Sliced;
+        panelSr.sortingOrder = 59;
+        var textGo = new GameObject("Text");
+        textGo.transform.SetParent(speechGo.transform, false);
+        var tm = textGo.AddComponent<TextMesh>();
+        tm.font = Resources.GetBuiltinResource<Font>("LegacySystemFont.ttf");
+        tm.fontSize = 64;
+        tm.characterSize = 0.045f;
+        tm.anchor = TextAnchor.MiddleCenter;
+        tm.alignment = TextAlignment.Center;
+        tm.color = new Color32(45, 50, 68, 255);
+        textGo.GetComponent<MeshRenderer>().sharedMaterial = tm.font.material;
+        textGo.GetComponent<MeshRenderer>().sortingOrder = 60;
+        var speech = go.AddComponent<NPCSpeech>();
+        speech.text = tm;
+        speech.panel = panelSr;
+        panelGo.SetActive(false);
+        textGo.SetActive(false);
+
         var agent = go.AddComponent<NPCAgent>();
         agent.agentId = prefix;
         var meeting = go.AddComponent<NPCMeeting>();
         meeting.bubble = bubbleSr;
         meeting.body = body;
         go.AddComponent<FakeBrain>();
+        go.AddComponent<NPCSeparation>();
 
         if (!AssetDatabase.IsValidFolder("Assets/Prefabs"))
             AssetDatabase.CreateFolder("Assets", "Prefabs");

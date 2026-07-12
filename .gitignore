@@ -17,3 +17,13 @@ unity/*.sln
 .DS_Store
 __pycache__/
 .venv/
+.env
+
+# 根目錄 Unity 誤開殘骸防護（真專案在 unity/）
+/Assets/
+/Library/
+/Logs/
+/Packages/
+/ProjectSettings/
+/UserSettings/
+/Temp/

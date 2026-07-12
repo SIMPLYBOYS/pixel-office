@@ -32,15 +32,20 @@ public class NPCAgent : MonoBehaviour
                 }
                 mover.MoveTo(wp.pos.position);
                 yield return new WaitUntil(() => mover.Arrived);
-                // ponytail: 之後接 WebSocket，在這裡回報 {type:"arrived", agent_id, at}
+                // 到點自動執行該點動作（入座是身體知識，不需要大腦下指令）
+                if (wp.action != null) sprite.SetAction(wp.action);
                 break;
 
             case "use": // target = 動作名（sit_up / sit_left / sit_right）
                 sprite.SetAction(cmd.target);
                 break;
 
-            case "say": // demo 階段用泡泡表示；接 UGUI 聊天面板時改推 cmd.text
-                if (meeting != null) yield return meeting.ShowBubble(3f);
+            case "say": // 有文字顯示文字框，沒文字退回「...」泡泡
+                var speech = GetComponent<NPCSpeech>();
+                if (speech != null && !string.IsNullOrEmpty(cmd.text))
+                    speech.Show(cmd.text);
+                else if (meeting != null)
+                    yield return meeting.ShowBubble(3f);
                 break;
         }
     }
