@@ -2,6 +2,7 @@
 
 decide() 用 strict tools + tool_choice=any → 每次必回一個合法動作 JSON，
 Unity 直接執行不用防錯。無 API key 或呼叫失敗時由呼叫端退回隨機走動。
+decide_reply() 是對話迴圈專用的輕量決策：回一句（reply）或離開（leave）。
 """
 from collections import deque
 from pathlib import Path
@@ -16,16 +17,27 @@ WORLD_RULES = """你是一個像素風辦公室模擬遊戲裡的員工 NPC。�
 行為準則：
 - 像真實上班族一樣過一天：大部分時間在工位工作，偶爾喝水、印文件、走動休息。
 - 依你的人設行動，行程要有變化，不要機械地重複同一件事。
-- say 的內容會顯示成頭上的對話泡泡，要非常簡短（15 字以內），像自言自語或打招呼。
-- 不需要每次決策都說話，安靜做事是常態。
+- say 的內容會顯示成頭上的對話泡泡，要非常簡短（15 字以內）。
+- say 可以指定對象（to）搭話開啟對話，也可以不指定、當成自言自語。
+- 不需要每次決策都說話，安靜做事是常態；但偶爾跟同事互動會讓辦公室更有生氣。
 """
 
 # ponytail: system 總長遠低於 opus-4-8 的 4096 token 快取門檻，cache_control 目前不會生效；
 # 世界觀寫豐富之後自動開始省錢（見 claude-api skill 的 prompt-caching 說明）
 
 
-def build_tools(waypoints: list[str]) -> list[dict]:
-    """依 Unity 握手送來的 waypoint 清單動態生成 strict tools。"""
+def build_tools(waypoints: list[str], colleagues: list[str]) -> list[dict]:
+    """依 Unity 握手的 waypoint 清單 + 同事名單，為單一 agent 生成 strict tools。"""
+    say_props: dict = {
+        "channel": {"type": "string", "enum": ["public"]},
+        "text": {"type": "string"},
+    }
+    if colleagues:
+        say_props["to"] = {
+            "type": "string",
+            "enum": colleagues,
+            "description": "對誰說（指定了就是搭話，會展開對話；省略＝自言自語）",
+        }
     return [
         {
             "name": "move_to",
@@ -44,10 +56,7 @@ def build_tools(waypoints: list[str]) -> list[dict]:
             "strict": True,
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "channel": {"type": "string", "enum": ["public"]},
-                    "text": {"type": "string"},
-                },
+                "properties": say_props,
                 "required": ["channel", "text"],
                 "additionalProperties": False,
             },
@@ -65,6 +74,31 @@ def build_tools(waypoints: list[str]) -> list[dict]:
     ]
 
 
+REPLY_TOOLS = [
+    {
+        "name": "reply",
+        "description": "回一句話（15 字以內）",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "leave",
+        "description": "不想聊了，結束這段對話",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+]
+
+
 class Agent:
     def __init__(self, agent_id: str, persona_dir: Path):
         self.id = agent_id
@@ -72,6 +106,10 @@ class Agent:
         self.memory: deque[str] = deque(maxlen=12)
         path = persona_dir / f"{agent_id}.yaml"
         self.persona = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    @property
+    def name(self) -> str:
+        return self.persona.get("name", self.id)
 
     @property
     def persona_prompt(self) -> str:
@@ -88,32 +126,61 @@ class Agent:
     def remember(self, event: str) -> None:
         self.memory.append(event)
 
+    def _system(self) -> list[dict]:
+        return [{
+            "type": "text",
+            "text": WORLD_RULES + self.persona_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    @property
+    def recent(self) -> str:
+        return "；".join(self.memory) if self.memory else "（剛上班，還沒做什麼）"
+
     async def decide(self, client, tools: list[dict], others: str = "") -> list[dict]:
-        """回傳 [{"action": "move_to", "target": ...}, ...]"""
-        recent = "；".join(self.memory) if self.memory else "（剛上班，還沒做什麼）"
+        """例行決策。回傳 [{"action": "move_to", "target": ...}, ...]"""
         resp = await client.messages.create(
             model=MODEL,
             max_tokens=512,
             output_config={"effort": "low"},  # 例行決策用 low（架構指南第 4 節）
-            system=[{
-                "type": "text",
-                "text": WORLD_RULES + self.persona_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
+            system=self._system(),
             tools=tools,
             tool_choice={"type": "any"},  # 每次必須選一個動作
             messages=[{
                 "role": "user",
                 "content": (
                     f"同事動態：{others or '不清楚'}\n"
-                    f"最近記憶：{recent}\n"
+                    f"最近記憶：{self.recent}\n"
                     f"你現在位於：{self.location}\n"
                     "決定接下來要做什麼。同事在的位置不要過去擠。"
                 ),
             }],
         )
-        actions = []
-        for block in resp.content:
-            if block.type == "tool_use":
-                actions.append({"action": block.name, **block.input})
-        return actions
+        return [
+            {"action": b.name, **b.input}
+            for b in resp.content
+            if b.type == "tool_use"
+        ]
+
+    async def decide_reply(self, client, other_name: str, line: str) -> dict | None:
+        """對話迴圈的輕量決策：對方說了 line，回一句或離開。"""
+        resp = await client.messages.create(
+            model=MODEL,
+            max_tokens=256,
+            output_config={"effort": "low"},
+            system=self._system(),
+            tools=REPLY_TOOLS,
+            tool_choice={"type": "any"},
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"你正在和{other_name}對話。{other_name}剛對你說：「{line}」\n"
+                    f"最近記憶：{self.recent}\n"
+                    "用你的說話風格回一句（15 字以內），或不想聊就結束對話。"
+                ),
+            }],
+        )
+        for b in resp.content:
+            if b.type == "tool_use":
+                return {"action": b.name, **b.input}
+        return None
