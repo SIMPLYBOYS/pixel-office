@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import random
+import re
 from pathlib import Path
 
 import anthropic
@@ -230,6 +231,59 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                     await converse(a, target_agent, text)
 
         await asyncio.sleep(random.uniform(*DECISION_INTERVAL))
+
+
+# ── Office 投影：cogito-agent 真工作事件 → 像素辦公室狀態（概念筆記 §十）────────
+# 契約（cogito 側 OfficeReporter 同步維護）：
+#   POST /office/event {"agent":"p17","kind":"...","label":"...","detail":"..."}
+#   kind ∈ start/turn/think/tool/result/error/msg/done
+# 投影表：start→走工位坐下+泡任務、tool→泡「▸工具」、error→泡「✗工具」、
+#   msg→泡內容、done→泡收工+釋放；think/turn/result 不投影（太吵）。
+# 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
+WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3"}  # 上工的固定工位
+SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
+
+
+def office_bubble(kind: str, label: str) -> str | None:
+    """事件 → NPC 頭上泡泡文字；None＝這種事件不冒泡。"""
+    sub = SUB_RE.match(label)
+    if sub:  # 子 agent 的工具事件：同一 NPC 冒泡，帶小名（Phase 2 才映射成第二個 NPC）
+        label = f"{sub.group(1) or '手下'}·{SUB_RE.sub('', label)}"
+    if kind == "start":
+        return f"📋 {label[:40]}"
+    if kind == "tool":
+        return f"▸ {label[:40]}"
+    if kind == "error":
+        return f"✗ {label[:40]}"
+    if kind == "msg":
+        return label[:60]
+    if kind == "done":
+        return "✔ 任務完成" if label == "ok" else "✗ 任務中斷"
+    return None
+
+
+@app.post("/office/event")
+async def office_event(ev: dict):
+    aid, kind, label = ev.get("agent", ""), ev.get("kind", ""), ev.get("label", "")
+    if unity is None or aid not in agents:
+        return {"ok": False, "error": "Unity 未連線或不認識這個 agent"}
+    a = agents[aid]
+
+    if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
+        busy.add(aid)
+        desk = WORK_DESK.get(aid)
+        if desk:
+            occupied[aid] = desk
+            await send_cmd({"agent_id": aid, "action": "move_to", "target": desk})
+        a.remember(f"接到工作任務「{label}」，開始上工")
+    elif kind == "done":  # 收工：回歸生活模擬（人留在工位，之後自己決定去哪）
+        busy.discard(aid)
+        a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+
+    text = office_bubble(kind, label)
+    if text:
+        await send_cmd({"agent_id": aid, "action": "say", "channel": "public", "text": text})
+    return {"ok": True}
 
 
 @app.post("/cmd")
