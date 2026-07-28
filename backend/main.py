@@ -43,7 +43,13 @@ client = anthropic.AsyncAnthropic() if os.environ.get("ANTHROPIC_API_KEY") else 
 if client is None:
     print("⚠ 未設定 ANTHROPIC_API_KEY——agent 將隨機走動（合約測試模式）")
 
+# 純投影模式（OFFICE_MODE=projection）：生活大腦（Claude 決策/對話）停用，NPC 平時
+# 零成本 idle（偶爾隨機走動），只有 /office/event 的真工作事件驅動行為。
+# 生活模擬代碼保留不刪——平台方向完全確定後再清場（概念筆記 §九 決策方向反轉）。
+PROJECTION = os.environ.get("OFFICE_MODE") == "projection"
+
 DECISION_INTERVAL = (8.0, 25.0)  # 決策間隔秒數範圍（拉長省成本、縮短加快節奏）
+IDLE_INTERVAL = (45.0, 120.0)    # 純投影模式的 idle 走動間隔（點綴用，別太熱鬧）
 MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強制結束）
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 
@@ -91,7 +97,10 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         colleagues = [o.name for oid, o in agents.items() if oid != aid]
         tools = build_tools(waypoints, colleagues)
         loops.append(asyncio.create_task(agent_loop(a, tools)))
-    mode = "Claude 決策" if client else "隨機走動（無 API key）"
+    if PROJECTION:
+        mode = "純投影（生活大腦停用，idle 走動）"
+    else:
+        mode = "Claude 決策" if client else "隨機走動（無 API key）"
     print(f"啟動 {len(agent_ids)} 個 agent（{mode}），{len(waypoints)} 個互動點")
 
 
@@ -177,9 +186,9 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
             await asyncio.sleep(1.0)
 
         try:
-            if client is not None:
+            if client is not None and not PROJECTION:
                 actions = await a.decide(client, tools, others_desc(a))
-            else:
+            else:  # 零成本 idle：不打 API，偶爾走動點綴
                 actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
         except Exception as e:
             print(f"⚠ {a.id} decide 失敗（{type(e).__name__}: {e}），隨機走")
@@ -230,7 +239,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 if target_agent and target_agent.id not in busy and client is not None:
                     await converse(a, target_agent, text)
 
-        await asyncio.sleep(random.uniform(*DECISION_INTERVAL))
+        await asyncio.sleep(random.uniform(*(IDLE_INTERVAL if PROJECTION else DECISION_INTERVAL)))
 
 
 # ── Office 投影：cogito-agent 真工作事件 → 像素辦公室狀態（概念筆記 §十）────────

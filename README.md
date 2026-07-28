@@ -17,8 +17,13 @@ limezu/     LimeZu 授權素材與衍生物（不進 git，見下方「素材重
 
 ```bash
 cd backend
-.venv/bin/uvicorn main:app --port 8123
+.venv/bin/uvicorn main:app --port 8123                        # 生活模擬 demo 模式
+OFFICE_MODE=projection .venv/bin/uvicorn main:app --port 8123  # 純投影模式（接 cogito 真工作用）
 ```
+
+`OFFICE_MODE=projection`：生活大腦（Claude 決策閒逛/搭話）停用，NPC 平時零成本 idle
+（偶爾隨機走動），只有 cogito 的 `/office/event` 工作事件驅動行為——接真工作時用這個，
+不燒 API、狀態畫面也不被閒逛污染。
 
 啟動時若印出「⚠ 未設定 ANTHROPIC_API_KEY」代表 `.env` 沒讀到（見下方一次性設定）——
 此模式 NPC 仍會動，但退化成隨機走動。
