@@ -17,13 +17,15 @@ limezu/     LimeZu 授權素材與衍生物（不進 git，見下方「素材重
 
 ```bash
 cd backend
-.venv/bin/uvicorn main:app --port 8123                        # 生活模擬 demo 模式
-OFFICE_MODE=projection .venv/bin/uvicorn main:app --port 8123  # 純投影模式（接 cogito 真工作用）
+.venv/bin/uvicorn main:app --port 8123
 ```
 
-`OFFICE_MODE=projection`：生活大腦（Claude 決策閒逛/搭話）停用，NPC 平時零成本 idle
-（偶爾隨機走動），只有 cogito 的 `/office/event` 工作事件驅動行為——接真工作時用這個，
-不燒 API、狀態畫面也不被閒逛污染。
+模式由 `backend/.env` 的 `OFFICE_MODE` 決定（`load_dotenv` 自動載入）：
+- `OFFICE_MODE=projection`（預設建議）：生活大腦（Claude 決策閒逛/搭話）停用，NPC 平時
+  零成本 idle（偶爾隨機走動），只有 cogito 的 `/office/event` 工作事件驅動行為——
+  接真工作用這個，不燒 API、狀態畫面也不被閒逛污染。
+- 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
+- 判準：啟動連上 Unity 後印「啟動 3 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
 
 啟動時若印出「⚠ 未設定 ANTHROPIC_API_KEY」代表 `.env` 沒讀到（見下方一次性設定）——
 此模式 NPC 仍會動，但退化成隨機走動。

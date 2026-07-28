@@ -112,6 +112,7 @@ def stop_agents() -> None:
     arrived.clear()
     occupied.clear()
     busy.clear()
+    sub_active.clear()
 
 
 def find_by_name(name: str | None) -> Agent | None:
@@ -253,10 +254,14 @@ WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3"}  # 上工的�
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
+def say(aid: str, text: str) -> dict:
+    return {"agent_id": aid, "action": "say", "channel": "public", "text": text}
+
+
 def office_bubble(kind: str, label: str) -> str | None:
     """事件 → NPC 頭上泡泡文字；None＝這種事件不冒泡。"""
     sub = SUB_RE.match(label)
-    if sub:  # 子 agent 的工具事件：同一 NPC 冒泡，帶小名（Phase 2 才映射成第二個 NPC）
+    if sub:  # 走到這代表委派沒開成卡（沒人有空）：退回主 agent 冒泡帶小名
         label = f"{sub.group(1) or '手下'}·{SUB_RE.sub('', label)}"
     if kind == "start":
         return f"📋 {label[:40]}"
@@ -271,12 +276,73 @@ def office_bubble(kind: str, label: str) -> str | None:
     return None
 
 
+# 子 agent 投影（§十-1 第二刀）：spawn 具名 agent 映射到閒置 NPC 真走位——
+# 阿哲委派 code-reviewer，小美就起身入座開工；內部事件泡泡掛到她頭上，收工冒回報泡。
+# 沒人有空時退回舊行為（主 agent 頭上帶小名冒泡）。cogito / Unity 零改動。
+SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07"}  # 慣用人選
+SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
+sub_active: dict[tuple[str, str], str] = {}  # (主 agent, 子 agent 名) -> 演出的 NPC
+
+
+def pick_sub_npc(parent: str, name: str) -> str | None:
+    free = [x for x in agents if x != parent and x not in busy]
+    cand = SUB_NPC.get(name)
+    if cand in free:
+        return cand
+    return free[0] if free else None
+
+
+async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
+    """子 agent 事件分流；回傳 True＝已投影完畢（主流程不再處理）。"""
+    spawn = SPAWN_RE.match(label)
+    if spawn:
+        name = spawn.group(1) or ""  # 無名子 agent（探路者）兩側都正規化成 ""
+        shown = name or "探路者"
+        if kind == "tool":  # 委派上工
+            npc = pick_sub_npc(parent, name)
+            if npc is None:
+                return False  # 沒人有空：主 agent 頭上冒泡就好
+            sub_active[(parent, name)] = npc
+            busy.add(npc)
+            desk = WORK_DESK.get(npc)
+            if desk:
+                occupied[npc] = desk
+                await send_cmd({"agent_id": npc, "action": "move_to", "target": desk})
+            await send_cmd(say(parent, f"🤝 委派 {shown}"))
+            await send_cmd(say(npc, f"📋 支援{agents[parent].name}：{shown}"))
+            agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
+            return True
+        if kind in ("result", "error"):  # 委派收工
+            npc = sub_active.pop((parent, name), None)
+            if npc is None:
+                return False
+            busy.discard(npc)
+            mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
+            await send_cmd(say(npc, f"{mark}{detail[:36]}"))
+            agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
+            return True
+        return True  # spawn 的其他事件不投影
+    sub = SUB_RE.match(label)
+    if sub:
+        npc = sub_active.get((parent, sub.group(1) or ""))
+        if npc is None:
+            return False  # 沒開成卡：退回主 agent 帶小名冒泡
+        text = office_bubble(kind, SUB_RE.sub("", label))
+        if text:
+            await send_cmd(say(npc, text))
+        return True
+    return False
+
+
 @app.post("/office/event")
 async def office_event(ev: dict):
     aid, kind, label = ev.get("agent", ""), ev.get("kind", ""), ev.get("label", "")
     if unity is None or aid not in agents:
         return {"ok": False, "error": "Unity 未連線或不認識這個 agent"}
     a = agents[aid]
+
+    if await project_sub(aid, kind, label, ev.get("detail", "")):
+        return {"ok": True}
 
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
@@ -287,11 +353,13 @@ async def office_event(ev: dict):
         a.remember(f"接到工作任務「{label}」，開始上工")
     elif kind == "done":  # 收工：回歸生活模擬（人留在工位，之後自己決定去哪）
         busy.discard(aid)
+        for key in [k for k in sub_active if k[0] == aid]:  # 主任務結束，收掉沒關的委派卡
+            busy.discard(sub_active.pop(key))
         a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
 
     text = office_bubble(kind, label)
     if text:
-        await send_cmd({"agent_id": aid, "action": "say", "channel": "public", "text": text})
+        await send_cmd(say(aid, text))
     return {"ok": True}
 
 
