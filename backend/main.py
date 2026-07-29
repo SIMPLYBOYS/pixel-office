@@ -300,11 +300,18 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 #   msg→泡內容、done→泡收工+釋放；think/turn/result 不投影（太吵）。
 # 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
 WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3"}  # 上工的固定工位
+BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
 def say(aid: str, text: str) -> dict:
     return {"agent_id": aid, "action": "say", "channel": "public", "text": text}
+
+
+async def goto(aid: str, target: str) -> None:
+    """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。"""
+    occupied[aid] = target
+    await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
 
 
 # ── 投影泡泡節流：每個 NPC 一條佇列 + 播報器，最小間隔 BUBBLE_GAP。
@@ -413,10 +420,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             busy.add(npc)
             notify("roster")
             report_card(npc, f"支援{agents[parent].name}：{shown}")
-            desk = WORK_DESK.get(npc)
-            if desk:
-                occupied[npc] = desk
-                await send_cmd({"agent_id": npc, "action": "move_to", "target": desk})
+            if desk := WORK_DESK.get(npc):
+                await goto(npc, desk)
             await bubble(parent, f"🤝 委派 {shown}")
             await bubble(npc, f"📋 支援{agents[parent].name}：{shown}")
             log_ev(parent, f"🤝 委派 {shown}")
@@ -545,15 +550,18 @@ async def office_event(ev: dict):
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
 
+    # 審批逾時（自動拒絕）後工作恢復：人還杵在老闆房門口，看到工具事件就自己回工位
+    if kind == "tool" and aid not in pending_approval and occupied.get(aid) == BOSS_DOOR:
+        if desk := WORK_DESK.get(aid):
+            await goto(aid, desk)
+
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
         notify("roster")
         report_card(aid, label)
         log_ev(aid, f"📋 接到任務：{label}")
-        desk = WORK_DESK.get(aid)
-        if desk:
-            occupied[aid] = desk
-            await send_cmd({"agent_id": aid, "action": "move_to", "target": desk})
+        if desk := WORK_DESK.get(aid):
+            await goto(aid, desk)
         a.remember(f"接到工作任務「{label}」，開始上工")
     elif kind == "msg":  # 報告全文進卡（泡泡另外截短）
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
@@ -616,6 +624,13 @@ async def office_chat(ev: dict):
         return {"ok": True}
     if text.startswith(APPROVAL_PREFIX):
         pending_approval[aid] = text
+        # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
+        busy.add(aid)
+        work_last[aid] = time.monotonic()
+        notify("roster")
+        # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）
+        if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
+            await goto(aid, BOSS_DOOR)
         await bubble(aid, "🚨 等老闆審批中…")
     log_ev(aid, f"💬 {text[:300]}")
     return {"ok": True}
@@ -666,9 +681,14 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
     if r.status_code != 202:
         return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}"}
-    if text.split()[0] in ("approve", "reject"):
+    verb = text.split()[0]
+    if verb in ("approve", "reject"):
         pending_approval.pop(aid, None)  # cogito 確認收到才收卡
         notify("agent", aid)
+        await bubble(aid, "✅ 老闆放行，繼續" if verb == "approve" else "⛔ 老闆駁回")
+        log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")
+        if desk := WORK_DESK.get(aid):  # 審批完回工位繼續
+            await goto(aid, desk)
     else:
         log_ev(aid, f"🧑‍💼 老闆交辦：{text[:200]}")
     return {"ok": True}
@@ -690,6 +710,7 @@ def get_events():
 def get_agents():
     return {
         aid: {"name": a.name, "role": a.persona.get("role", "員工"),
+              "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
               "memory": list(a.memory)}
         for aid, a in agents.items()
@@ -698,7 +719,7 @@ def get_agents():
 
 # ── 持久化：任務卡/黏性指派/審批卡落地 JSON——橋重啟不失憶（cogito 的 session 本來就落地，
 # 這邊補齊對稱）。notify() 兼作 dirty 標記，存檔器每 2 秒批次寫（原子寫入：tmp + rename）。
-STATE_FILE = Path(__file__).parent / "office_state.json"
+STATE_FILE = Path(os.environ.get("OFFICE_STATE") or Path(__file__).parent / "office_state.json")
 
 
 def save_state() -> None:
@@ -772,3 +793,9 @@ if _WEBGL.exists():
 else:
     print("ℹ 尚無 WebGL build（unity/Builds/WebGL）——/shell 中間畫布會提示先去 Unity 建置")
 app.mount("/shell", StaticFiles(directory=_ROOT / "web", html=True), name="shell")
+# 名冊頭像（LimeZu 衍生物，不進 git）：跑 tools/make_avatars.py 產生；沒有就用文字頭像頂替
+_AVATARS = Path(__file__).parent / "avatars"
+if _AVATARS.exists():
+    app.mount("/avatars", StaticFiles(directory=_AVATARS), name="avatars")
+else:
+    print("ℹ 尚無名冊頭像——跑 python3 tools/make_avatars.py 產生（外殼先用文字頭像）")

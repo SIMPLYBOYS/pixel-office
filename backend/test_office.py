@@ -24,6 +24,25 @@ async def _no_life(a, tools):  # 生活迴圈替身：測試只看投影指令
     pass
 
 
+class _FakeResp:
+    status_code, text = 202, ""
+
+
+class _FakeHTTP:  # cogito 入口替身：dispatch 只驗辦公室投影，不真的送任務
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, *a, **k):
+        return _FakeResp()
+
+
+def _fake_client(**kw):
+    return _FakeHTTP()
+
+
 def run() -> None:
     main.client = None
     main.agent_loop = _no_life
@@ -178,12 +197,34 @@ def run() -> None:
                           "text": "🛠️ *正在執行工具*：`bash`"}).json()["ok"]
             appr = "⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `bash`\n任務 ID: `T1`"
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
+            # HITL 投影：走到老闆房門口站著等
+            assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
             assert recv(ws)["text"] == "🚨 等老闆審批中…"
+            assert main.occupied["p07"] == "boss_1"
+            assert "p07" in main.busy  # 等審批＝工作中，生活迴圈不得插隊蓋掉罰站走位
             r = c.get("/office/report/p07").json()
             assert r["approval"].startswith("⚠️ *高危操作審批請求*")
             tl = [e["text"] for e in r["timeline"]]
             assert not any("正在執行工具" in x for x in tl)  # 進度類已濾
             assert any(x.startswith("💬 ⚠️") for x in tl)
+
+            # 老闆核准 → 冒放行泡＋走回工位（cogito 入口用假的，只驗投影）
+            main.httpx.AsyncClient = _fake_client
+            main.COGITO_HTTP = "http://fake"
+            assert c.post("/office/dispatch", json={"agent": "p07", "text": "approve"}).json()["ok"]
+            got = {json.dumps(recv(ws), ensure_ascii=False, sort_keys=True) for _ in range(2)}
+            assert got == {
+                json.dumps({"agent_id": "p07", "action": "move_to", "target": "chair_3"},
+                           ensure_ascii=False, sort_keys=True),
+                json.dumps(main.say("p07", "✅ 老闆放行，繼續"), ensure_ascii=False, sort_keys=True)}
+            assert "p07" not in main.pending_approval and main.occupied["p07"] == "chair_3"
+
+            # 審批逾時後工作恢復：人還在老闆房門口 → 看到工具事件自己回工位
+            main.occupied["p07"] = "boss_1"
+            post(c, agent="office:p07", kind="tool", label="bash")
+            assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "chair_3"}
+            assert recv(ws)["text"] == "▸ bash"
+            main.COGITO_HTTP = ""
             # done 收掉殘留審批卡
             post(c, agent="office:p07", kind="done", label="error", detail="審批逾時")
             recv(ws)  # ✗ 任務中斷 泡

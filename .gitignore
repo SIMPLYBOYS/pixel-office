@@ -41,3 +41,6 @@ backend/office_state.tmp
 
 # Playwright MCP 診斷產物（截圖/console log）
 .playwright-mcp/
+
+# 名冊頭像（LimeZu 衍生物，跑 tools/make_avatars.py 重生）
+backend/avatars/
