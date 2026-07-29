@@ -457,9 +457,12 @@ def close_card(aid: str, status: str) -> None:
 # ── SSE 推播（失效通知模式）：只推「誰變了」，畫面收到再回抓既有 API——
 # 單一資料權威（GET endpoints），不維護第二條全量資料路徑。
 subscribers: set[asyncio.Queue] = set()
+_dirty = False  # 有狀態變更待落地（存檔器每 2 秒巡）
 
 
 def notify(kind: str, aid: str = "") -> None:
+    global _dirty
+    _dirty = True  # 所有狀態變更都會走到 notify——持久化搭同一班車
     for q in list(subscribers):
         if q.qsize() < 100:  # 塞爆代表客戶端死了，丟事件等它斷線清理
             q.put_nowait({"type": kind, "id": aid})
@@ -657,6 +660,70 @@ def get_agents():
               "memory": list(a.memory)}
         for aid, a in agents.items()
     }
+
+
+# ── 持久化：任務卡/黏性指派/審批卡落地 JSON——橋重啟不失憶（cogito 的 session 本來就落地，
+# 這邊補齊對稱）。notify() 兼作 dirty 標記，存檔器每 2 秒批次寫（原子寫入：tmp + rename）。
+STATE_FILE = Path(__file__).parent / "office_state.json"
+
+
+def save_state() -> None:
+    global _dirty
+    _dirty = False
+    data = {"history": {a: list(cards) for a, cards in history.items()},
+            "conv_npc": conv_npc, "pending_approval": pending_approval}
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+
+def load_state() -> None:
+    if not STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"⚠ 工作紀錄載入失敗（忽略舊檔）：{e}")
+        return
+    for aid, cards in data.get("history", {}).items():
+        history[aid] = deque(cards, maxlen=20)
+        if cards:
+            last_report[aid] = history[aid][-1]  # 重建「最新卡」指標
+    conv_npc.update(data.get("conv_npc", {}))
+    pending_approval.update(data.get("pending_approval", {}))
+    for aid, card in last_report.items():
+        if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
+            busy.add(aid)
+            work_last[aid] = time.monotonic()
+    n = sum(len(c) for c in history.values())
+    if n:
+        print(f"工作紀錄載入：{len(history)} 位員工、{n} 張任務卡")
+
+
+async def state_saver() -> None:
+    while True:
+        await asyncio.sleep(2.0)
+        if _dirty:
+            try:
+                save_state()
+            except OSError as e:
+                print(f"⚠ 工作紀錄存檔失敗：{e}")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    load_state()
+    # watchdog 脫鉤 Unity：純 Web 派工（不開 Unity）失聯保險也要在
+    global watchdog
+    if watchdog is None or watchdog.done():
+        watchdog = asyncio.create_task(work_watchdog())
+    asyncio.create_task(state_saver())
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    if _dirty:
+        save_state()  # Ctrl+C 前最後一趟
 
 
 load_roster()  # 名冊啟動即載：Web 外殼/派工不等 Unity

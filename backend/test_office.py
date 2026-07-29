@@ -6,6 +6,7 @@
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import main
 from fastapi.testclient import TestClient
@@ -27,6 +28,9 @@ def run() -> None:
     main.client = None
     main.agent_loop = _no_life
     main.COGITO_HTTP = ""  # 測試不真連 cogito 入口（.env 可能有設）
+    # 隔離持久化：不碰真的 office_state.json（否則測試互相汙染，也會弄髒開發環境）
+    main.STATE_FILE = Path(main.__file__).parent / "office_state_test.json"
+    main.STATE_FILE.unlink(missing_ok=True)
     main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
     main.WATCH_TICK = 0.2      # watchdog 巡快一點
     main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
@@ -197,6 +201,25 @@ def run() -> None:
             main.release_work("p17")
             assert q.get_nowait() == {"type": "roster", "id": ""}
             main.subscribers.discard(q)
+
+    # 持久化 roundtrip：存檔 → 清空記憶體 → 載回，任務卡/黏性指派/審批卡都回來
+    try:
+        main.pending_approval["p01"] = "⚠️ 待審批"
+        main.save_state()
+        snapshot = {a: [dict(t) for t in cards] for a, cards in main.history.items()}
+        conv_snapshot = dict(main.conv_npc)
+        main.history.clear(); main.last_report.clear()
+        main.conv_npc.clear(); main.pending_approval.clear()
+        main.busy.clear(); main.work_last.clear()
+        main.load_state()
+        assert {a: [dict(t) for t in cards] for a, cards in main.history.items()} == snapshot
+        assert main.conv_npc == conv_snapshot
+        assert main.pending_approval == {"p01": "⚠️ 待審批"}
+        # working 狀態的卡 → 復原 busy + watchdog 計時（重啟時任務可能還在跑）
+        working = [a for a, card in main.last_report.items() if card["status"] == "working"]
+        assert set(working) <= main.busy and set(working) <= set(main.work_last)
+    finally:
+        main.STATE_FILE.unlink(missing_ok=True)
 
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工）")
 
