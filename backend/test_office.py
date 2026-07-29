@@ -41,9 +41,7 @@ def run() -> None:
                 time.sleep(0.1)
             assert len(main.agents) == 3, "握手後 agents 未建立"
 
-            # 不認識的 agent → 拒收
-            assert post(c, agent="p99", kind="start", label="x")["ok"] is False
-
+            # （未知 id 不再拒收——那是頻道派工的入口，見文末；拒收只剩「員工派完」）
             # start：走工位 + 任務泡 + 掛起
             assert post(c, agent="p17", kind="start", label="盤點 repo 的 TODO")["ok"]
             assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
@@ -109,8 +107,35 @@ def run() -> None:
             main.WORK_TIMEOUT = 0.3  # 這時才開始算失聯
             assert recv(ws)["text"] == "✗ 任務失聯中斷"  # watchdog 巡到後自動冒泡
             assert "p17" not in main.busy and not main.work_last
+            main.WORK_TIMEOUT = 1e9  # 後面的頻道派工測試不要被失聯保險攪局
 
-    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險）")
+            # Slack 頻道派工：未知 id 黏性指派閒置 NPC
+            post(c, agent="slack:C999", kind="start", label="整理週報")
+            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
+            assert recv(ws)["text"] == "📋 整理週報"
+            assert main.conv_npc == {"slack:C999": "p17"}
+
+            # 第二個頻道同時上工 → 指派下一位閒置員工
+            post(c, agent="slack:C888", kind="start", label="另一頻道任務")
+            assert recv(ws)["agent_id"] == "p01"  # move_to
+            assert recv(ws)["text"] == "📋 另一頻道任務"
+            assert main.conv_npc["slack:C888"] == "p01"
+
+            post(c, agent="slack:C999", kind="done", label="ok")
+            m = recv(ws)
+            assert (m["agent_id"], m["text"]) == ("p17", "✔ 任務完成")
+            # 黏性：同頻道下一個事件仍是同一位員工
+            post(c, agent="slack:C999", kind="msg", label="補充一下週報格式")
+            m = recv(ws)
+            assert (m["agent_id"], m["text"]) == ("p17", "補充一下週報格式")
+
+            # 員工派完就拒收（任務照跑，只是辦公室演不了）
+            post(c, agent="slack:C777", kind="start", label="第三頻道")
+            assert recv(ws)["agent_id"] == "p07"  # 最後一位閒置員工（move_to）
+            assert recv(ws)["text"] == "📋 第三頻道"
+            assert post(c, agent="slack:C666", kind="start", label="沒人了")["ok"] is False
+
+    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工）")
 
 
 if __name__ == "__main__":

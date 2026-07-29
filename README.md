@@ -27,6 +27,11 @@ cd backend
 - 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
 - 判準：啟動連上 Unity 後印「啟動 3 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
 
+派工兩條路（可並用）：
+- **一次性（CLI）**：`claw-cli -office http://localhost:8123 -office-agent p17 -dir . -prompt "..."`
+- **常駐（Slack/Telegram bot）**：cogito bot 啟動時設 `COGITO_OFFICE_URL=http://localhost:8123`，
+  頻道派的任務自動投影——未知頻道 id 由橋動態指派閒置 NPC（黏性：同頻道固定同員工）。
+
 啟動時若印出「⚠ 未設定 ANTHROPIC_API_KEY」代表 `.env` 沒讀到（見下方一次性設定）——
 此模式 NPC 仍會動，但退化成隨機走動。
 

@@ -126,6 +126,7 @@ def stop_agents() -> None:
     work_last.clear()
     bubble_q.clear()
     pacers.clear()
+    conv_npc.clear()
 
 
 def find_by_name(name: str | None) -> Agent | None:
@@ -400,11 +401,30 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
     return False
 
 
+# Slack/Telegram 常駐派工（cogito chatbot Core）：事件的 agent 是頻道 id（"slack:C123"）
+# 而非 persona id。未知 id 動態指派一個閒置 NPC，黏性映射——同頻道固定同員工，橋重啟才重配。
+conv_npc: dict[str, str] = {}  # 頻道 id -> persona id
+
+
+def resolve_npc(ext: str) -> str | None:
+    if ext in agents:  # claw-cli 直接指名 persona，原路
+        return ext
+    if ext in conv_npc:
+        return conv_npc[ext]
+    free = [x for x in agents if x not in busy and x not in conv_npc.values()]
+    if not free:
+        return None  # 全員有主：事件丟棄（辦公室演不了，任務本身照跑）
+    conv_npc[ext] = free[0]
+    print(f"🪪 頻道 {ext} 指派給 {agents[free[0]].name}（{free[0]}）")
+    return free[0]
+
+
 @app.post("/office/event")
 async def office_event(ev: dict):
-    aid, kind, label = ev.get("agent", ""), ev.get("kind", ""), ev.get("label", "")
-    if unity is None or aid not in agents:
-        return {"ok": False, "error": "Unity 未連線或不認識這個 agent"}
+    kind, label = ev.get("kind", ""), ev.get("label", "")
+    aid = resolve_npc(ev.get("agent", ""))
+    if unity is None or aid is None:
+        return {"ok": False, "error": "Unity 未連線或沒有可指派的 NPC"}
     a = agents[aid]
 
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
