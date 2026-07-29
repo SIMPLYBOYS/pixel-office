@@ -27,6 +27,9 @@ cd backend
 - 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
 - 判準：啟動連上 Unity 後印「啟動 3 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
 
+看報告：Play 中**滑鼠點任一 NPC** 彈出他最近一次任務的報告卡（任務、狀態、報告全文；
+Esc 或點空白處關閉）。資料來自橋的 `GET /office/report/{id}`；深挖 artifacts 請開 claw-dashboard。
+
 派工兩條路（可並用）：
 - **一次性（CLI）**：`claw-cli -office http://localhost:8123 -office-agent p17 -dir . -prompt "..."`
 - **常駐（Slack/Telegram bot）**：cogito bot 啟動時設 `COGITO_OFFICE_URL=http://localhost:8123`，

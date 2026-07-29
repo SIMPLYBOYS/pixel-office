@@ -314,6 +314,9 @@ async def sweep_work() -> None:
     for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
         release_work(aid)
+        card = last_report.get(aid)
+        if card and card["status"] == "working":
+            card["status"] = "lost"
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
             await bubble(aid, "✗ 任務失聯中斷")
@@ -371,6 +374,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False  # 沒人有空：主 agent 頭上冒泡就好
             sub_active[(parent, name)] = npc
             busy.add(npc)
+            report_card(npc, f"支援{agents[parent].name}：{shown}")
             desk = WORK_DESK.get(npc)
             if desk:
                 occupied[npc] = desk
@@ -384,6 +388,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if npc is None:
                 return False
             busy.discard(npc)
+            card = last_report.get(npc)
+            if card:
+                card["status"] = "ok" if kind == "result" else "error"
+                card["report"] = detail
             mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
             await bubble(npc, f"{mark}{detail[:36]}")
             agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
@@ -404,6 +412,16 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
 # Slack/Telegram 常駐派工（cogito chatbot Core）：事件的 agent 是頻道 id（"slack:C123"）
 # 而非 persona id。未知 id 動態指派一個閒置 NPC，黏性映射——同頻道固定同員工，橋重啟才重配。
 conv_npc: dict[str, str] = {}  # 頻道 id -> persona id
+
+# 每位 NPC 最近一次任務的報告卡（Unity 點 NPC 經 GET /office/report/{aid} 查看）。
+# 刻意不隨 Unity 斷線清掉——工作紀錄比連線長壽。
+last_report: dict[str, dict] = {}
+
+
+def report_card(aid: str, task: str) -> dict:
+    card = {"task": task, "status": "working", "report": "", "at": time.strftime("%H:%M")}
+    last_report[aid] = card
+    return card
 
 
 def resolve_npc(ext: str) -> str | None:
@@ -435,12 +453,21 @@ async def office_event(ev: dict):
 
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
+        report_card(aid, label)
         desk = WORK_DESK.get(aid)
         if desk:
             occupied[aid] = desk
             await send_cmd({"agent_id": aid, "action": "move_to", "target": desk})
         a.remember(f"接到工作任務「{label}」，開始上工")
+    elif kind == "msg":  # 報告全文進卡（泡泡另外截短）
+        card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
+        card["report"] = label
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
+        card = last_report.get(aid)
+        if card:
+            card["status"] = "ok" if label == "ok" else "error"
+            if label != "ok" and ev.get("detail"):
+                card["report"] = card["report"] or ev["detail"]
         release_work(aid)
         a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
 
@@ -448,6 +475,16 @@ async def office_event(ev: dict):
     if text:
         await bubble(aid, text, collapsible=kind == "tool")
     return {"ok": True}
+
+
+@app.get("/office/report/{aid}")
+def office_report(aid: str):
+    """Unity 點 NPC 查看最近一次任務的報告卡。status: working/ok/error/lost。"""
+    card = last_report.get(aid)
+    if not card:
+        return {"ok": False, "error": "這位員工還沒有工作紀錄"}
+    name = agents[aid].name if aid in agents else aid
+    return {"ok": True, "agent": aid, "name": name, **card}
 
 
 @app.post("/cmd")

@@ -85,6 +85,9 @@ def run() -> None:
             assert (m["agent_id"], m["text"]) == ("p01", "✔ 回報：LGTM，無阻塞問題")
             assert "p01" not in main.busy
             assert any("委派" in x for x in main.agents["p01"].memory)
+            r = c.get("/office/report/p01").json()  # 委派也有報告卡
+            assert (r["task"], r["status"], r["report"]) == (
+                "支援阿哲：code-reviewer", "ok", "LGTM，無阻塞問題")
 
             # 無名子 agent（探路者）：兩側正規化成空名，一樣開卡
             post(c, agent="p17", kind="tool", label="spawn_subagent")
@@ -99,6 +102,11 @@ def run() -> None:
             assert not main.sub_active
             assert not main.work_last
             assert any("接到工作任務" in x for x in main.agents["p17"].memory)
+            r = c.get("/office/report/p17").json()  # 報告卡：任務 + 全文 + 狀態
+            assert r["ok"] and r["name"] == "阿哲"
+            assert (r["task"], r["status"], r["report"]) == (
+                "盤點 repo 的 TODO", "ok", "TODO 共 3 處，已列清單")
+            assert c.get("/office/report/nobody").json()["ok"] is False
 
             # 失聯保險：上工後 claw-cli 死掉（不發 done）→ watchdog 逾時釋放
             post(c, agent="p17", kind="start", label="會斷線的任務")
@@ -107,6 +115,8 @@ def run() -> None:
             main.WORK_TIMEOUT = 0.3  # 這時才開始算失聯
             assert recv(ws)["text"] == "✗ 任務失聯中斷"  # watchdog 巡到後自動冒泡
             assert "p17" not in main.busy and not main.work_last
+            r = c.get("/office/report/p17").json()
+            assert (r["task"], r["status"]) == ("會斷線的任務", "lost")
             main.WORK_TIMEOUT = 1e9  # 後面的頻道派工測試不要被失聯保險攪局
 
             # Slack 頻道派工：未知 id 黏性指派閒置 NPC
