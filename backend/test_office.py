@@ -3,6 +3,7 @@
 跑法：.venv/bin/python test_office.py
 不碰真 Unity、不叫 Claude API（生活迴圈整個 patch 掉，測試全確定性）。
 """
+import asyncio
 import json
 import time
 
@@ -25,6 +26,7 @@ async def _no_life(a, tools):  # 生活迴圈替身：測試只看投影指令
 def run() -> None:
     main.client = None
     main.agent_loop = _no_life
+    main.COGITO_HTTP = ""  # 測試不真連 cogito 入口（.env 可能有設）
     main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
     main.WATCH_TICK = 0.2      # watchdog 巡快一點
     main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
@@ -47,6 +49,12 @@ def run() -> None:
             assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
             assert recv(ws)["text"] == "📋 盤點 repo 的 TODO"
             assert "p17" in main.busy and main.occupied["p17"] == "chair_1"
+
+            # 防呆：工作中不收新任務；approve/reject 豁免（往下走到 COGITO_HTTP 檢查）
+            r = c.post("/office/dispatch", json={"agent": "p17", "text": "再派一件"}).json()
+            assert r["ok"] is False and "工作中" in r["error"]
+            r = c.post("/office/dispatch", json={"agent": "p17", "text": "approve"}).json()
+            assert r["ok"] is False and "COGITO_HTTP" in r["error"]
 
             # tool → ▸ 泡；think/turn/result 不投影（靠順序驗證：夾在中間不該出現）
             post(c, agent="p17", kind="think", label="")
@@ -112,7 +120,11 @@ def run() -> None:
             assert tl[0] == "📋 接到任務：盤點 repo 的 TODO"
             assert "▸ bash｜grep -rn TODO" in tl and "✓ bash" in tl
             assert "🤝 委派 code-reviewer" in tl and tl[-1] == "✔ 任務完成"
-            sub_tl = [e["text"] for e in c.get("/office/report/p01").json()["timeline"]]
+            p01 = c.get("/office/report/p01").json()
+            assert [t["task"] for t in p01["history"]] == [
+                "支援阿哲：code-reviewer", "支援阿哲：探路者"]  # 任務卡分組
+            assert [t["status"] for t in p01["history"]] == ["ok", "lost"]  # 探路者沒回報→lost
+            sub_tl = [e["text"] for t in p01["history"] for e in t["events"]]
             assert "📋 支援阿哲：code-reviewer" in sub_tl
             assert "▸ read_file" in sub_tl and "✔ 回報：LGTM，無阻塞問題" in sub_tl
 
@@ -127,31 +139,64 @@ def run() -> None:
             assert (r["task"], r["status"]) == ("會斷線的任務", "lost")
             main.WORK_TIMEOUT = 1e9  # 後面的頻道派工測試不要被失聯保險攪局
 
-            # Slack 頻道派工：未知 id 黏性指派閒置 NPC
+            # Slack 頻道派工：未知 id 黏性指派閒置 NPC（名冊字母序，p01 優先）
             post(c, agent="slack:C999", kind="start", label="整理週報")
-            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
+            assert recv(ws) == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
             assert recv(ws)["text"] == "📋 整理週報"
-            assert main.conv_npc == {"slack:C999": "p17"}
+            assert main.conv_npc == {"slack:C999": "p01"}
 
             # 第二個頻道同時上工 → 指派下一位閒置員工
             post(c, agent="slack:C888", kind="start", label="另一頻道任務")
-            assert recv(ws)["agent_id"] == "p01"  # move_to
+            assert recv(ws)["agent_id"] == "p07"  # move_to
             assert recv(ws)["text"] == "📋 另一頻道任務"
-            assert main.conv_npc["slack:C888"] == "p01"
+            assert main.conv_npc["slack:C888"] == "p07"
 
             post(c, agent="slack:C999", kind="done", label="ok")
             m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p17", "✔ 任務完成")
+            assert (m["agent_id"], m["text"]) == ("p01", "✔ 任務完成")
             # 黏性：同頻道下一個事件仍是同一位員工
             post(c, agent="slack:C999", kind="msg", label="補充一下週報格式")
             m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p17", "補充一下週報格式")
+            assert (m["agent_id"], m["text"]) == ("p01", "補充一下週報格式")
 
             # 員工派完就拒收（任務照跑，只是辦公室演不了）
             post(c, agent="slack:C777", kind="start", label="第三頻道")
-            assert recv(ws)["agent_id"] == "p07"  # 最後一位閒置員工（move_to）
+            assert recv(ws)["agent_id"] == "p17"  # 最後一位閒置員工（move_to）
             assert recv(ws)["text"] == "📋 第三頻道"
             assert post(c, agent="slack:C666", kind="start", label="沒人了")["ok"] is False
+
+            # office 平台（Web 派工）：conv=office:pXX 直接指名員工，不走動態指派
+            post(c, agent="office:p07", kind="msg", label="週報整理好了")
+            assert recv(ws)["text"] == "週報整理好了"
+
+            # /office/chat：進度類濾掉、審批卡設 pending + 泡泡、一般訊息進時間軸
+            assert c.post("/office/chat", json={"agent": "office:p07",
+                          "text": "🛠️ *正在執行工具*：`bash`"}).json()["ok"]
+            appr = "⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `bash`\n任務 ID: `T1`"
+            c.post("/office/chat", json={"agent": "office:p07", "text": appr})
+            assert recv(ws)["text"] == "🚨 等老闆審批中…"
+            r = c.get("/office/report/p07").json()
+            assert r["approval"].startswith("⚠️ *高危操作審批請求*")
+            tl = [e["text"] for e in r["timeline"]]
+            assert not any("正在執行工具" in x for x in tl)  # 進度類已濾
+            assert any(x.startswith("💬 ⚠️") for x in tl)
+            # done 收掉殘留審批卡
+            post(c, agent="office:p07", kind="done", label="error", detail="審批逾時")
+            recv(ws)  # ✗ 任務中斷 泡
+            assert c.get("/office/report/p07").json()["approval"] == ""
+
+            # dispatch：未設 COGITO_HTTP → 明確報錯不轉發
+            r = c.post("/office/dispatch", json={"agent": "p07", "text": "x"}).json()
+            assert r["ok"] is False and "COGITO_HTTP" in r["error"]
+
+            # SSE 失效通知：log_ev 推 agent、busy 變化推 roster
+            q = asyncio.Queue()
+            main.subscribers.add(q)
+            main.log_ev("p17", "測試事件")
+            assert q.get_nowait() == {"type": "agent", "id": "p17"}
+            main.release_work("p17")
+            assert q.get_nowait() == {"type": "roster", "id": ""}
+            main.subscribers.discard(q)
 
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工）")
 

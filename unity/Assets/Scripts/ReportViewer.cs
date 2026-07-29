@@ -29,7 +29,14 @@ public class ReportViewer : MonoBehaviour
     GUIStyle boxStyle, titleStyle, bodyStyle, dimStyle;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-    static void Boot() => new GameObject("ReportViewer").AddComponent<ReportViewer>();
+    static void Boot()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // WebGL 沒有 OS 動態字體（CJK 會變豆腐），且網頁版由 Web 外殼的右欄顯示報告——這裡不裝。
+#else
+        new GameObject("ReportViewer").AddComponent<ReportViewer>();
+#endif
+    }
 
     void Update()
     {

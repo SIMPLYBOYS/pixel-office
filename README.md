@@ -30,6 +30,20 @@ cd backend
 看報告：Play 中**滑鼠點任一 NPC** 彈出他最近一次任務的報告卡（任務、狀態、報告全文；
 Esc 或點空白處關閉）。資料來自橋的 `GET /office/report/{id}`；深挖 artifacts 請開 claw-dashboard。
 
+## 網頁版（Web 外殼，Pixffice 式佈局）
+
+1. Unity 選單 **Tools → Build WebGL (辦公室網頁版)**（一次即可，改場景才需重建；產物在
+   `unity/Builds/WebGL`，已 gitignore）
+2. 起後端後瀏覽器開 **http://localhost:8123/shell/** ——左側員工名冊（狀態燈）、中間像素
+   辦公室（WebGL）、右側工作串（時間軸即時滾動＋報告全文）
+3. 沒建置 WebGL 也能用：中間顯示提示，名冊和工作串照常運作（資料同源 `/agents`、`/office/report`）
+
+**從網頁派工**：點左側員工 → 下方輸入框描述任務 → Ctrl+Enter 交辦。前提是 cogito bot
+開了 HTTP 入口（cogito `.env`：`COGITO_HTTP_ADDR` + `COGITO_HTTP_TOKEN`、`office-web` 列入
+`COGITO_ALLOWED_USERS`；橋 `.env`：`COGITO_HTTP` + 同值 token）。高危操作會在右欄跳
+**審批卡**（核准/駁回按鈕），逾時自動拒絕。名冊不依賴 Unity——沒開 Unity 也能派工看進度，
+Unity 只是渲染面。
+
 派工兩條路（可並用）：
 - **一次性（CLI）**：`claw-cli -office http://localhost:8123 -office-agent p17 -dir . -prompt "..."`
 - **常駐（Slack/Telegram bot）**：cogito bot 啟動時設 `COGITO_OFFICE_URL=http://localhost:8123`，

@@ -24,8 +24,11 @@ from collections import deque
 from pathlib import Path
 
 import anthropic
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from agent import Agent, build_tools
 
@@ -91,14 +94,20 @@ async def handle_event(evt: dict) -> None:
         print("事件:", evt)
 
 
+def load_roster() -> None:
+    """名冊啟動即載（脫鉤 Unity）：Web 外殼/Slack 派工不需要 Unity 在線；Unity 只是渲染面。"""
+    persona_dir = Path(__file__).parent / "personas"
+    for f in sorted(persona_dir.glob("p*.yaml")):
+        agents[f.stem] = Agent(f.stem, persona_dir)
+        arrived[f.stem] = asyncio.Event()
+    print(f"名冊載入 {len(agents)} 位員工：{'、'.join(a.name for a in agents.values())}")
+
+
 def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
+    """Unity 握手：記 waypoint、開生活迴圈。名冊以 personas 為準（agent_ids 僅供對帳）。"""
     global waypoint_list
     stop_agents()
     waypoint_list = waypoints
-    persona_dir = Path(__file__).parent / "personas"
-    for aid in agent_ids:  # 先全部建好，才知道彼此名字
-        agents[aid] = Agent(aid, persona_dir)
-        arrived[aid] = asyncio.Event()
     for aid, a in agents.items():
         colleagues = [o.name for oid, o in agents.items() if oid != aid]
         tools = build_tools(waypoints, colleagues)
@@ -110,24 +119,22 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         mode = "純投影（生活大腦停用，idle 走動）"
     else:
         mode = "Claude 決策" if client else "隨機走動（無 API key）"
-    print(f"啟動 {len(agent_ids)} 個 agent（{mode}），{len(waypoints)} 個互動點")
+    print(f"啟動 {len(agents)} 個 agent（{mode}），{len(waypoints)} 個互動點")
 
 
 def stop_agents() -> None:
+    """Unity 斷線：收渲染面的東西；工作狀態（busy/work_last/委派/黏性指派）比連線長壽。"""
     for t in loops:
         t.cancel()
     for t in pacers.values():
         t.cancel()
     loops.clear()
-    agents.clear()
-    arrived.clear()
     occupied.clear()
-    busy.clear()
-    sub_active.clear()
-    work_last.clear()
     bubble_q.clear()
     pacers.clear()
-    conv_npc.clear()
+    keep = set(work_last) | set(sub_active.values())
+    busy.intersection_update(keep)  # 只清生活對話的 busy，工作中的不動
+    notify("roster")
 
 
 def find_by_name(name: str | None) -> Agent | None:
@@ -303,11 +310,14 @@ work_last: dict[str, float] = {}  # 上工中的 agent -> 最後事件時刻
 
 
 def release_work(aid: str) -> None:
-    """收工/失聯：釋放主 agent 與其名下所有委派卡。"""
+    """收工/失聯：釋放主 agent 與其名下所有委派卡（沒回報的委派標 lost，不留永久 working）。"""
     work_last.pop(aid, None)
     busy.discard(aid)
     for key in [k for k in sub_active if k[0] == aid]:
-        busy.discard(sub_active.pop(key))
+        npc = sub_active.pop(key)
+        busy.discard(npc)
+        close_card(npc, "lost")
+    notify("roster")
 
 
 async def sweep_work() -> None:
@@ -315,9 +325,7 @@ async def sweep_work() -> None:
     for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
         release_work(aid)
-        card = last_report.get(aid)
-        if card and card["status"] == "working":
-            card["status"] = "lost"
+        close_card(aid, "lost")
         log_ev(aid, "⚠ 任務失聯中斷")
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
@@ -376,6 +384,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False  # 沒人有空：主 agent 頭上冒泡就好
             sub_active[(parent, name)] = npc
             busy.add(npc)
+            notify("roster")
             report_card(npc, f"支援{agents[parent].name}：{shown}")
             desk = WORK_DESK.get(npc)
             if desk:
@@ -392,9 +401,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if npc is None:
                 return False
             busy.discard(npc)
+            notify("roster")
+            close_card(npc, "ok" if kind == "result" else "error")
             card = last_report.get(npc)
             if card:
-                card["status"] = "ok" if kind == "result" else "error"
                 card["report"] = detail
             mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
             await bubble(npc, f"{mark}{detail[:36]}")
@@ -422,23 +432,45 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
 # 而非 persona id。未知 id 動態指派一個閒置 NPC，黏性映射——同頻道固定同員工，橋重啟才重配。
 conv_npc: dict[str, str] = {}  # 頻道 id -> persona id
 
-# 每位 NPC 最近一次任務的報告卡（Unity 點 NPC 經 GET /office/report/{aid} 查看）。
-# 刻意不隨 Unity 斷線清掉——工作紀錄比連線長壽。
+# 工作紀錄按「任務卡」組織：每位 NPC 一串歷史卡（最多 20 張），每張卡自帶事件串。
+# last_report 指向進行中/最新的那張。刻意不隨 Unity 斷線清掉——工作紀錄比連線長壽。
 last_report: dict[str, dict] = {}
-
-# 每位 NPC 的事件時間軸（滾動日誌，跨任務累積）——資訊量對齊 Slack 的逐步回報。
-timeline: dict[str, deque] = {}
+history: dict[str, deque] = {}   # aid -> deque[任務卡]
+MAX_CARD_EVENTS = 150            # 單卡事件上限（工具連發截舊保新）
 
 
 def report_card(aid: str, task: str) -> dict:
-    card = {"task": task, "status": "working", "report": "", "at": time.strftime("%H:%M")}
+    card = {"task": task, "status": "working", "report": "", "events": [],
+            "at": time.strftime("%H:%M"), "end": ""}
+    history.setdefault(aid, deque(maxlen=20)).append(card)
     last_report[aid] = card
     return card
 
 
+def close_card(aid: str, status: str) -> None:
+    card = last_report.get(aid)
+    if card and card["status"] == "working":
+        card["status"] = status
+        card["end"] = time.strftime("%H:%M")
+
+
+# ── SSE 推播（失效通知模式）：只推「誰變了」，畫面收到再回抓既有 API——
+# 單一資料權威（GET endpoints），不維護第二條全量資料路徑。
+subscribers: set[asyncio.Queue] = set()
+
+
+def notify(kind: str, aid: str = "") -> None:
+    for q in list(subscribers):
+        if q.qsize() < 100:  # 塞爆代表客戶端死了，丟事件等它斷線清理
+            q.put_nowait({"type": kind, "id": aid})
+
+
 def log_ev(aid: str, text: str) -> None:
-    timeline.setdefault(aid, deque(maxlen=200)).append(
-        {"at": time.strftime("%H:%M:%S"), "text": text})
+    card = last_report.get(aid) or report_card(aid, "（雜項）")
+    card["events"].append({"at": time.strftime("%H:%M:%S"), "text": text})
+    if len(card["events"]) > MAX_CARD_EVENTS:
+        del card["events"][0]
+    notify("agent", aid)
 
 
 def tl_text(kind: str, label: str, detail: str) -> str | None:
@@ -457,6 +489,8 @@ def tl_text(kind: str, label: str, detail: str) -> str | None:
 def resolve_npc(ext: str) -> str | None:
     if ext in agents:  # claw-cli 直接指名 persona，原路
         return ext
+    if ext.startswith("office:") and ext.split(":", 1)[1] in agents:
+        return ext.split(":", 1)[1]  # Web 外殼派工：conv 就是指名的員工
     if ext in conv_npc:
         return conv_npc[ext]
     free = [x for x in agents if x not in busy and x not in conv_npc.values()]
@@ -471,8 +505,8 @@ def resolve_npc(ext: str) -> str | None:
 async def office_event(ev: dict):
     kind, label = ev.get("kind", ""), ev.get("label", "")
     aid = resolve_npc(ev.get("agent", ""))
-    if unity is None or aid is None:
-        return {"ok": False, "error": "Unity 未連線或沒有可指派的 NPC"}
+    if aid is None:  # Unity 不在線也照收：時間軸/報告卡是資料面，投影指令會自動 no-op
+        return {"ok": False, "error": "沒有可指派的 NPC"}
     a = agents[aid]
 
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
@@ -483,6 +517,7 @@ async def office_event(ev: dict):
 
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
+        notify("roster")
         report_card(aid, label)
         log_ev(aid, f"📋 接到任務：{label}")
         desk = WORK_DESK.get(aid)
@@ -495,11 +530,11 @@ async def office_event(ev: dict):
         card["report"] = label
         log_ev(aid, label[:200])
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
+        close_card(aid, "ok" if label == "ok" else "error")
         card = last_report.get(aid)
-        if card:
-            card["status"] = "ok" if label == "ok" else "error"
-            if label != "ok" and ev.get("detail"):
-                card["report"] = card["report"] or ev["detail"]
+        if card and label != "ok" and ev.get("detail"):
+            card["report"] = card["report"] or ev["detail"]
+        pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         release_work(aid)
         log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
         a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
@@ -521,13 +556,84 @@ async def office_event(ev: dict):
 
 @app.get("/office/report/{aid}")
 def office_report(aid: str):
-    """Unity 點 NPC 查看最近一次任務的報告卡。status: working/ok/error/lost。"""
+    """Unity/Web 點員工查看最近一次任務的報告卡。status: working/ok/error/lost。"""
     card = last_report.get(aid)
     if not card:
         return {"ok": False, "error": "這位員工還沒有工作紀錄"}
     name = agents[aid].name if aid in agents else aid
     return {"ok": True, "agent": aid, "name": name, **card,
-            "timeline": list(timeline.get(aid, []))}
+            "approval": pending_approval.get(aid, ""),
+            "timeline": card["events"],  # Unity ReportViewer 相容：最新卡的事件串
+            "history": list(history.get(aid, []))}
+
+
+# ── Web 派工與回訊（cogito 的 office 平台，cmd/claw 設 COGITO_HTTP_ADDR/TOKEN 開啟）────
+COGITO_HTTP = os.environ.get("COGITO_HTTP", "")          # cogito HTTP 入口，如 http://localhost:8787
+COGITO_HTTP_TOKEN = os.environ.get("COGITO_HTTP_TOKEN", "")
+APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot approval.go 的卡片開頭
+PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
+pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell 顯示核准/駁回按鈕）
+
+
+@app.post("/office/chat")
+async def office_chat(ev: dict):
+    """cogito office 平台的出訊（審批卡/完成/失敗訊息）→ 時間軸；進度類已由事件流投影，濾掉。"""
+    text = (ev.get("text") or "").strip()
+    aid = resolve_npc(ev.get("agent", ""))
+    if aid is None or not text:
+        return {"ok": False}
+    if text.startswith(PROGRESS_PREFIXES):
+        return {"ok": True}
+    if text.startswith(APPROVAL_PREFIX):
+        pending_approval[aid] = text
+        await bubble(aid, "🚨 等老闆審批中…")
+    log_ev(aid, f"💬 {text[:300]}")
+    return {"ok": True}
+
+
+@app.get("/office/stream")
+async def office_stream():
+    """SSE：狀態失效通知（roster / agent）。畫面收到再回抓 /agents、/office/report。"""
+    q: asyncio.Queue = asyncio.Queue()
+    subscribers.add(q)
+
+    async def gen():
+        try:
+            yield 'data: {"type":"hello"}\n\n'
+            while True:
+                ev = await q.get()
+                yield f"data: {json.dumps(ev)}\n\n"
+        finally:
+            subscribers.discard(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/office/dispatch")
+async def office_dispatch(d: dict):
+    """Web 外殼派工/審批 → 轉發 cogito HTTP 入口（token 在橋端，瀏覽器拿不到）。"""
+    aid, text = d.get("agent", ""), (d.get("text") or "").strip()
+    if aid not in agents or not text:
+        return {"ok": False, "error": "缺 agent 或 text"}
+    # 防呆：工作中不收新任務（cogito 也會擋，這裡先給即時回饋）；approve/reject 是任務中互動，放行
+    if aid in busy and text.split()[0] not in ("approve", "reject"):
+        return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
+    if not COGITO_HTTP:
+        return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": text},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
+    if r.status_code != 202:
+        return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}"}
+    if text.split()[0] in ("approve", "reject"):
+        pending_approval.pop(aid, None)  # cogito 確認收到才收卡
+        notify("agent", aid)
+    else:
+        log_ev(aid, f"🧑‍💼 老闆交辦：{text[:200]}")
+    return {"ok": True}
 
 
 @app.post("/cmd")
@@ -546,7 +652,22 @@ def get_events():
 @app.get("/agents")
 def get_agents():
     return {
-        aid: {"name": a.name, "location": a.location, "busy": aid in busy,
+        aid: {"name": a.name, "role": a.persona.get("role", "員工"),
+              "location": a.location, "busy": aid in busy,
               "memory": list(a.memory)}
         for aid, a in agents.items()
     }
+
+
+load_roster()  # 名冊啟動即載：Web 外殼/派工不等 Unity
+
+
+# ── Web 外殼（§十-5 里程碑）：/shell 是 Pixffice 式佈局頁；/unity 伺服 WebGL build
+# （Unity 選單 Tools → Build WebGL 產出）。同源伺服＝零 CORS 設定。
+_ROOT = Path(__file__).parent.parent
+_WEBGL = _ROOT / "unity" / "Builds" / "WebGL"
+if _WEBGL.exists():
+    app.mount("/unity", StaticFiles(directory=_WEBGL, html=True), name="unity")
+else:
+    print("ℹ 尚無 WebGL build（unity/Builds/WebGL）——/shell 中間畫布會提示先去 Unity 建置")
+app.mount("/shell", StaticFiles(directory=_ROOT / "web", html=True), name="shell")

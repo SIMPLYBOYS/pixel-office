@@ -27,3 +27,10 @@ __pycache__/
 /ProjectSettings/
 /UserSettings/
 /Temp/
+
+# WebGL 等建置產物（Tools → Build WebGL 輸出，由橋伺服）
+unity/Builds/
+
+# Unity 崩潰恢復暫存
+unity/Assets/_Recovery/
+unity/Assets/_Recovery.meta
