@@ -107,6 +107,14 @@ def run() -> None:
             assert (r["task"], r["status"], r["report"]) == (
                 "盤點 repo 的 TODO", "ok", "TODO 共 3 處，已列清單")
             assert c.get("/office/report/nobody").json()["ok"] is False
+            # 時間軸：逐步事件對齊 Slack 資訊量（接任務→工具→委派→收工）
+            tl = [e["text"] for e in r["timeline"]]
+            assert tl[0] == "📋 接到任務：盤點 repo 的 TODO"
+            assert "▸ bash｜grep -rn TODO" in tl and "✓ bash" in tl
+            assert "🤝 委派 code-reviewer" in tl and tl[-1] == "✔ 任務完成"
+            sub_tl = [e["text"] for e in c.get("/office/report/p01").json()["timeline"]]
+            assert "📋 支援阿哲：code-reviewer" in sub_tl
+            assert "▸ read_file" in sub_tl and "✔ 回報：LGTM，無阻塞問題" in sub_tl
 
             # 失聯保險：上工後 claw-cli 死掉（不發 done）→ watchdog 逾時釋放
             post(c, agent="p17", kind="start", label="會斷線的任務")

@@ -20,6 +20,7 @@ import os
 import random
 import re
 import time
+from collections import deque
 from pathlib import Path
 
 import anthropic
@@ -317,6 +318,7 @@ async def sweep_work() -> None:
         card = last_report.get(aid)
         if card and card["status"] == "working":
             card["status"] = "lost"
+        log_ev(aid, "⚠ 任務失聯中斷")
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
             await bubble(aid, "✗ 任務失聯中斷")
@@ -381,6 +383,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 await send_cmd({"agent_id": npc, "action": "move_to", "target": desk})
             await bubble(parent, f"🤝 委派 {shown}")
             await bubble(npc, f"📋 支援{agents[parent].name}：{shown}")
+            log_ev(parent, f"🤝 委派 {shown}")
+            log_ev(npc, f"📋 支援{agents[parent].name}：{shown}")
             agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
             return True
         if kind in ("result", "error"):  # 委派收工
@@ -394,6 +398,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 card["report"] = detail
             mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
             await bubble(npc, f"{mark}{detail[:36]}")
+            log_ev(npc, f"{mark}{detail[:200]}")
             agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
             return True
         return True  # spawn 的其他事件不投影
@@ -402,9 +407,13 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
         npc = sub_active.get((parent, sub.group(1) or ""))
         if npc is None:
             return False  # 沒開成卡：退回主 agent 帶小名冒泡
-        text = office_bubble(kind, SUB_RE.sub("", label))
+        stripped = SUB_RE.sub("", label)
+        text = office_bubble(kind, stripped)
         if text:
             await bubble(npc, text, collapsible=kind == "tool")
+        line = tl_text(kind, stripped, detail)
+        if line:
+            log_ev(npc, line)
         return True
     return False
 
@@ -417,11 +426,32 @@ conv_npc: dict[str, str] = {}  # 頻道 id -> persona id
 # 刻意不隨 Unity 斷線清掉——工作紀錄比連線長壽。
 last_report: dict[str, dict] = {}
 
+# 每位 NPC 的事件時間軸（滾動日誌，跨任務累積）——資訊量對齊 Slack 的逐步回報。
+timeline: dict[str, deque] = {}
+
 
 def report_card(aid: str, task: str) -> dict:
     card = {"task": task, "status": "working", "report": "", "at": time.strftime("%H:%M")}
     last_report[aid] = card
     return card
+
+
+def log_ev(aid: str, text: str) -> None:
+    timeline.setdefault(aid, deque(maxlen=200)).append(
+        {"at": time.strftime("%H:%M:%S"), "text": text})
+
+
+def tl_text(kind: str, label: str, detail: str) -> str | None:
+    """事件 → 時間軸一行；None＝不記（think/turn）。比泡泡完整（帶參數/結果預覽）。"""
+    if kind == "tool":
+        return f"▸ {label}" + (f"｜{detail[:80]}" if detail else "")
+    if kind == "result":
+        return f"✓ {label}"
+    if kind == "error":
+        return f"✗ {label}" + (f"：{detail[:120]}" if detail else "")
+    if kind == "msg":
+        return label[:200]
+    return None
 
 
 def resolve_npc(ext: str) -> str | None:
@@ -454,6 +484,7 @@ async def office_event(ev: dict):
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
         report_card(aid, label)
+        log_ev(aid, f"📋 接到任務：{label}")
         desk = WORK_DESK.get(aid)
         if desk:
             occupied[aid] = desk
@@ -462,6 +493,7 @@ async def office_event(ev: dict):
     elif kind == "msg":  # 報告全文進卡（泡泡另外截短）
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
         card["report"] = label
+        log_ev(aid, label[:200])
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
         card = last_report.get(aid)
         if card:
@@ -469,7 +501,17 @@ async def office_event(ev: dict):
             if label != "ok" and ev.get("detail"):
                 card["report"] = card["report"] or ev["detail"]
         release_work(aid)
+        log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
         a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+    else:
+        # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
+        lbl = label
+        m = SUB_RE.match(lbl)
+        if m:
+            lbl = f"{m.group(1) or '手下'}·{SUB_RE.sub('', lbl)}"
+        line = tl_text(kind, lbl, ev.get("detail", ""))
+        if line:
+            log_ev(aid, line)
 
     text = office_bubble(kind, label)
     if text:
@@ -484,7 +526,8 @@ def office_report(aid: str):
     if not card:
         return {"ok": False, "error": "這位員工還沒有工作紀錄"}
     name = agents[aid].name if aid in agents else aid
-    return {"ok": True, "agent": aid, "name": name, **card}
+    return {"ok": True, "agent": aid, "name": name, **card,
+            "timeline": list(timeline.get(aid, []))}
 
 
 @app.post("/cmd")
