@@ -27,6 +27,8 @@
   .emp .name { font-size: 14px; }
   .emp .role { font-size: 12px; color: var(--dim); white-space: nowrap; }
   .emp .state { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; }
+  .status { font-size: 11px; color: var(--dim); padding: 0 8px 10px; line-height: 1.7; }
+  .status .warn { color: var(--accent); }
 
   main { display: flex; align-items: center; justify-content: center; background: #0b0d10; }
   main iframe { width: 100%; height: 100%; border: 0; }
@@ -81,6 +83,7 @@
 <body>
   <aside>
     <h1>員工<small id="count"></small></h1>
+    <div id="status" class="status"></div>
     <div id="roster"></div>
   </aside>
   <main id="stage"></main>
@@ -121,7 +124,20 @@ async function roster() {
         <span class="state">${a.busy ? '工作中' : ''}</span></div>`;
     }).join('') || '<div class="empty">後端未載入名冊</div>';
     updateComposer();
+    status();
   } catch { $('roster').innerHTML = '<div class="empty">後端未連線</div>'; }
+}
+
+// 鏈路健康度：畫面凍結時（WebGL 分頁被瀏覽器暫停，WS 還開著）明講，別讓人猜 NPC 為何不動
+async function status() {
+  try {
+    const s = await (await fetch('/office/status')).json();
+    const canvas = !s.canvas ? '<span class="warn">🔴 畫面未連線</span>'
+      : s.stale ? '<span class="warn">🟡 畫面無回應——重整分頁</span>'
+      : `🟢 畫面已連線${s.canvas > 1 ? `（${s.canvas} 個）` : ''}`;
+    const disp = s.dispatch ? '🟢 可派工' : '<span class="warn">🔴 派工未接（COGITO_HTTP）</span>';
+    $('status').innerHTML = `${canvas}<br>${disp}`;
+  } catch { $('status').textContent = ''; }
 }
 
 // 忙碌防呆：選中的員工工作中 → 鎖送出（審批按鈕不受影響，那是任務中互動）
@@ -196,6 +212,15 @@ async function feed() {
 }
 
 const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// 畫布聯動：WebGL 內點 NPC → 右欄切到該員工（同源 iframe，來源與格式都驗過才收）
+window.addEventListener('message', e => {
+  if (e.origin !== window.location.origin) return;
+  const d = e.data;
+  if (d && d.source === 'office-canvas' && typeof d.agent === 'string' && agentsData[d.agent]) {
+    pick(d.agent);
+  }
+});
 
 // SSE 即時推播（失效通知）：收到就回抓對應資料；斷線 EventSource 自動重連。
 // 慢速輪詢留著當保險（後端重啟等 SSE 銜接空窗）。

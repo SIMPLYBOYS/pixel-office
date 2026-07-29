@@ -35,7 +35,9 @@ from agent import Agent, build_tools
 load_dotenv()  # 讀 backend/.env（ANTHROPIC_API_KEY=...），已 gitignore
 
 app = FastAPI()
-unity: WebSocket | None = None
+# 多觀眾：桌面 Unity 與任意數量的 WebGL 分頁可同時連線，指令廣播給全部。
+# （單一連線槽會讓分頁互相頂掉——新分頁搶走連線、關掉任一個就整條畫面鏈路歸零。）
+viewers: set[WebSocket] = set()
 events: list[dict] = []
 agents: dict[str, Agent] = {}
 arrived: dict[str, asyncio.Event] = {}
@@ -44,6 +46,7 @@ waypoint_list: list[str] = []
 occupied: dict[str, str] = {}   # agent_id -> 佔用的 waypoint（防兩人擠同一點）
 busy: set[str] = set()          # 對話/工作中的 agent（主迴圈掛起）
 watchdog: asyncio.Task | None = None  # 工作失聯巡查（start_agents 時啟動）
+canvas_stale = False  # 送了指令卻沒人回報：WebGL 分頁被瀏覽器凍結（WS 還開著，畫面已死）
 
 client = anthropic.AsyncAnthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 if client is None:
@@ -65,22 +68,28 @@ WATCH_TICK = 30.0                # watchdog 巡查間隔
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    global unity
     await ws.accept()
-    unity = ws
-    print("✓ Unity 已連線")
+    viewers.add(ws)
+    print(f"✓ Unity 已連線（畫面 {len(viewers)} 個）")
+    notify("roster")
     try:
         while True:
             evt = json.loads(await ws.receive_text())
             events.append(evt)
             await handle_event(evt)
     except WebSocketDisconnect:
-        unity = None
-        stop_agents()
-        print("✗ Unity 斷線")
+        viewers.discard(ws)
+        print(f"✗ Unity 斷線（剩 {len(viewers)} 個畫面）")
+        if not viewers:  # 最後一個畫面走了才收生活迴圈
+            stop_agents()
+        notify("roster")
 
 
 async def handle_event(evt: dict) -> None:
+    global canvas_stale
+    if canvas_stale:  # 有回音＝畫面活著
+        canvas_stale = False
+        notify("roster")
     kind = evt.get("type")
     if kind == "waypoints":
         start_agents(evt.get("agents", []), evt.get("list", []))
@@ -104,8 +113,12 @@ def load_roster() -> None:
 
 
 def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
-    """Unity 握手：記 waypoint、開生活迴圈。名冊以 personas 為準（agent_ids 僅供對帳）。"""
+    """Unity 握手：記 waypoint、開生活迴圈。名冊以 personas 為準（agent_ids 僅供對帳）。
+    第二個畫面連進來時（同一組 waypoint）不重啟迴圈——多分頁只是多觀眾，世界只有一個。"""
     global waypoint_list
+    if loops and waypoints == waypoint_list:
+        print(f"（第 {len(viewers)} 個畫面加入，沿用進行中的世界）")
+        return
     stop_agents()
     waypoint_list = waypoints
     for aid, a in agents.items():
@@ -164,10 +177,19 @@ def broadcast_say(speaker: Agent, text: str, target: Agent | None) -> None:
 
 
 async def send_cmd(cmd: dict) -> bool:
-    if unity is None:
+    """廣播給所有畫面；送不出去的當場移除（半開連線不會拖住其他觀眾）。"""
+    if not viewers:
         return False
-    await unity.send_text(json.dumps(cmd, ensure_ascii=False))
-    return True
+    payload = json.dumps(cmd, ensure_ascii=False)
+    dead = []
+    for ws in list(viewers):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        viewers.discard(ws)
+    return bool(viewers)
 
 
 async def converse(a: Agent, b: Agent, opening: str) -> None:
@@ -204,7 +226,7 @@ async def converse(a: Agent, b: Agent, opening: str) -> None:
 
 async def agent_loop(a: Agent, tools: list[dict]) -> None:
     await asyncio.sleep(random.uniform(1.0, 6.0))  # 錯開起步
-    while unity is not None:
+    while viewers:
         while a.id in busy:  # 對話中掛起主迴圈
             await asyncio.sleep(1.0)
 
@@ -218,7 +240,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
             actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
 
         for act in actions:
-            if unity is None:
+            if not viewers:
                 return
             if a.id in busy:  # 剛被人搭話，放棄剩餘動作
                 break
@@ -247,6 +269,11 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                     await asyncio.wait_for(arrived[a.id].wait(), timeout=30.0)
                 except asyncio.TimeoutError:
                     a.remember("剛剛走去某處超時沒走到")
+                    global canvas_stale
+                    if not canvas_stale:  # 指令沒回音：畫面十之八九凍結了，讓外殼顯示出來
+                        canvas_stale = True
+                        print("⚠ 移動指令無回應——WebGL 分頁可能被凍結（重整該分頁）")
+                        notify("roster")
 
             elif act["action"] == "say":
                 text = act.get("text", "")
@@ -594,6 +621,14 @@ async def office_chat(ev: dict):
     return {"ok": True}
 
 
+@app.get("/office/status")
+def office_status():
+    """畫面/派工鏈路健康度——WebGL 分頁被瀏覽器凍結時 WS 仍開著，指令會送進黑洞，
+    這個旗標讓外殼直接顯示「畫面未連線」而不是讓人猜為什麼 NPC 不動。"""
+    return {"canvas": len(viewers), "stale": canvas_stale,
+            "live": bool(loops), "dispatch": bool(COGITO_HTTP)}
+
+
 @app.get("/office/stream")
 async def office_stream():
     """SSE：狀態失效通知（roster / agent）。畫面收到再回抓 /agents、/office/report。"""
@@ -641,9 +676,8 @@ async def office_dispatch(d: dict):
 
 @app.post("/cmd")
 async def cmd(c: dict):
-    if unity is None:
+    if not await send_cmd(c):
         return {"ok": False, "error": "Unity 未連線"}
-    await unity.send_text(json.dumps(c, ensure_ascii=False))
     return {"ok": True, "sent": c}
 
 

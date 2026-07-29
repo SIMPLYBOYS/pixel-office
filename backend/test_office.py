@@ -193,6 +193,29 @@ def run() -> None:
             r = c.post("/office/dispatch", json={"agent": "p07", "text": "x"}).json()
             assert r["ok"] is False and "COGITO_HTTP" in r["error"]
 
+            # 鏈路健康度：canvas＝連著的畫面數、生活迴圈跑著＝live
+            s = c.get("/office/status").json()
+            assert s["canvas"] == 1 and s["live"] is True and s["stale"] is False
+
+            # 多觀眾：第二個畫面加入不重啟世界，指令廣播給兩邊
+            with c.websocket_connect("/ws") as ws2:
+                ws2.send_text(json.dumps({"type": "waypoints", "agents": ["p01"],
+                                          "list": main.waypoint_list}))
+                for _ in range(50):
+                    if c.get("/office/status").json()["canvas"] == 2:
+                        break
+                    time.sleep(0.05)
+                assert c.get("/office/status").json()["canvas"] == 2
+                post(c, agent="p07", kind="msg", label="兩個畫面都該收到")
+                assert recv(ws)["text"] == "兩個畫面都該收到"
+                assert recv(ws2)["text"] == "兩個畫面都該收到"
+            for _ in range(50):  # ws2 關閉：只掉一個觀眾，世界照跑
+                if c.get("/office/status").json()["canvas"] == 1:
+                    break
+                time.sleep(0.05)
+            s = c.get("/office/status").json()
+            assert s["canvas"] == 1 and s["live"] is True
+
             # SSE 失效通知：log_ev 推 agent、busy 變化推 roster
             q = asyncio.Queue()
             main.subscribers.add(q)
