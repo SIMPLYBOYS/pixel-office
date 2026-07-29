@@ -25,6 +25,9 @@ async def _no_life(a, tools):  # 生活迴圈替身：測試只看投影指令
 def run() -> None:
     main.client = None
     main.agent_loop = _no_life
+    main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
+    main.WATCH_TICK = 0.2      # watchdog 巡快一點
+    main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
     with TestClient(main.app) as c:
         with c.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({
@@ -67,10 +70,9 @@ def run() -> None:
             post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
                  detail='{"agent_type":"code-reviewer"}')
             assert recv(ws) == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
-            m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p17", "🤝 委派 code-reviewer")
-            m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p01", "📋 支援阿哲：code-reviewer")
+            pair = {(m["agent_id"], m["text"]) for m in (recv(ws), recv(ws))}
+            assert pair == {("p17", "🤝 委派 code-reviewer"),
+                            ("p01", "📋 支援阿哲：code-reviewer")}  # 兩條佇列並行，順序不保證
             assert "p01" in main.busy
 
             # 委派中的內部事件 → 泡泡掛到小美頭上（前綴剝掉）
@@ -88,18 +90,27 @@ def run() -> None:
 
             # 無名子 agent（探路者）：兩側正規化成空名，一樣開卡
             post(c, agent="p17", kind="tool", label="spawn_subagent")
-            assert recv(ws)["agent_id"] == "p01"  # 又輪到有空的小美
-            assert recv(ws)["text"] == "🤝 委派 探路者"
-            assert recv(ws)["text"] == "📋 支援阿哲：探路者"
+            assert recv(ws)["agent_id"] == "p01"  # 又輪到有空的小美（move_to）
+            texts = {recv(ws)["text"], recv(ws)["text"]}
+            assert texts == {"🤝 委派 探路者", "📋 支援阿哲：探路者"}
 
             # 主任務收工：✔ 泡 + 釋放主 agent，順手收掉沒關的委派卡
             post(c, agent="p17", kind="done", label="ok")
             assert recv(ws)["text"] == "✔ 任務完成"
             assert "p17" not in main.busy and "p01" not in main.busy
             assert not main.sub_active
+            assert not main.work_last
             assert any("接到工作任務" in x for x in main.agents["p17"].memory)
 
-    print("✓ office 投影合約測試全過（含子 agent 映射）")
+            # 失聯保險：上工後 claw-cli 死掉（不發 done）→ watchdog 逾時釋放
+            post(c, agent="p17", kind="start", label="會斷線的任務")
+            assert recv(ws)["action"] == "move_to"
+            assert recv(ws)["text"] == "📋 會斷線的任務"
+            main.WORK_TIMEOUT = 0.3  # 這時才開始算失聯
+            assert recv(ws)["text"] == "✗ 任務失聯中斷"  # watchdog 巡到後自動冒泡
+            assert "p17" not in main.busy and not main.work_last
+
+    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險）")
 
 
 if __name__ == "__main__":

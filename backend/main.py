@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import time
 from pathlib import Path
 
 import anthropic
@@ -37,7 +38,8 @@ arrived: dict[str, asyncio.Event] = {}
 loops: list[asyncio.Task] = []
 waypoint_list: list[str] = []
 occupied: dict[str, str] = {}   # agent_id -> 佔用的 waypoint（防兩人擠同一點）
-busy: set[str] = set()          # 對話中的 agent（主迴圈掛起）
+busy: set[str] = set()          # 對話/工作中的 agent（主迴圈掛起）
+watchdog: asyncio.Task | None = None  # 工作失聯巡查（start_agents 時啟動）
 
 client = anthropic.AsyncAnthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 if client is None:
@@ -52,6 +54,9 @@ DECISION_INTERVAL = (8.0, 25.0)  # 決策間隔秒數範圍（拉長省成本、
 IDLE_INTERVAL = (45.0, 120.0)    # 純投影模式的 idle 走動間隔（點綴用，別太熱鬧）
 MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強制結束）
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
+BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
+WORK_TIMEOUT = 300.0             # 上工中這麼久沒事件＝claw-cli 掛了（done 是 fire-and-forget 會丟）
+WATCH_TICK = 30.0                # watchdog 巡查間隔
 
 
 @app.websocket("/ws")
@@ -97,6 +102,9 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         colleagues = [o.name for oid, o in agents.items() if oid != aid]
         tools = build_tools(waypoints, colleagues)
         loops.append(asyncio.create_task(agent_loop(a, tools)))
+    global watchdog
+    if watchdog is None or watchdog.done():
+        watchdog = asyncio.create_task(work_watchdog())
     if PROJECTION:
         mode = "純投影（生活大腦停用，idle 走動）"
     else:
@@ -107,12 +115,17 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
 def stop_agents() -> None:
     for t in loops:
         t.cancel()
+    for t in pacers.values():
+        t.cancel()
     loops.clear()
     agents.clear()
     arrived.clear()
     occupied.clear()
     busy.clear()
     sub_active.clear()
+    work_last.clear()
+    bubble_q.clear()
+    pacers.clear()
 
 
 def find_by_name(name: str | None) -> Agent | None:
@@ -258,6 +271,59 @@ def say(aid: str, text: str) -> dict:
     return {"agent_id": aid, "action": "say", "channel": "public", "text": text}
 
 
+# ── 投影泡泡節流：每個 NPC 一條佇列 + 播報器，最小間隔 BUBBLE_GAP。
+# 工具泡（collapsible）連發時後浪蓋前浪只保最新；重要泡（任務/回報/收工）必播。
+bubble_q: dict[str, list[tuple[str, bool]]] = {}   # aid -> [(text, collapsible)]
+pacers: dict[str, asyncio.Task] = {}
+
+
+async def bubble(aid: str, text: str, collapsible: bool = False) -> None:
+    q = bubble_q.setdefault(aid, [])
+    if collapsible and q and q[-1][1]:
+        q[-1] = (text, True)
+    else:
+        q.append((text, collapsible))
+    if aid not in pacers or pacers[aid].done():
+        pacers[aid] = asyncio.create_task(drain_bubbles(aid))
+
+
+async def drain_bubbles(aid: str) -> None:
+    q = bubble_q.get(aid, [])
+    while q:
+        text, _ = q.pop(0)
+        await send_cmd(say(aid, text))
+        await asyncio.sleep(BUBBLE_GAP)
+
+
+# ── 失聯保險：done 是 fire-and-forget，claw-cli 被砍/崩潰時不會送達，
+# busy 就永遠不釋放。橋端記最後事件時刻，逾時自動釋放（含名下委派卡）。
+work_last: dict[str, float] = {}  # 上工中的 agent -> 最後事件時刻
+
+
+def release_work(aid: str) -> None:
+    """收工/失聯：釋放主 agent 與其名下所有委派卡。"""
+    work_last.pop(aid, None)
+    busy.discard(aid)
+    for key in [k for k in sub_active if k[0] == aid]:
+        busy.discard(sub_active.pop(key))
+
+
+async def sweep_work() -> None:
+    now = time.monotonic()
+    for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
+        print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
+        release_work(aid)
+        if aid in agents:
+            agents[aid].remember("工作任務失聯中斷了")
+            await bubble(aid, "✗ 任務失聯中斷")
+
+
+async def work_watchdog() -> None:
+    while True:
+        await asyncio.sleep(WATCH_TICK)
+        await sweep_work()
+
+
 def office_bubble(kind: str, label: str) -> str | None:
     """事件 → NPC 頭上泡泡文字；None＝這種事件不冒泡。"""
     sub = SUB_RE.match(label)
@@ -308,8 +374,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if desk:
                 occupied[npc] = desk
                 await send_cmd({"agent_id": npc, "action": "move_to", "target": desk})
-            await send_cmd(say(parent, f"🤝 委派 {shown}"))
-            await send_cmd(say(npc, f"📋 支援{agents[parent].name}：{shown}"))
+            await bubble(parent, f"🤝 委派 {shown}")
+            await bubble(npc, f"📋 支援{agents[parent].name}：{shown}")
             agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
             return True
         if kind in ("result", "error"):  # 委派收工
@@ -318,7 +384,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False
             busy.discard(npc)
             mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
-            await send_cmd(say(npc, f"{mark}{detail[:36]}"))
+            await bubble(npc, f"{mark}{detail[:36]}")
             agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
             return True
         return True  # spawn 的其他事件不投影
@@ -329,7 +395,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             return False  # 沒開成卡：退回主 agent 帶小名冒泡
         text = office_bubble(kind, SUB_RE.sub("", label))
         if text:
-            await send_cmd(say(npc, text))
+            await bubble(npc, text, collapsible=kind == "tool")
         return True
     return False
 
@@ -341,6 +407,9 @@ async def office_event(ev: dict):
         return {"ok": False, "error": "Unity 未連線或不認識這個 agent"}
     a = agents[aid]
 
+    if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
+        work_last[aid] = time.monotonic()
+
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
 
@@ -351,15 +420,13 @@ async def office_event(ev: dict):
             occupied[aid] = desk
             await send_cmd({"agent_id": aid, "action": "move_to", "target": desk})
         a.remember(f"接到工作任務「{label}」，開始上工")
-    elif kind == "done":  # 收工：回歸生活模擬（人留在工位，之後自己決定去哪）
-        busy.discard(aid)
-        for key in [k for k in sub_active if k[0] == aid]:  # 主任務結束，收掉沒關的委派卡
-            busy.discard(sub_active.pop(key))
+    elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
+        release_work(aid)
         a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
 
     text = office_bubble(kind, label)
     if text:
-        await send_cmd(say(aid, text))
+        await bubble(aid, text, collapsible=kind == "tool")
     return {"ok": True}
 
 
