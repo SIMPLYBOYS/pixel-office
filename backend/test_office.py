@@ -71,7 +71,7 @@ def run() -> None:
             assert post(c, agent="p17", kind="start", label="盤點 repo 的 TODO",
                         detail="/w/channels/office_p17")["ok"]  # start 的 detail＝工作目錄
             assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
-            assert recv(ws)["text"] == "▶ 接到任務"
+            assert recv(ws)["text"] == "▶ 開工"
             assert "p17" in main.busy and main.occupied["p17"] == "chair_1"
 
             # 防呆：工作中不收新任務；approve/reject 豁免（往下走到 COGITO_HTTP 檢查）
@@ -83,16 +83,16 @@ def run() -> None:
             # tool → ▸ 泡；think/turn/result 不投影（靠順序驗證：夾在中間不該出現）
             post(c, agent="p17", kind="think", label="")
             post(c, agent="p17", kind="tool", label="bash", detail="grep -rn TODO")
-            assert recv(ws)["text"] == "● 執行中…"
+            assert recv(ws)["text"] == "● bash"
 
             # 沒開委派卡的子 agent 前綴 → 退回主 agent 帶小名
             post(c, agent="p17", kind="tool", label="[Subagent:神秘人] read_file")
-            assert recv(ws)["text"] == "● 執行中…"
+            assert recv(ws)["text"] == "● read_file"
 
             # error → ✗；msg → 內容泡
             post(c, agent="p17", kind="result", label="bash")  # 不投影
             post(c, agent="p17", kind="error", label="bash")
-            assert recv(ws)["text"] == "⚠ 出錯了"
+            assert recv(ws)["text"] == "⚠ bash"
             post(c, agent="p17", kind="msg", label="TODO 共 3 處，已列清單")
             assert recv(ws)["text"] == "→ 回報"
 
@@ -107,7 +107,7 @@ def run() -> None:
             # 委派中的內部事件 → 泡泡掛到小美頭上（前綴剝掉）
             post(c, agent="p17", kind="tool", label="[Subagent:code-reviewer] read_file")
             m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p01", "● 執行中…")
+            assert (m["agent_id"], m["text"]) == ("p01", "● read_file")
 
             # 委派收工：回報泡 + 釋放
             post(c, agent="p17", kind="result", label="spawn_subagent:code-reviewer",
@@ -162,10 +162,24 @@ def run() -> None:
             assert "📋 支援阿哲：code-reviewer" in sub_tl
             assert "▸ read_file" in sub_tl and "✔ 回報：LGTM，無阻塞問題" in sub_tl
 
+            # 閒聊不當任務：短問候不開新卡、不走工位，只在現有工作串記一句對話
+            cards_before = len(c.get("/office/report/p17").json()["history"])
+            post(c, agent="p17", kind="start", label="nice job")
+            post(c, agent="p17", kind="msg", label="謝謝，有需要再找我。")
+            assert recv(ws)["text"] == "→ 回報"      # 只有回話泡，沒有「開工」也沒有 move_to
+            post(c, agent="p17", kind="done", label="ok")
+            r = c.get("/office/report/p17").json()
+            assert len(r["history"]) == cards_before  # 沒開新卡
+            assert r["status"] == "ok" and r["task"] == "盤點 repo 的 TODO"  # 舊卡狀態沒被動到
+            assert r["report"] == "TODO 共 3 處，已列清單"  # 報告全文沒被閒聊覆蓋
+            tl = [e["text"] for e in r["timeline"]]
+            assert "💬 老闆：nice job" in tl and "謝謝，有需要再找我。" in tl
+            assert "p17" not in main.busy
+
             # 失聯保險：上工後 claw-cli 死掉（不發 done）→ watchdog 逾時釋放
             post(c, agent="p17", kind="start", label="會斷線的任務")
             assert recv(ws)["action"] == "move_to"
-            assert recv(ws)["text"] == "▶ 接到任務"
+            assert recv(ws)["text"] == "▶ 開工"
             main.WORK_TIMEOUT = 0.3  # 這時才開始算失聯
             assert recv(ws)["text"] == "⚠ 失聯沒回應"  # watchdog 巡到後自動冒泡
             assert "p17" not in main.busy and not main.work_last
@@ -176,13 +190,13 @@ def run() -> None:
             # Slack 頻道派工：未知 id 黏性指派閒置 NPC（名冊字母序，p01 優先）
             post(c, agent="slack:C999", kind="start", label="整理週報")
             assert recv(ws) == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
-            assert recv(ws)["text"] == "▶ 接到任務"
+            assert recv(ws)["text"] == "▶ 開工"
             assert main.conv_npc == {"slack:C999": "p01"}
 
             # 第二個頻道同時上工 → 指派下一位閒置員工
             post(c, agent="slack:C888", kind="start", label="另一頻道任務")
             assert recv(ws)["agent_id"] == "p07"  # move_to
-            assert recv(ws)["text"] == "▶ 接到任務"
+            assert recv(ws)["text"] == "▶ 開工"
             assert main.conv_npc["slack:C888"] == "p07"
 
             post(c, agent="slack:C999", kind="done", label="ok")
@@ -196,7 +210,7 @@ def run() -> None:
             # 員工派完就拒收（任務照跑，只是辦公室演不了）
             post(c, agent="slack:C777", kind="start", label="第三頻道")
             assert recv(ws)["agent_id"] == "p17"  # 最後一位閒置員工（move_to）
-            assert recv(ws)["text"] == "▶ 接到任務"
+            assert recv(ws)["text"] == "▶ 開工"
             assert post(c, agent="slack:C666", kind="start", label="沒人了")["ok"] is False
 
             # office 平台（Web 派工）：conv=office:pXX 直接指名員工，不走動態指派
@@ -234,7 +248,7 @@ def run() -> None:
             main.occupied["p07"] = "boss_1"
             post(c, agent="office:p07", kind="tool", label="bash")
             assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "chair_3"}
-            assert recv(ws)["text"] == "● 執行中…"
+            assert recv(ws)["text"] == "● bash"
             main.COGITO_HTTP = ""
             # done 收掉殘留審批卡
             post(c, agent="office:p07", kind="done", label="error", detail="審批逾時")

@@ -375,13 +375,63 @@ async def work_watchdog() -> None:
 # 泡泡＝狀態短語，不是內文（泡泡只有 8 字寬，內文看右側工作串）。
 # 用字必須在 OfficeFontImporter.Chars 的字表內——那份圖集字型只烘了這些字，
 # 沒烘到的字在 WebGL 會是空白（內建 Arial 無中文字形，編輯器才靠系統字型補字）。
-BUBBLE = {"start": "▶ 接到任務", "tool": "● 執行中…", "error": "⚠ 出錯了", "msg": "→ 回報"}
+BUBBLE = {"start": "▶ 開工", "msg": "→ 回報"}
+
+# 閒聊判別：問候／稱讚不是任務——不開任務卡、不起身走工位，只在現有工作串記一句。
+# 用 Haiku 做意圖判斷（$1/$5 每百萬 token，一次十幾個 token 幾乎免費，且同句快取），
+# 判不出來或沒有 API key 時退回關鍵字白名單。誤判方向刻意偏保守：拿不準一律當任務，
+# 因為「把任務當閒聊」會讓人以為 agent 沒收到工作，比反過來糟得多。
+INTENT_MODEL = "claude-haiku-4-5"
+INTENT_SYSTEM = (
+    "你在判斷老闆傳給 AI 員工的訊息屬於哪一類，只回一個英文單字。\n"
+    "task＝交辦工作、提問、要求修改或補充資訊（即使很短，例如「整理週報」「跑一下測試」）。\n"
+    "chat＝問候、稱讚、道謝、附和、確認收到，沒有要求做任何事。\n"
+    "只輸出 task 或 chat，不要標點、不要解釋。"
+)
+_CHAT_WORD = (r"(?:nice job|good job|well done|nice work|thank you|thanks?|thx|nice|good|great|"
+              r"awesome|cool|perfect|ok(?:ay)?|got it|辛苦了?|謝謝|感謝|做得好|做得不錯|太好了|"
+              r"不錯|很棒|讚|沒問題|收到|了解|好的|👍|🎉)")
+CHAT_RE = re.compile(rf"^\W*{_CHAT_WORD}(?:\W+{_CHAT_WORD})*\W*$", re.I)
+_intent_cache: dict[str, bool] = {}
+chat_mode: set[str] = set()   # 這一輪 run 是閒聊而非任務的 agent
+
+
+async def is_chat(text: str) -> bool:
+    t = text.strip()
+    if not t or len(t) > 40:      # 長訊息不可能只是問候，省一次呼叫
+        return False
+    if t in _intent_cache:
+        return _intent_cache[t]
+    if client is None:            # 沒 API key：退回關鍵字白名單（合約測試走這條）
+        return len(t) <= 24 and CHAT_RE.match(t) is not None
+    try:
+        r = await client.messages.create(
+            model=INTENT_MODEL, max_tokens=5,
+            system=INTENT_SYSTEM,
+            messages=[{"role": "user", "content": t}],
+        )
+        reply = next((b.text for b in r.content if b.type == "text"), "")
+        verdict = reply.strip().lower().startswith("chat")
+    except Exception as e:
+        print(f"⚠ 意圖判斷失敗（{type(e).__name__}），當成任務處理")
+        verdict = False
+    _intent_cache[t] = verdict
+    return verdict
 
 
 def office_bubble(kind: str, label: str) -> str | None:
-    """事件 → NPC 頭上的狀態泡泡；None＝這種事件不冒泡。"""
+    """事件 → NPC 頭上的狀態泡泡；None＝這種事件不冒泡。
+
+    工具事件帶工具名（bash / read_file…）——每次做的事不一樣，泡泡才有資訊量；
+    工具名是 ASCII，已烘進字型圖集。其餘用固定短語（中文字表有限）。
+    """
     if kind == "done":
         return "✓ 完成" if label == "ok" else "⚠ 中斷"
+    name = SUB_RE.sub("", label)  # 沒開成委派卡時 label 帶 [Subagent:名] 前綴，泡泡只顯示工具名
+    if kind == "tool":
+        return f"● {name[:14]}" if name else "● 執行中…"
+    if kind == "error":
+        return f"⚠ {name[:14]}" if name else "⚠ 出錯了"
     return BUBBLE.get(kind)
 
 
@@ -562,27 +612,39 @@ async def office_event(ev: dict):
         if desk := WORK_DESK.get(aid):
             await goto(aid, desk)
 
-    if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
+    chatting = aid in chat_mode  # 這一輪是閒聊：不開卡、不走位、不冒任務泡
+    if kind == "start":
         busy.add(aid)
         notify("roster")
-        report_card(aid, label, ev.get("detail", ""))  # start 的 detail＝工作目錄
-        log_ev(aid, f"📋 接到任務：{label}")
-        if desk := WORK_DESK.get(aid):
-            await goto(aid, desk)
-        a.remember(f"接到工作任務「{label}」，開始上工")
-    elif kind == "msg":  # 報告全文進卡（泡泡另外截短）
+        if await is_chat(label) and last_report.get(aid):
+            # 閒聊（「nice job」「辛苦了」）不是任務：不開卡、不起身走工位，
+            # 只在目前這張卡的串裡記一句對話——回一句問候卻被當成新任務很怪。
+            chat_mode.add(aid)
+            chatting = True
+            log_ev(aid, f"💬 老闆：{label}")
+        else:
+            report_card(aid, label, ev.get("detail", ""))  # start 的 detail＝工作目錄
+            log_ev(aid, f"📋 接到任務：{label}")
+            if desk := WORK_DESK.get(aid):
+                await goto(aid, desk)
+            a.remember(f"接到工作任務「{label}」，開始上工")
+    elif kind == "msg":
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
-        card["report"] = label
+        if aid not in chat_mode:  # 閒聊的回話不覆蓋任務的報告全文
+            card["report"] = label
         log_ev(aid, label[:200])
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
-        close_card(aid, "ok" if label == "ok" else "error")
-        card = last_report.get(aid)
-        if card and label != "ok" and ev.get("detail"):
-            card["report"] = card["report"] or ev["detail"]
+        chat_mode.discard(aid)
+        if not chatting:  # 閒聊不改任務卡狀態（那張卡早就完成了）
+            close_card(aid, "ok" if label == "ok" else "error")
+            card = last_report.get(aid)
+            if card and label != "ok" and ev.get("detail"):
+                card["report"] = card["report"] or ev["detail"]
         pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         release_work(aid)
-        log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
-        a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+        if not chatting:
+            log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
+            a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
     else:
         # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
         lbl = label
@@ -593,7 +655,8 @@ async def office_event(ev: dict):
         if line:
             log_ev(aid, line)
 
-    text = office_bubble(kind, label)
+    # 閒聊：接到/收工不是任務事件，不冒泡；回話（msg）照樣冒——那是員工在回應老闆
+    text = None if (chatting and kind in ("start", "done")) else office_bubble(kind, label)
     if text:
         await bubble(aid, text, collapsible=kind == "tool")
     return {"ok": True}
@@ -716,7 +779,8 @@ async def office_dispatch(d: dict):
         if desk := WORK_DESK.get(aid):  # 審批完回工位繼續
             await goto(aid, desk)
     else:
-        log_ev(aid, f"🧑‍💼 老闆交辦：{text[:200]}")
+        if not await is_chat(text):  # 閒聊由 start 事件記成 💬 對話，這裡不重複
+            log_ev(aid, f"🧑‍💼 老闆交辦：{text[:200]}")
     return {"ok": True}
 
 
