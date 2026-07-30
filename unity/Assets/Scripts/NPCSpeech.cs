@@ -9,6 +9,16 @@ public class NPCSpeech : MonoBehaviour
 
     float hideAt = -1f;
 
+    void Awake()
+    {
+        // 內建 Arial 沒有中文字形——編輯器靠 macOS 系統字型補字，WebGL 無字可退就空白。
+        // 有 Resources/OfficeFont（只烘泡泡用字的圖集字型）就換上，兩邊都畫得出中文。
+        var cjk = Resources.Load<Font>("OfficeFont");
+        if (cjk == null || text == null) return;
+        text.font = cjk;
+        text.GetComponent<MeshRenderer>().sharedMaterial = cjk.material;
+    }
+
     public void Show(string content)
     {
         if (string.IsNullOrEmpty(content) || text == null) return;

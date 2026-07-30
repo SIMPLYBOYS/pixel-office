@@ -67,6 +67,16 @@
   .tcard summary .trange { font-size: 11px; color: var(--dim); flex: none; }
   .tcard .badge { margin-left: 0; flex: none; }
   .tcard .tbody { padding: 4px 12px 10px; border-top: 1px solid var(--line); }
+  .wd { font-size: 11px; color: var(--dim); padding: 6px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+  .subcard { border-left: 2px solid #3a4356; margin: 6px 0 10px 6px; padding-left: 10px; background: #12161e; border-radius: 0 8px 8px 0; }
+  .subcard summary { cursor: pointer; padding: 7px 8px 7px 0; display: flex; align-items: center; gap: 7px; list-style: none; }
+  .subcard summary::-webkit-details-marker { display: none; }
+  .subcard .sname { font-size: 13px; }
+  .subcard .spreview { flex: 1; min-width: 0; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subcard[open] .spreview { display: none; }
+  .subcard .trange { font-size: 11px; color: var(--dim); flex: none; margin-left: auto; }
+  .subcard .subbody { padding: 2px 0 8px 4px; }
+  .face.sm { width: 22px; height: 22px; border-radius: 5px; }
   .composer { border-top: 1px solid var(--line); padding: 12px 16px; }
   .composer textarea {
     width: 100%; background: #0f1115; border: 1px solid var(--line); border-radius: 8px;
@@ -210,15 +220,23 @@ async function feed() {
     const f = $('feed');
     const stick = f.scrollTop + f.clientHeight >= f.scrollHeight - 30;
     const cards = r.history || [];
-    f.innerHTML = cards.map((t, i) => {
-      const evs = (t.events || []).map(e =>
-        `<div class="ev"><div class="at">${e.at}</div><div class="tx">${esc(e.text)}</div></div>`).join('');
-      const rep = t.report ? `<div class="report">${esc(t.report)}</div>` : '';
-      return `<details class="tcard"${i === cards.length - 1 ? ' open' : ''}>
+    f.innerHTML = cards.map(t => {
+      const evs = (t.events || []).map(e => {
+        const line = `<div class="ev"><div class="at">${e.at}</div><div class="tx">${esc(e.text)}</div></div>`;
+        return e.subcard ? line + subcard(e.subcard) : line;   // 委派 → 內嵌對方的工作串
+      }).join('');
+      const last = (t.events || []).slice(-1)[0]?.text || '';   // 報告全文常＝最後一則訊息，別重複貼
+      const rep = t.report && !last.startsWith(t.report.slice(0, 40))
+        ? `<div class="report">${esc(t.report)}</div>` : '';
+      // 工作目錄：只留 channels/ 之後那段（完整路徑當 title，滑過看得到）
+      const wd = t.workdir
+        ? `<div class="wd" title="${esc(t.workdir)}">📁 ${esc(t.workdir.split('/').slice(-2).join('/'))}</div>`
+        : '';
+      return `<details class="tcard"${opened.has(t.id) ? ' open' : ''} ontoggle="tog(${t.id}, this.open)">
         <summary><span class="badge ${t.status}">${BADGE[t.status] || t.status}</span>
         <span class="ttitle">${esc(t.task)}</span>
         <span class="trange">${t.at}${t.end ? '–' + t.end : ''}</span></summary>
-        <div class="tbody">${evs}${rep}</div></details>`;
+        <div class="tbody">${wd}${evs}${rep}</div></details>`;
     }).join('');
     const n = cards.reduce((s, t) => s + (t.events || []).length, 0);
     if (n !== lastCount && stick) f.scrollTop = f.scrollHeight; // 有新事件且原本就在底部才跟捲
@@ -232,6 +250,33 @@ async function feed() {
         <button class="no" onclick="dispatch('reject')">駁回</button></div>`;
     } else { card.style.display = 'none'; }
   } catch { /* 後端暫時斷線：下輪再試 */ }
+}
+
+// 卡片預設全收合，展開狀態記在這裡——每次 SSE 更新都會重繪整串，不記就會被收回去
+const opened = new Set();
+const tog = (id, open) => open ? opened.add(id) : opened.delete(id);
+
+// 收合時的一行摘要：完成看回報、進行中看最後一步
+const preview = s => (s.report || (s.events || []).slice(-1)[0]?.text || '').replace(/\s+/g, ' ');
+
+// 委派子卡：同一條任務串裡直接看到「誰接手、做了什麼、回報什麼」（工作中預設展開）
+function subcard(s) {
+  const evs = (s.events || []).map(e =>
+    `<div class="ev"><div class="at">${e.at}</div><div class="tx">${esc(e.text)}</div></div>`).join('');
+  const slast = (s.events || []).slice(-1)[0]?.text || '';
+  const rep = s.report && !slast.startsWith(s.report.slice(0, 40))
+    ? `<div class="report">${esc(s.report)}</div>` : '';
+  return `<details class="subcard"${opened.has(s.id) ? ' open' : ''} ontoggle="tog(${s.id}, this.open)">
+    <summary>
+      <img class="face sm" src="/avatars/${s.agent}.png" alt=""
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),
+                    {className:'face sm ph', textContent:'${esc(s.name[0])}'}))">
+      <span class="sname">${esc(s.name)}</span>
+      <span class="badge ${s.status}">${BADGE[s.status] || s.status}</span>
+      <span class="spreview">${esc(preview(s))}</span>
+      <span class="trange">${s.at}${s.end ? '–' + s.end : ''}</span>
+    </summary>
+    <div class="subbody">${evs}${rep}</div></details>`;
 }
 
 const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

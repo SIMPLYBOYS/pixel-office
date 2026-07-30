@@ -27,6 +27,11 @@ cd backend
 - 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
 - 判準：啟動連上 Unity 後印「啟動 3 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
 
+泡泡中文字型（一次性）：`tools/get_font.sh` 取得 Noto Sans CJK TC（OFL 授權，16MB 已
+gitignore）放到 `unity/Assets/Resources/OfficeFont.otf`。編輯器匯入時只會把泡泡用字烘成
+圖集（見 `OfficeFontImporter.cs` 的字表），build 不會被字型拖胖；沒有這個檔案時 WebGL
+的中文泡泡會是空白（Unity 內建 Arial 無中文字形）。**改泡泡用詞要同步更新那份字表。**
+
 名冊頭像（可選，一次性）：`python3 tools/make_avatars.py` 從角色圖抽 64×64 像素頭像到
 `backend/avatars/`（LimeZu 衍生物，已 gitignore；沒跑就顯示文字頭像）。分組看 persona 的
 `team` 欄位，沒填歸「未分組」。
@@ -41,6 +46,9 @@ Esc 或點空白處關閉）。資料來自橋的 `GET /office/report/{id}`；�
 2. 起後端後瀏覽器開 **http://localhost:8123/shell/** ——左側員工名冊（狀態燈）、中間像素
    辦公室（WebGL）、右側工作串（時間軸即時滾動＋報告全文）
 3. 沒建置 WebGL 也能用：中間顯示提示，名冊和工作串照常運作（資料同源 `/agents`、`/office/report`）
+
+產出檔案在哪：每個頻道有獨立工作目錄（cogito 的 `workspace/channels/<平台>_<頻道>`），
+從網頁派給阿哲＝`office_p17`。任務卡上會標「📁 channels/office_p17」（滑過看完整路徑）。
 
 **從網頁派工**：點左側員工 → 下方輸入框描述任務 → Ctrl+Enter 交辦。前提是 cogito bot
 開了 HTTP 入口（cogito `.env`：`COGITO_HTTP_ADDR` + `COGITO_HTTP_TOKEN`、`office-web` 列入

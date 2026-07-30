@@ -363,7 +363,7 @@ async def sweep_work() -> None:
         log_ev(aid, "⚠ 任務失聯中斷")
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
-            await bubble(aid, "✗ 任務失聯中斷")
+            await bubble(aid, "⚠ 失聯沒回應")
 
 
 async def work_watchdog() -> None:
@@ -372,22 +372,17 @@ async def work_watchdog() -> None:
         await sweep_work()
 
 
+# 泡泡＝狀態短語，不是內文（泡泡只有 8 字寬，內文看右側工作串）。
+# 用字必須在 OfficeFontImporter.Chars 的字表內——那份圖集字型只烘了這些字，
+# 沒烘到的字在 WebGL 會是空白（內建 Arial 無中文字形，編輯器才靠系統字型補字）。
+BUBBLE = {"start": "▶ 接到任務", "tool": "● 執行中…", "error": "⚠ 出錯了", "msg": "→ 回報"}
+
+
 def office_bubble(kind: str, label: str) -> str | None:
-    """事件 → NPC 頭上泡泡文字；None＝這種事件不冒泡。"""
-    sub = SUB_RE.match(label)
-    if sub:  # 走到這代表委派沒開成卡（沒人有空）：退回主 agent 冒泡帶小名
-        label = f"{sub.group(1) or '手下'}·{SUB_RE.sub('', label)}"
-    if kind == "start":
-        return f"📋 {label[:40]}"
-    if kind == "tool":
-        return f"▸ {label[:40]}"
-    if kind == "error":
-        return f"✗ {label[:40]}"
-    if kind == "msg":
-        return label[:60]
+    """事件 → NPC 頭上的狀態泡泡；None＝這種事件不冒泡。"""
     if kind == "done":
-        return "✔ 任務完成" if label == "ok" else "✗ 任務中斷"
-    return None
+        return "✓ 完成" if label == "ok" else "⚠ 中斷"
+    return BUBBLE.get(kind)
 
 
 # 子 agent 投影（§十-1 第二刀）：spawn 具名 agent 映射到閒置 NPC 真走位——
@@ -419,12 +414,14 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             sub_active[(parent, name)] = npc
             busy.add(npc)
             notify("roster")
-            report_card(npc, f"支援{agents[parent].name}：{shown}")
+            child = report_card(npc, f"支援{agents[parent].name}：{shown}")
             if desk := WORK_DESK.get(npc):
                 await goto(npc, desk)
-            await bubble(parent, f"🤝 委派 {shown}")
-            await bubble(npc, f"📋 支援{agents[parent].name}：{shown}")
-            log_ev(parent, f"🤝 委派 {shown}")
+            await bubble(parent, "→ 交辦")
+            await bubble(npc, "★ 支援中")
+            # 委派事件掛上子卡引用 → 主任務串裡直接看得到對方在做什麼
+            log_ev(parent, f"🤝 委派給 {agents[npc].name}：{shown}",
+                   sub={"agent": npc, "id": child["id"]})
             log_ev(npc, f"📋 支援{agents[parent].name}：{shown}")
             agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
             return True
@@ -439,7 +436,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if card:
                 card["report"] = detail
             mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
-            await bubble(npc, f"{mark}{detail[:36]}")
+            await bubble(npc, "✓ 回報完成" if kind == "result" else "⚠ 回報出錯了")
             log_ev(npc, f"{mark}{detail[:200]}")
             agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
             return True
@@ -471,9 +468,15 @@ history: dict[str, deque] = {}   # aid -> deque[任務卡]
 MAX_CARD_EVENTS = 150            # 單卡事件上限（工具連發截舊保新）
 
 
-def report_card(aid: str, task: str) -> dict:
-    card = {"task": task, "status": "working", "report": "", "events": [],
-            "at": time.strftime("%H:%M"), "end": ""}
+_card_seq = 0  # 任務卡編號：委派事件用它把子卡掛回主任務串（跨員工引用）
+
+
+def report_card(aid: str, task: str, workdir: str = "") -> dict:
+    global _card_seq
+    _card_seq += 1
+    card = {"id": _card_seq, "task": task, "status": "working", "report": "",
+            "workdir": workdir,  # cogito 該會話的工作目錄——產出落在哪，看板直接標出來
+            "events": [], "at": time.strftime("%H:%M"), "end": ""}
     history.setdefault(aid, deque(maxlen=20)).append(card)
     last_report[aid] = card
     return card
@@ -500,9 +503,13 @@ def notify(kind: str, aid: str = "") -> None:
             q.put_nowait({"type": kind, "id": aid})
 
 
-def log_ev(aid: str, text: str) -> None:
+def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
+    """sub＝{agent, id}：這是一則委派事件，前端在此處內嵌對方的子任務卡。"""
     card = last_report.get(aid) or report_card(aid, "（雜項）")
-    card["events"].append({"at": time.strftime("%H:%M:%S"), "text": text})
+    ev: dict = {"at": time.strftime("%H:%M:%S"), "text": text}
+    if sub:
+        ev["sub"] = sub
+    card["events"].append(ev)
     if len(card["events"]) > MAX_CARD_EVENTS:
         del card["events"][0]
     notify("agent", aid)
@@ -558,7 +565,7 @@ async def office_event(ev: dict):
     if kind == "start":  # 上工：掛起生活模擬、走到工位（自動入座），任務泡
         busy.add(aid)
         notify("roster")
-        report_card(aid, label)
+        report_card(aid, label, ev.get("detail", ""))  # start 的 detail＝工作目錄
         log_ev(aid, f"📋 接到任務：{label}")
         if desk := WORK_DESK.get(aid):
             await goto(aid, desk)
@@ -602,7 +609,26 @@ def office_report(aid: str):
     return {"ok": True, "agent": aid, "name": name, **card,
             "approval": pending_approval.get(aid, ""),
             "timeline": card["events"],  # Unity ReportViewer 相容：最新卡的事件串
-            "history": list(history.get(aid, []))}
+            "history": [with_subcards(t) for t in history.get(aid, [])]}
+
+
+def find_card(agent: str, cid: int) -> dict | None:
+    return next((t for t in history.get(agent, []) if t.get("id") == cid), None)
+
+
+def with_subcards(card: dict) -> dict:
+    """把委派事件的子卡展開進主任務串——一條串就看得到「誰把工作分給誰、對方做了什麼」。"""
+    out = dict(card)
+    out["events"] = []
+    for e in card["events"]:
+        ev = dict(e)
+        ref = ev.pop("sub", None)
+        child = find_card(ref["agent"], ref["id"]) if ref else None
+        if child:
+            ev["subcard"] = {**child, "agent": ref["agent"],
+                             "name": agents[ref["agent"]].name if ref["agent"] in agents else ref["agent"]}
+        out["events"].append(ev)
+    return out
 
 
 # ── Web 派工與回訊（cogito 的 office 平台，cmd/claw 設 COGITO_HTTP_ADDR/TOKEN 開啟）────
@@ -631,7 +657,7 @@ async def office_chat(ev: dict):
         # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）
         if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
             await goto(aid, BOSS_DOOR)
-        await bubble(aid, "🚨 等老闆審批中…")
+        await bubble(aid, "⚠ 等待審批")
     log_ev(aid, f"💬 {text[:300]}")
     return {"ok": True}
 
@@ -685,7 +711,7 @@ async def office_dispatch(d: dict):
     if verb in ("approve", "reject"):
         pending_approval.pop(aid, None)  # cogito 確認收到才收卡
         notify("agent", aid)
-        await bubble(aid, "✅ 老闆放行，繼續" if verb == "approve" else "⛔ 老闆駁回")
+        await bubble(aid, "✓ 放行" if verb == "approve" else "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")
         if desk := WORK_DESK.get(aid):  # 審批完回工位繼續
             await goto(aid, desk)
@@ -740,10 +766,12 @@ def load_state() -> None:
     except (OSError, ValueError) as e:
         print(f"⚠ 工作紀錄載入失敗（忽略舊檔）：{e}")
         return
+    global _card_seq
     for aid, cards in data.get("history", {}).items():
         history[aid] = deque(cards, maxlen=20)
         if cards:
             last_report[aid] = history[aid][-1]  # 重建「最新卡」指標
+            _card_seq = max([_card_seq] + [t.get("id", 0) for t in cards])  # 續號，別撞到舊卡
     conv_npc.update(data.get("conv_npc", {}))
     pending_approval.update(data.get("pending_approval", {}))
     for aid, card in last_report.items():

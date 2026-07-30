@@ -10,6 +10,9 @@ public static class WebGLBuilder
     public static void Build()
     {
         PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Disabled;
+        // 辦公室是狀態看板：使用者多半在別的視窗操作（終端機、Slack），焦點不在瀏覽器時
+        // 若讓 Unity 暫停，NPC 就整個凍住、指令堆著沒人處理（實測踩過兩次）。
+        PlayerSettings.runInBackground = true;
         // NativeWebSocket 的 dynCall 相容性改在內嵌套件的 jslib 修（makeDynCall 巨集，
         // 見 Packages/com.endel.nativewebsocket），不需要 emscripten 旗標。
         var report = BuildPipeline.BuildPlayer(
