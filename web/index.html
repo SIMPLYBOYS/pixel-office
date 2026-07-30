@@ -208,10 +208,14 @@ $('box').addEventListener('keydown', e => {
 
 const BADGE = { working: '⏳ 進行中', ok: '✔ 已完成', error: '✗ 失敗', lost: '⚠ 失聯' };
 
-// 展開狀態：進行中的任務預設展開（要看得到即時進度），使用者手動收起就尊重他；
-// 結束的卡預設收合。opened/closed 只記【使用者的手動選擇】，程式自動開合不寫進去。
+// 展開狀態：進行中的任務自動展開（要看得到即時進度），完成後【維持展開】——
+// 使用者往往還沒讀完就結束了。手動收起就尊重他；重新整理後歷史卡一律收合。
 const opened = new Set(), closed = new Set();
-const shouldOpen = t => opened.has(t.id) || (t.status === 'working' && !closed.has(t.id));
+function shouldOpen(t) {
+  if (closed.has(t.id)) return false;             // 使用者手動收起最大，之後不再自動撐開
+  if (t.status === 'working') opened.add(t.id);   // 進行中自動展開，而且【黏住】——
+  return opened.has(t.id);                        // 任務跑完也不自動收（使用者還沒看完）
+}
 const tog = (id, open) => open
   ? (opened.add(id), closed.delete(id))
   : (opened.delete(id), closed.add(id));
@@ -225,30 +229,74 @@ function bindToggle(el, id) {
   });
 }
 
-// 打字機：事件是一則則到的（cogito 的 provider 阻塞式生成，沒有 token delta 可串），
-// 逐字浮現讓「正在做事」有節奏感。約 0.6 秒內打完，長文不會拖。
+// 串流佇列：同一輪可能一次收到好幾則事件（工具→結果→回報），排隊【一則接一則】浮現，
+// 不要全部同時開始打字——那看起來就是「一次冒出好幾則」，沒有串流感。
+const queue = [];
+let draining = false, gen = 0;
+function enqueue(job) {
+  queue.push(job);
+  if (!draining) drain();
+}
+async function drain() {
+  draining = true;
+  while (queue.length) {
+    if (queue.length > 30) { queue.splice(0, queue.length).forEach(j => j(true)); break; } // 積太多就秒出
+    await queue.shift()(false);
+  }
+  draining = false;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 打字機：用 rAF 依【時間】推進，速度恆定才滑順（cogito 的 provider 阻塞式生成、沒有
+// token delta 可串，所以這是事件級串流：每則一到就逐字浮現）。
 function typewrite(el, text) {
-  let i = 0;
-  const step = Math.max(1, Math.ceil(text.length / 24));
-  const t = setInterval(() => {
-    i += step;
-    el.textContent = text.slice(0, i);
-    if (i >= text.length) { el.textContent = text; clearInterval(t); }
-  }, 25);
+  if (document.hidden) { el.textContent = text; return Promise.resolve(); }  // 背景分頁：直接上字
+  return new Promise(done => {
+    const cps = Math.max(60, text.length / 1.4);   // 每秒字數；長文自動加速，總長 ≲1.4 秒
+    const t0 = performance.now();
+    let fin = false;
+    const finish = () => { if (fin) return; fin = true; el.textContent = text; done(); };
+    // rAF 在分頁被瀏覽器暫停時不會跑——沒有這道保險，整條佇列會卡住不動
+    const guard = setTimeout(finish, 2500);
+    (function step(now) {
+      if (fin) return;
+      const n = Math.floor((now - t0) / 1000 * cps);
+      el.textContent = text.slice(0, n);
+      if (n >= text.length) { clearTimeout(guard); finish(); return; }
+      requestAnimationFrame(step);
+    })(t0);
+  });
 }
 
 // 收合時的一行摘要：完成看回報、進行中看最後一步
 const preview = s => (s.report || (s.events || []).slice(-1)[0]?.text || '').replace(/\s+/g, ' ');
 
-function evEl(e, live) {
+function evEl(e) {
   const d = document.createElement('div');
-  d.className = 'ev' + (live ? ' in' : '');
+  d.className = 'ev';
   const at = document.createElement('div'); at.className = 'at'; at.textContent = e.at;
   const tx = document.createElement('div'); tx.className = 'tx';
   d.append(at, tx);
-  if (live) typewrite(tx, e.text); else tx.textContent = e.text;
-  if (e.subcard) d.appendChild(subEl(e.subcard, live));
+  if (e.subcard) d.appendChild(subEl(e.subcard, false));
   return d;
+}
+
+// 新事件上畫面：歷史事件與收合中的卡直接塞（沒人看，別排隊擋住後面），
+// 使用者看得到的才走佇列逐字浮現。
+function appendEv(body, e, live) {
+  const d = evEl(e);
+  const tx = d.querySelector('.tx');
+  const instant = () => { tx.textContent = e.text; body.appendChild(d); };
+  if (!live) return instant();
+  const mine = gen;
+  enqueue(async rush => {
+    if (mine !== gen) return;                       // 期間換了員工：這則作廢
+    if (rush || document.hidden || !body.closest('details')?.open) return instant();
+    body.appendChild(d);
+    d.classList.add('in');
+    await typewrite(tx, e.text);
+    await sleep(140);                               // 兩則之間留一拍，才像一則一則說
+  });
 }
 
 // 委派子卡：同一條任務串裡直接看到「誰接手、做了什麼、回報什麼」
@@ -298,7 +346,7 @@ function sync(el, t, bodySel, live) {
 
   const body = el.querySelector(bodySel);
   const evs = t.events || [];
-  for (let i = +(el.dataset.n || 0); i < evs.length; i++) body.appendChild(evEl(evs[i], live));
+  for (let i = +(el.dataset.n || 0); i < evs.length; i++) appendEv(body, evs[i], live);
   el.dataset.n = evs.length;
 
   for (const e of evs) {   // 既有子卡也要跟著長
@@ -335,6 +383,7 @@ async function feed() {
     if (f.dataset.agent !== selected) {   // 換人才整串重建
       f.dataset.agent = selected;
       f.innerHTML = '';
+      gen++;   // 佇列裡屬於上一位員工的事件作廢
     }
     const stick = f.scrollTop + f.clientHeight >= f.scrollHeight - 40;
     let grew = false;

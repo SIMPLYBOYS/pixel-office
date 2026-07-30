@@ -11,12 +11,15 @@ public class OfficeFontImporter : AssetPostprocessor
 {
     // 狀態泡泡用字（含標點與符號）；生活模擬的自由對話不在此列——純投影模式下用不到。
     // 符號限這份字型有字形的：✓ ⚠ ★ ● ▶ →（✔ ✗ ▸ 與所有 emoji 都沒有字形，用了會空白）。
+    // 英數是為了泡泡顯示【工具名】（bash / read_file / write_file…）——每次做的事不一樣，
+    // 泡泡才有資訊量；缺了英數的話工具名會整條空白。
     const string Chars =
         "接到任務執行中出錯了回報完成任務中斷交辦支援等待審批放行駁回失聯沒回應開工休息" +
-        "。，、！？…()：0123456789✓⚠★●▶→";
+        "。，、！？…()：0123456789✓⚠★●▶→" +
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-.";
 
     // 字表改了要跟著 +1，Unity 才會自動重匯入把新字烘進圖集（否則得手動 Reimport）。
-    public override uint GetVersion() => 2;
+    public override uint GetVersion() => 3;
 
     void OnPreprocessAsset()
     {
