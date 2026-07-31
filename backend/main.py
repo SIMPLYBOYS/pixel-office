@@ -532,6 +532,21 @@ def report_card(aid: str, task: str, workdir: str = "") -> dict:
     return card
 
 
+def supersede_card(card: dict) -> None:
+    """續跑接手舊卡：它與名下沒回報的委派卡都改標「已被續跑接手」。那不是失敗，是行程被砍掉的
+    殘影——留著一片紅字失聯，會讓人以為工作真的斷在那裡沒人接。"""
+    targets = [card]
+    for e in card["events"]:
+        ref = e.get("sub")
+        child = find_card(ref["agent"], ref["id"]) if ref else None
+        if child:
+            targets.append(child)  # 子 agent 活在主 agent 的 run 裡，主的死了它必然也死了
+    for c in targets:
+        if c["status"] in ("working", "lost"):
+            c["status"] = "superseded"
+            c["end"] = c["end"] or time.strftime("%H:%M")
+
+
 def close_card(aid: str, status: str) -> None:
     card = last_report.get(aid)
     if card and card["status"] == "working":
@@ -623,8 +638,18 @@ async def office_event(ev: dict):
             chatting = True
             log_ev(aid, f"💬 老闆：{label}")
         else:
-            report_card(aid, label, ev.get("detail", ""))  # start 的 detail＝工作目錄
-            log_ev(aid, f"📋 接到任務：{label}")
+            # 斷點續跑：cogito 送的 prompt 是那句系統提示，拿它當卡片標題沒人看得懂做過什麼。
+            # 沿用上一張未完成卡的任務名，才接得回中斷前那條工作串。
+            task = label
+            if label.startswith(RESUME_NUDGE_PREFIX):
+                prev = next((t for t in reversed(history.get(aid, []))
+                             if t["status"] in ("working", "lost", "superseded")
+                             and not t["task"].startswith(RESUME_NUDGE_PREFIX)), None)  # 舊格式的續跑卡跳過
+                task = ("🔄 續跑：" + prev["task"].removeprefix("🔄 續跑：")) if prev else "🔄 續跑上次中斷的任務"
+                if prev:
+                    supersede_card(prev)
+            report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
+            log_ev(aid, f"📋 接到任務：{task}")
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
             a.remember(f"接到工作任務「{label}」，開始上工")
@@ -641,6 +666,7 @@ async def office_event(ev: dict):
             if card and label != "ok" and ev.get("detail"):
                 card["report"] = card["report"] or ev["detail"]
         pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
+        approval_src.pop(aid, None)
         release_work(aid)
         if not chatting:
             log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
@@ -671,6 +697,7 @@ def office_report(aid: str):
     name = agents[aid].name if aid in agents else aid
     return {"ok": True, "agent": aid, "name": name, **card,
             "approval": pending_approval.get(aid, ""),
+            "approval_from": approval_from(aid),  # 非空＝要回該平台核准，外殼不給按鈕
             "timeline": card["events"],  # Unity ReportViewer 相容：最新卡的事件串
             "history": [with_subcards(t) for t in history.get(aid, [])]}
 
@@ -698,8 +725,23 @@ def with_subcards(card: dict) -> dict:
 COGITO_HTTP = os.environ.get("COGITO_HTTP", "")          # cogito HTTP 入口，如 http://localhost:8787
 COGITO_HTTP_TOKEN = os.environ.get("COGITO_HTTP_TOKEN", "")
 APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot approval.go 的卡片開頭
+RESUME_NUDGE_PREFIX = "[系統] 先前因暫時性錯誤"            # core.go resumeNudge：斷點續跑的系統提示
 PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
 pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell 顯示核准/駁回按鈕）
+# npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
+# cogito 的審批是 ResolveByChannel 按頻道解析的，而這裡的 approve 一律送往 office:pXX，
+# 送過去只會得到「當前沒有待審批的操作」，卡卻已經收掉——看起來像批准成功，其實對方還在等逾時。
+approval_src: dict[str, str] = {}
+PLATFORM_NAME = {"slack": "Slack", "telegram": "Telegram", "office": "",
+                 # COGITO_USER_LINK 把跨平台私訊歸一成 user:<canonical> 時，來源就只剩這個前綴，
+                 # 已經看不出是 Slack 還是 TG——寫成「原平台」比讓畫面出現「請回 user 核准」好。
+                 "user": "原平台"}
+
+
+def approval_from(aid: str) -> str:
+    """回傳審批來源平台的顯示名；空字串＝office 本地，可以直接按核准。"""
+    plat = approval_src.get(aid, "office").split(":", 1)[0]
+    return PLATFORM_NAME.get(plat, plat)
 
 
 @app.post("/office/chat")
@@ -713,6 +755,7 @@ async def office_chat(ev: dict):
         return {"ok": True}
     if text.startswith(APPROVAL_PREFIX):
         pending_approval[aid] = text
+        approval_src[aid] = ev.get("agent", "")
         # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
         busy.add(aid)
         work_last[aid] = time.monotonic()
@@ -757,8 +800,12 @@ async def office_dispatch(d: dict):
     aid, text = d.get("agent", ""), (d.get("text") or "").strip()
     if aid not in agents or not text:
         return {"ok": False, "error": "缺 agent 或 text"}
-    # 防呆：工作中不收新任務（cogito 也會擋，這裡先給即時回饋）；approve/reject 是任務中互動，放行
-    if aid in busy and text.split()[0] not in ("approve", "reject"):
+    verb = text.split()[0]
+    # 防呆：工作中不收新任務（cogito 也會擋，這裡先給即時回饋）。
+    # approve/reject/stop 是任務【進行中】的互動，一律放行——擋住中止等於沒有中止。
+    if verb in ("approve", "reject") and (src := approval_from(aid)):
+        return {"ok": False, "error": f"這張審批來自 {src}，請回 {src} 核准（cogito 按頻道解析審批）"}
+    if aid in busy and verb not in ("approve", "reject", "/stop"):
         return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
@@ -770,9 +817,14 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
     if r.status_code != 202:
         return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}"}
-    verb = text.split()[0]
-    if verb in ("approve", "reject"):
+    if verb == "/stop":
+        # cogito 的 /stop 本來就吃得下（忙碌時照樣消費），這裡只補投影：泡泡＋工作串留痕。
+        # 真正收卡等 cogito 的 done 事件——中止要等目前這一步（模型呼叫或工具）跑完才生效。
+        log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
+        await bubble(aid, "⚠ 中斷")
+    elif verb in ("approve", "reject"):
         pending_approval.pop(aid, None)  # cogito 確認收到才收卡
+        approval_src.pop(aid, None)
         notify("agent", aid)
         await bubble(aid, "✓ 放行" if verb == "approve" else "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")
@@ -816,7 +868,8 @@ def save_state() -> None:
     global _dirty
     _dirty = False
     data = {"history": {a: list(cards) for a, cards in history.items()},
-            "conv_npc": conv_npc, "pending_approval": pending_approval}
+            "conv_npc": conv_npc, "pending_approval": pending_approval,
+            "approval_src": approval_src}
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -836,8 +889,14 @@ def load_state() -> None:
         if cards:
             last_report[aid] = history[aid][-1]  # 重建「最新卡」指標
             _card_seq = max([_card_seq] + [t.get("id", 0) for t in cards])  # 續號，別撞到舊卡
+    for cards in history.values():   # 早於 id 欄位的舊卡沒編號：補號
+        for t in cards:
+            if not t.get("id"):      # 否則前端整批 data-id="undefined" 互搶同一個 DOM 節點，
+                _card_seq += 1       # 事件每輪重覆插入（畫面上就是「一次冒出好幾則」）
+                t["id"] = _card_seq
     conv_npc.update(data.get("conv_npc", {}))
     pending_approval.update(data.get("pending_approval", {}))
+    approval_src.update(data.get("approval_src", {}))
     for aid, card in last_report.items():
         if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
             busy.add(aid)

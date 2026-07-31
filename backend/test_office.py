@@ -79,6 +79,9 @@ def run() -> None:
             assert r["ok"] is False and "工作中" in r["error"]
             r = c.post("/office/dispatch", json={"agent": "p17", "text": "approve"}).json()
             assert r["ok"] is False and "COGITO_HTTP" in r["error"]
+            # /stop 同樣豁免——擋住中止等於沒有中止（工作中才需要它）
+            r = c.post("/office/dispatch", json={"agent": "p17", "text": "/stop"}).json()
+            assert r["ok"] is False and "COGITO_HTTP" in r["error"]
 
             # tool → ▸ 泡；think/turn/result 不投影（靠順序驗證：夾在中間不該出現）
             post(c, agent="p17", kind="think", label="")
