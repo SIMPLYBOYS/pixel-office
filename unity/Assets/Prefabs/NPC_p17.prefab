@@ -331,6 +331,20 @@ MonoBehaviour:
   - {fileID: 21300000, guid: 0ac73f899ba32456c9fe7736ec69f4e8, type: 3}
   - {fileID: 21300000, guid: 356478cada504416ab502e8836d46392, type: 3}
   - {fileID: 21300000, guid: 1f89b92355dc44efd9fa631a9bf89d80, type: 3}
+  phone:
+  - {fileID: 21300000, guid: b43f99ce7049c431ab4c7fbb54530646, type: 3}
+  - {fileID: 21300000, guid: 33bcb651b8b6e4feab18de2e32bd5cc5, type: 3}
+  - {fileID: 21300000, guid: bd77a72b748484137bec661bc720d23a, type: 3}
+  - {fileID: 21300000, guid: 9fb28f29b224e480baac975a7a02e5d3, type: 3}
+  - {fileID: 21300000, guid: a82136e75c77e49a4b683bde48c939fc, type: 3}
+  - {fileID: 21300000, guid: 7583d614d2d9043a1b5be19cb44a8ab5, type: 3}
+  sleep:
+  - {fileID: 21300000, guid: 1eb9082a0b87d42178ac9302a8ddca78, type: 3}
+  - {fileID: 21300000, guid: bc6f485c059814d088382242d2b4b9bc, type: 3}
+  - {fileID: 21300000, guid: 623869f1ad615468182a85871b0482a6, type: 3}
+  - {fileID: 21300000, guid: ab87a9575537a437f98ce07cd7f87eb2, type: 3}
+  - {fileID: 21300000, guid: 020f7019a4df94e9499eec37171e8258, type: 3}
+  - {fileID: 21300000, guid: 225e457bbeef14737bb8c0ad807b4b4d, type: 3}
   fps: 8
 --- !u!114 &4511113312035313208
 MonoBehaviour:

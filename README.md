@@ -25,7 +25,16 @@ cd backend
   零成本 idle（偶爾隨機走動），只有 cogito 的 `/office/event` 工作事件驅動行為——
   接真工作用這個，不燒 API、狀態畫面也不被閒逛污染。
 - 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
-- 判準：啟動連上 Unity 後印「啟動 3 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
+- 判準：啟動連上 Unity 後印「啟動 N 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
+
+**員工與人設**：一個人兩個檔——`backend/personas/pXX.yaml`（名字／職務／團隊／個性）與
+`pXX.md`（角色設定，外殼點名冊就看得到）。加人只要多這兩個檔 + `CharacterBuilder.cs` 補一行
+出生點 + Unity **Tools → Build Characters**。
+
+設了 `COGITO_CHANNELS=<cogito>/workspace/channels` 時，橋啟動會把 `pXX.md` 同步成各頻道的
+`AGENTS.md`（cogito 的 PromptComposer 會讀進系統提示，人設才真的影響行為）。
+⚠️ 覆寫保護：只有「檔案不存在」或「開頭是 `<!-- office-persona:` 標記」才會寫——手寫的
+`AGENTS.md` 一律保留並印警告。想自己維護某個頻道的檔案，把那兩行標記刪掉即可。
 
 泡泡中文字型（一次性）：`tools/get_font.sh` 取得 Noto Sans CJK TC（OFL 授權，16MB 已
 gitignore）放到 `unity/Assets/Resources/OfficeFont.otf`。編輯器匯入時只會把泡泡用字烘成
@@ -92,7 +101,7 @@ Unity 只是渲染面。
    - 跑管線重生素材，複製產物進 Unity：
      ```bash
      python3 tools/extract_design.py limezu/Modern_Office_Revamped_v1.2/6_Office_Designs/Office_Design_2.aseprite
-     python3 tools/make_character.py 17 && python3 tools/make_character.py 1 && python3 tools/make_character.py 7
+     for n in 17 1 7 5 12 19; do python3 tools/make_character.py $n; done   # 六位員工
      # 產物在 limezu/_extracted/，複製到 unity/Assets/Sprites/LimeZu/（Design/ 與 Characters/p*/）
      ```
    - Unity 選單 **Tools → Build Room**、**Tools → Build Characters** 重建場景

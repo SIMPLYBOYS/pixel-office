@@ -39,9 +39,9 @@ public static class RoomBuilder
         "#.............##",
         "##########.#####",
         "##########.#####",
-        "#######.#..#####",
-        "######..##..####",
-        "######.###..####",
+        "#######.#......#",   // 老闆房：桌子北側整排是地板（原本誤封）
+        "######..##..##.#",   // x12,13＝桌面；x14＝桌東側走道
+        "######.###..#..#",   // x13＝老闆椅座位（可入座）、x14＝走道
         "######......####",
         "################",
     };
@@ -54,7 +54,8 @@ public static class RoomBuilder
         ("chair_4@sit_up", 3, 9), ("chair_5@sit_up", 6, 9),
         ("chair_6@sit_up", 9, 9), ("chair_7@sit_up", 12, 9),  // 下排南側座位（對齊 obj_24~27 的 x=48/96/144/192）
         ("chair_8@sit_right", 7, 12), // 左下房橘椅（椅背在西，坐姿面東）
-        ("boss_1", 11, 14),           // 老闆房西側走道（站著參觀；桌組是底圖密封展示件）
+        ("boss_1", 11, 14),           // 老闆房西側走道（等審批時站這裡罰站）
+        ("boss_seat@sit_left", 13, 14),  // 老闆桌對面的那張椅子（椅背在東→坐姿面西對螢幕）
         ("cooler_1", 9, 12),          // 飲水機前（站著）
         ("printer_1", 13, 5),         // 印表機前（站著）
     };
@@ -80,6 +81,25 @@ public static class RoomBuilder
         var data = JsonUtility.FromJson<FurnitureData>(jsonAsset.text);
         float artH = data.artH;
 
+        // ⚠ 先把要用到的 sprite 全部解析出來，解析不到就【整批放棄、不動現有場景】。
+        // 為什麼：下面第一件事是 DestroyImmediate 舊房間，而 ForceUpdate 的遞迴重匯入若還沒跑完
+        // （剛加進 180 張新角色圖那次就是），FindAssets 會查無資產 → 房間被砍掉、新物件的 sprite
+        // 全是 null ＝ 整間辦公室變透明。先驗後拆，最壞只是「這次沒建成」。
+        var need = new List<string> { "bg_base", "lz_wall" };
+        need.AddRange(data.items.Select(it => it.name));
+        var sprites = new Dictionary<string, Sprite>();
+        foreach (var n in need.Distinct())
+        {
+            var sp = FindSprite(n);
+            if (sp == null)
+            {
+                Debug.LogError($"RoomBuilder: sprite「{n}」尚未匯入完成——等 Unity 匯入跑完再按一次 " +
+                               "Tools/Build Room。本次【未改動場景】。");
+                return;
+            }
+            sprites[n] = sp;
+        }
+
         SetYSort();
 
         foreach (var name in new[] { "Room", "Waypoints" })
@@ -96,7 +116,7 @@ public static class RoomBuilder
         bg.transform.SetParent(room.transform, false);
         bg.transform.localPosition = new Vector3(0, -artH / PPU, 0);
         var bgSr = bg.AddComponent<SpriteRenderer>();
-        bgSr.sprite = FindSprite("bg_base");
+        bgSr.sprite = sprites["bg_base"];
         bgSr.sortingOrder = -20;
 
         // 家具（每件獨立物件，位置直接來自 json）
@@ -108,7 +128,7 @@ public static class RoomBuilder
             go.transform.SetParent(props.transform, false);
             go.transform.localPosition = new Vector3(it.x / PPU, -(it.y + it.h) / PPU, 0);
             var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = FindSprite(it.name);
+            sr.sprite = sprites[it.name];
             sr.sortingOrder = 0;
             sr.spriteSortPoint = SpriteSortPoint.Pivot; // pivot=左下 → 以底邊 Y-sort
         }
@@ -125,7 +145,7 @@ public static class RoomBuilder
         col.compositeOperation = Collider2D.CompositeOperation.Merge;
         colGo.AddComponent<CompositeCollider2D>();
         colGo.GetComponent<Rigidbody2D>().bodyType = RigidbodyType2D.Static;
-        var wallTile = GetTile("lz_wall", true);
+        var wallTile = GetTile("lz_wall", true);   // sprite 已在上面驗過
         for (int r = 0; r < Collision.Length; r++)
             for (int c = 0; c < 16; c++)
                 if (Collision[r][c] == '#')

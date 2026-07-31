@@ -19,6 +19,8 @@ import json
 import os
 import random
 import re
+import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -27,7 +29,7 @@ import anthropic
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent import Agent, build_tools
@@ -59,6 +61,7 @@ PROJECTION = os.environ.get("OFFICE_MODE") == "projection"
 
 DECISION_INTERVAL = (8.0, 25.0)  # 決策間隔秒數範圍（拉長省成本、縮短加快節奏）
 IDLE_INTERVAL = (45.0, 120.0)    # 純投影模式的 idle 走動間隔（點綴用，別太熱鬧）
+IDLE_SLEEP = 600.0               # 這麼久沒接到工作＝回工位趴著（「這位沒事做」要看得出來）
 MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強制結束）
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
@@ -233,6 +236,12 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
         try:
             if client is not None and not PROJECTION:
                 actions = await a.decide(client, tools, others_desc(a))
+            elif time.monotonic() - last_work.get(a.id, 0.0) > IDLE_SLEEP:
+                # 太久沒接到工作：回自己工位趴著。這是狀態投影不是裝飾——
+                # 「閒晃」與「沒事做」在畫面上長得一樣，久了看板就失去訊息量。
+                desk = WORK_DESK.get(a.id)
+                actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
+                    if desk else [{"action": "use", "target": "sleep"}]
             else:  # 零成本 idle：不打 API，偶爾走動點綴
                 actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
         except Exception as e:
@@ -244,6 +253,10 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 return
             if a.id in busy:  # 剛被人搭話，放棄剩餘動作
                 break
+
+            if act["action"] == "use":
+                await pose(a.id, act["target"])
+                continue
 
             if act["action"] == "move_to":
                 # 佔位守衛：目的地被同事佔用就換空位（大腦知道同事動態，這是硬保險）
@@ -299,13 +312,21 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 # 投影表：start→走工位坐下+泡任務、tool→泡「▸工具」、error→泡「✗工具」、
 #   msg→泡內容、done→泡收工+釋放；think/turn/result 不投影（太吵）。
 # 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
-WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3"}  # 上工的固定工位
+WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的固定工位
+             "p05": "chair_4", "p12": "chair_5",
+             "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
 BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
 def say(aid: str, text: str) -> dict:
     return {"agent_id": aid, "action": "say", "channel": "public", "text": text}
+
+
+async def pose(aid: str, action: str) -> None:
+    """讓 NPC 擺一個姿勢（move_to 會自動清掉，不必手動還原）。
+    只投影「站著不動看不出來」的狀態——等外部回應、長時間沒事做。"""
+    await send_cmd({"agent_id": aid, "action": "use", "target": action})
 
 
 async def goto(aid: str, target: str) -> None:
@@ -341,6 +362,7 @@ async def drain_bubbles(aid: str) -> None:
 # ── 失聯保險：done 是 fire-and-forget，claw-cli 被砍/崩潰時不會送達，
 # busy 就永遠不釋放。橋端記最後事件時刻，逾時自動釋放（含名下委派卡）。
 work_last: dict[str, float] = {}  # 上工中的 agent -> 最後事件時刻
+last_work: dict[str, float] = {}  # agent -> 最後一次有任務事件的時刻（久了就趴著睡）
 
 
 def release_work(aid: str) -> None:
@@ -438,7 +460,9 @@ def office_bubble(kind: str, label: str) -> str | None:
 # 子 agent 投影（§十-1 第二刀）：spawn 具名 agent 映射到閒置 NPC 真走位——
 # 阿哲委派 code-reviewer，小美就起身入座開工；內部事件泡泡掛到她頭上，收工冒回報泡。
 # 沒人有空時退回舊行為（主 agent 頭上帶小名冒泡）。cogito / Unity 零改動。
-SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07"}  # 慣用人選
+# 慣用人選：具名子 agent 派給職務對得上的人（沒空就退回任一閒置者）
+SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07",
+           "implementer": "p12", "performance": "p05", "correctness": "p17"}
 SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
 sub_active: dict[tuple[str, str], str] = {}  # (主 agent, 子 agent 名) -> 演出的 NPC
 
@@ -570,7 +594,10 @@ def notify(kind: str, aid: str = "") -> None:
 
 def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
     """sub＝{agent, id}：這是一則委派事件，前端在此處內嵌對方的子任務卡。"""
-    card = last_report.get(aid) or report_card(aid, "（雜項）")
+    card = last_report.get(aid)
+    if card is None:   # 沒有任何卡可掛（例：全新員工的第一則系統訊息）→ 開一張雜記卡。
+        card = report_card(aid, "（雜項）")
+        card["status"] = "note"   # 它不是任務，別掛「進行中」——那會永遠轉下去
     ev: dict = {"at": time.strftime("%H:%M:%S"), "text": text}
     if sub:
         ev["sub"] = sub
@@ -580,9 +607,39 @@ def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
     notify("agent", aid)
 
 
+# 寫檔工具的參數就是產出本身：拆成「檔名 + 程式碼區塊」，比一行 JSON 好讀得多。
+# 副檔名對應 markdown 圍欄的語言標籤；沒列到的就不標（區塊照樣是等寬可捲的）。
+WRITE_TOOLS = ("write_file", "edit_file")
+LANGS = {"py": "python", "js": "javascript", "ts": "typescript", "go": "go", "sh": "bash",
+         "html": "html", "css": "css", "json": "json", "yaml": "yaml", "yml": "yaml",
+         "md": "markdown", "sql": "sql", "cs": "csharp", "rs": "rust", "java": "java"}
+WRITE_BODY_MAX = 2000   # 與 cogito 端的 writeArgsMax 對齊；超長只顯示前段
+
+
+def write_tool_text(label: str, detail: str) -> str | None:
+    """write_file/edit_file 的參數 → 「▸ write_file · 檔名」＋程式碼區塊。解不開就回 None 走原路。"""
+    try:
+        args = json.loads(detail)
+    except ValueError:
+        return None      # 被截斷的 JSON 解不開很正常（超長檔案）——退回原本那行，不要吞掉事件
+    if not isinstance(args, dict):
+        return None
+    path = args.get("path") or args.get("file") or ""
+    body = args.get("content") or args.get("new_string") or args.get("new") or ""
+    if not isinstance(body, str) or not body.strip():
+        return None
+    lang = LANGS.get(path.rsplit(".", 1)[-1].lower(), "") if "." in path else ""
+    body = body[:WRITE_BODY_MAX] + ("\n…（內容過長，只顯示前段）" if len(body) > WRITE_BODY_MAX else "")
+    head = f"▸ {label}" + (f" · {path}" if path else "")
+    return f"{head}\n```{lang}\n{body}\n```"
+
+
 def tl_text(kind: str, label: str, detail: str) -> str | None:
     """事件 → 時間軸一行；None＝不記（think/turn）。比泡泡完整（帶參數/結果預覽）。"""
     if kind == "tool":
+        if label in WRITE_TOOLS and detail:
+            if (block := write_tool_text(label, detail)) is not None:
+                return block
         return f"▸ {label}" + (f"｜{detail[:80]}" if detail else "")
     if kind == "result":
         return f"✓ {label}"
@@ -618,6 +675,7 @@ async def office_event(ev: dict):
 
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
         work_last[aid] = time.monotonic()
+    last_work[aid] = time.monotonic()  # 有事件＝這位還在做事，重新計算「閒多久」
 
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
@@ -650,6 +708,8 @@ async def office_event(ev: dict):
                     supersede_card(prev)
             report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
             log_ev(aid, f"📋 接到任務：{task}")
+            if note := pending_note.pop(aid, None):   # 派工那行掛回它要開始的任務
+                log_ev(aid, note)
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
             a.remember(f"接到工作任務「{label}」，開始上工")
@@ -728,6 +788,7 @@ APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot
 RESUME_NUDGE_PREFIX = "[系統] 先前因暫時性錯誤"            # core.go resumeNudge：斷點續跑的系統提示
 PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
 pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell 顯示核准/駁回按鈕）
+pending_note: dict[str, str] = {}     # npc id -> 等下一張任務卡開出來才掛上去的「老闆交辦」
 # npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
 # cogito 的審批是 ResolveByChannel 按頻道解析的，而這裡的 approve 一律送往 office:pXX，
 # 送過去只會得到「當前沒有待審批的操作」，卡卻已經收掉——看起來像批准成功，其實對方還在等逾時。
@@ -763,9 +824,106 @@ async def office_chat(ev: dict):
         # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）
         if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
             await goto(aid, BOSS_DOOR)
+        await pose(aid, "phone")   # 球在別人手上：講電話，不是站著發呆
         await bubble(aid, "⚠ 等待審批")
     log_ev(aid, f"💬 {text[:300]}")
     return {"ok": True}
+
+
+@app.get("/office/profile/{aid}")
+def office_profile(aid: str):
+    """點名冊看「這位員工是誰」：persona 欄位 + 同名 .md 的角色設定（soul）。
+    單一事實來源是 backend/personas/——畫面只是把它讀出來，不另存一份。"""
+    a = agents.get(aid)
+    if a is None:
+        return {"ok": False, "error": "查無此員工"}
+    soul = Path(__file__).parent / "personas" / f"{aid}.md"
+    return {"ok": True, "id": aid, **{k: a.persona.get(k, "") for k in
+            ("name", "role", "team", "personality", "style", "habits")},
+            "soul": soul.read_text(encoding="utf-8") if soul.exists() else ""}
+
+
+# ── 產出預覽：把任務卡的工作目錄唯讀開一個窗，讓圖片／PDF 直接在工作串裡看得到。
+# ⚠ 這是唯一會把磁碟內容送出去的地方，三道界線：
+#   ①路徑一律以「卡號查出來的工作目錄」為根，客戶端只能給相對路徑；解析後必須仍在根底下（擋 ../）
+#   ②副檔名白名單；③大小上限。HTML 一律以純文字送出（見 PREVIEW_TYPES 的註解）。
+PREVIEW_MAX = 5 << 20   # 5 MB：再大的產物請開資料夾看
+PREVIEW_TYPES = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "webp": "image/webp", "svg": "image/svg+xml", "pdf": "application/pdf",
+    # 文字類一律 text/plain：HTML/JS 若以 text/html 送出，就是在橋的來源上執行 agent 產生的程式碼
+    # （agent 會被 prompt injection 影響），這條線先不跨——要真的預覽網頁見「沙箱預覽」的討論。
+    **{e: "text/plain; charset=utf-8" for e in
+       ("txt", "md", "py", "js", "ts", "go", "html", "css", "json", "yaml", "yml", "sh", "csv", "sql")},
+}
+
+
+def card_dir(aid: str, cid) -> Path | None:
+    wd = (find_card(aid, cid) or {}).get("workdir", "")
+    return Path(wd) if wd and Path(wd).is_dir() else None
+
+
+@app.get("/office/files/{aid}/{cid}")
+def office_files(aid: str, cid: int):
+    """任務卡的產出清單（只列第一層、只列白名單副檔名、最多 40 筆）。"""
+    base = card_dir(aid, cid)
+    if base is None:
+        return {"ok": False, "error": "這張卡沒有產出目錄"}
+    out = []
+    for f in sorted(base.iterdir()):
+        ext = f.suffix.lstrip(".").lower()
+        if not f.is_file() or f.name.startswith(".") or ext not in PREVIEW_TYPES:
+            continue
+        out.append({"name": f.name, "size": f.stat().st_size, "ext": ext,
+                    "kind": "image" if PREVIEW_TYPES[ext].startswith("image") else
+                            "pdf" if ext == "pdf" else "text"})
+        if len(out) >= 40:
+            break
+    return {"ok": True, "files": out}
+
+
+@app.get("/office/file/{aid}/{cid}")
+def office_file(aid: str, cid: int, p: str, render: int = 0):
+    """render=1 且是 HTML → 以 text/html 送出，供【沙箱 iframe】渲染。
+    這條路等於執行 agent 寫的程式碼，所以：①必須由使用者顯式點下去（前端不預設渲染）
+    ②回應帶 CSP sandbox allow-scripts——就算 iframe 的 sandbox 屬性被漏掉，瀏覽器仍以
+    不透明來源執行它（拿不到本站 cookie/localStorage、不能發同源請求）。"""
+    base = card_dir(aid, cid)
+    if base is None:
+        return {"ok": False, "error": "這張卡沒有產出目錄"}
+    try:   # 解析後必須仍在工作目錄底下——p 是客戶端給的，./.. 與符號連結都要擋
+        f = (base / p).resolve()
+        f.relative_to(base.resolve())
+    except (ValueError, OSError):
+        return {"ok": False, "error": "路徑越界"}
+    ext = f.suffix.lstrip(".").lower()
+    if not f.is_file() or ext not in PREVIEW_TYPES:
+        return {"ok": False, "error": "不支援預覽這種檔案"}
+    if f.stat().st_size > PREVIEW_MAX:
+        return {"ok": False, "error": f"檔案超過 {PREVIEW_MAX >> 20} MB，請開資料夾看"}
+    headers = {"X-Content-Type-Options": "nosniff",
+               "Content-Disposition": f'inline; filename="{f.name}"'}
+    media = PREVIEW_TYPES[ext]
+    if render and ext in ("html", "svg"):
+        media = "text/html; charset=utf-8" if ext == "html" else media
+        headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    return FileResponse(f, media_type=media, headers=headers)
+
+
+@app.post("/office/open")
+def office_open(d: dict):
+    """點任務卡的 📁 → 用系統檔案總管打開那個產出目錄（產出多半是一整包檔案，
+    逐個下載沒意義，直接進資料夾比較快）。
+    只吃 agent + 卡號、路徑由橋自己查——不接受客戶端傳路徑，否則這就是個任意路徑開啟器。"""
+    card = find_card(d.get("agent", ""), d.get("card"))
+    wd = (card or {}).get("workdir", "")
+    if not wd or not Path(wd).is_dir():
+        return {"ok": False, "error": "這張卡沒有產出目錄（或目錄已不在）"}
+    try:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", wd])
+    except OSError as e:
+        return {"ok": False, "error": f"開啟失敗：{e}"}
+    return {"ok": True, "workdir": wd}
 
 
 @app.get("/office/status")
@@ -773,7 +931,9 @@ def office_status():
     """畫面/派工鏈路健康度——WebGL 分頁被瀏覽器凍結時 WS 仍開著，指令會送進黑洞，
     這個旗標讓外殼直接顯示「畫面未連線」而不是讓人猜為什麼 NPC 不動。"""
     return {"canvas": len(viewers), "stale": canvas_stale,
-            "live": bool(loops), "dispatch": bool(COGITO_HTTP)}
+            "live": bool(loops), "dispatch": bool(COGITO_HTTP),
+            # SSE 訂閱數：接近 6 就代表瀏覽器的連線額度快被背景分頁吃光（fetch 會開始無限排隊）
+            "streams": len(subscribers)}
 
 
 @app.get("/office/stream")
@@ -832,7 +992,10 @@ async def office_dispatch(d: dict):
             await goto(aid, desk)
     else:
         if not await is_chat(text):  # 閒聊由 start 事件記成 💬 對話，這裡不重複
-            log_ev(aid, f"🧑‍💼 老闆交辦：{text[:200]}")
+            # ⚠ 不能直接 log_ev：這一刻上一張卡已經收了、cogito 的 start 還沒到，
+            # log_ev 會為了放這行字開一張「（雜項）」卡並掛成「進行中」，永遠不會關。
+            # 寄放著，等 start 開出真的任務卡再掛進去——這行本來就屬於它要開始的那件事。
+            pending_note[aid] = f"🧑‍💼 老闆交辦：{text[:200]}"
     return {"ok": True}
 
 
@@ -862,6 +1025,53 @@ def get_agents():
 # ── 持久化：任務卡/黏性指派/審批卡落地 JSON——橋重啟不失憶（cogito 的 session 本來就落地，
 # 這邊補齊對稱）。notify() 兼作 dirty 標記，存檔器每 2 秒批次寫（原子寫入：tmp + rename）。
 STATE_FILE = Path(os.environ.get("OFFICE_STATE") or Path(__file__).parent / "office_state.json")
+
+# ── 人設落地：把 personas/<id>.md 同步進 cogito 各頻道的工作目錄當 AGENTS.md。
+# cogito 的 PromptComposer 會把工作目錄裡的 AGENTS.md 讀進系統提示，所以這一步讓角色設定
+# 【真的影響 agent 行為】，而不只是名冊上的一張名片。沒設 COGITO_CHANNELS 就整個不啟用——
+# 這是往別的 repo 的工作區寫檔，預設關閉。
+CHANNELS_DIR = Path(os.environ["COGITO_CHANNELS"]).expanduser() if os.environ.get("COGITO_CHANNELS") else None
+SOUL_MARK = "<!-- office-persona:"   # 我們產生的檔案的第一行；手寫的 AGENTS.md 沒有它
+
+
+def soul_doc(aid: str, body: str) -> str:
+    p = agents[aid].persona
+    head = "\n".join(x for x in [
+        f"# 你是{p.get('name', aid)}（{p.get('role', '員工')}）",
+        f"\n個性：{p.get('personality', '')}" if p.get("personality") else "",
+        f"說話風格：{p.get('style', '')}" if p.get("style") else "",
+    ] if x)
+    return (f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生。手改會在橋下次啟動時被覆蓋；\n"
+            f"     想自己維護這個檔案，把這兩行標記刪掉即可，橋就不會再動它。 -->\n\n"
+            f"{head}\n\n{body.strip()}\n")
+
+
+def sync_souls() -> dict[str, int]:
+    """回傳 {寫入, 無異動, 略過}。略過＝那個 AGENTS.md 是人寫的，我們不覆蓋。"""
+    n = {"wrote": 0, "same": 0, "skipped": 0}
+    if CHANNELS_DIR is None:
+        return n
+    for aid in agents:
+        src = Path(__file__).parent / "personas" / f"{aid}.md"
+        if not src.exists():
+            continue
+        dst = CHANNELS_DIR / f"office_{aid}" / "AGENTS.md"
+        want = soul_doc(aid, src.read_text(encoding="utf-8"))
+        if dst.exists():
+            old = dst.read_text(encoding="utf-8")
+            if not old.startswith(SOUL_MARK):   # ⚠ 保護：手寫的一律不動
+                n["skipped"] += 1
+                print(f"⚠ {dst} 不是由人設產生的（沒有標記），保留原檔不覆蓋")
+                continue
+            if old == want:
+                n["same"] += 1
+                continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(want, encoding="utf-8")
+        n["wrote"] += 1
+    if any(n.values()):
+        print(f"人設同步 AGENTS.md：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
+    return n
 
 
 def save_state() -> None:
@@ -897,6 +1107,10 @@ def load_state() -> None:
     conv_npc.update(data.get("conv_npc", {}))
     pending_approval.update(data.get("pending_approval", {}))
     approval_src.update(data.get("approval_src", {}))
+    for cards in history.values():   # 舊 bug 留下的雜項卡：派工那行曾經自己開卡並卡在「進行中」
+        for t in cards:
+            if t["task"] == "（雜項）" and t["status"] == "working":
+                t["status"] = "note"
     for aid, card in last_report.items():
         if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
             busy.add(aid)
@@ -919,6 +1133,7 @@ async def state_saver() -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     load_state()
+    sync_souls()
     # watchdog 脫鉤 Unity：純 Web 派工（不開 Unity）失聯保險也要在
     global watchdog
     if watchdog is None or watchdog.done():
@@ -937,6 +1152,22 @@ load_roster()  # 名冊啟動即載：Web 外殼/派工不等 Unity
 
 # ── Web 外殼（§十-5 里程碑）：/shell 是 Pixffice 式佈局頁；/unity 伺服 WebGL build
 # （Unity 選單 Tools → Build WebGL 產出）。同源伺服＝零 CORS 設定。
+
+
+@app.middleware("http")
+async def no_store_dev_assets(request, call_next):
+    """/unity 與 /shell 一律不給瀏覽器快取。
+
+    StaticFiles 不送 Cache-Control，Chrome 就會用【啟發式快取】（依 Last-Modified 推算
+    新鮮期）——iframe 裡的 WebGL.wasm／WebGL.data 因此可能整份不回頭問伺服器就用舊的，
+    新舊建置混在一起 → RuntimeError: memory access out of bounds（實測踩過，而且無痕
+    模式永遠正常，因為它的快取是空的，最難聯想到快取）。
+    這兩個路徑都是【開發中每天重建】的東西，快取省的那點頻寬不值得這種偵錯成本。
+    """
+    resp = await call_next(request)
+    if request.url.path.startswith(("/unity", "/shell")):
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    return resp
 _ROOT = Path(__file__).parent.parent
 _WEBGL = _ROOT / "unity" / "Builds" / "WebGL"
 if _WEBGL.exists():

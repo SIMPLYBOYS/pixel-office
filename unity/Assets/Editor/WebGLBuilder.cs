@@ -10,6 +10,13 @@ public static class WebGLBuilder
     public static void Build()
     {
         PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Disabled;
+        // ⛔ 關掉 data caching：Unity 會把 WebGL.data 存進 IndexedDB，快取鍵是
+        // companyName/productName/productVersion——三者固定不變的話，每次重建都是同一把鍵，
+        // 瀏覽器就可能拿【舊的 .data】配【新的 .wasm】→ RuntimeError: memory access out of bounds。
+        // 本機開發重建頻繁，快取省的那點載入時間遠不值這個坑。
+        PlayerSettings.WebGL.dataCaching = false;
+        // 版本號帶建置時間：就算哪天想開快取，鍵也會每次不同（並讓「載到的是哪一版」看得出來）
+        PlayerSettings.bundleVersion = System.DateTime.Now.ToString("yyyyMMdd.HHmm");
         // 辦公室是狀態看板：使用者多半在別的視窗操作（終端機、Slack），焦點不在瀏覽器時
         // 若讓 Unity 暫停，NPC 就整個凍住、指令堆著沒人處理（實測踩過兩次）。
         PlayerSettings.runInBackground = true;

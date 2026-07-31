@@ -6,6 +6,7 @@ public class NPCSprite : MonoBehaviour
     public Sprite[] idleDown, idleUp, idleRight, idleLeft;
     public Sprite[] walkDown, walkUp, walkRight, walkLeft;
     public Sprite[] sitRight, sitLeft;
+    public Sprite[] phone, sleep;   // 等外部回應／長時間沒事做——都是「站著不動」看不出來的狀態
     public float fps = 8f;
 
     SpriteRenderer sr;
@@ -38,6 +39,8 @@ public class NPCSprite : MonoBehaviour
             {
                 "sit_left" => sitLeft,
                 "sit_right" => sitRight,
+                "phone" => phone,
+                "sleep" => sleep,
                 _ => idleUp, // sit_up：背對鏡頭
             };
         var f = mover.Facing;

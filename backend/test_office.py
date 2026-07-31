@@ -61,10 +61,12 @@ def run() -> None:
                 "list": ["chair_1", "chair_2", "chair_3", "cooler_1"],
             }))
             for _ in range(50):  # 等握手處理完
-                if len(main.agents) == 3:
+                if main.agents:
                     break
                 time.sleep(0.1)
-            assert len(main.agents) == 3, "握手後 agents 未建立"
+            # 名冊以 personas/*.yaml 為準（握手帶的 agents 僅供對帳），人數不寫死——
+            # 加一位員工不該讓合約測試變紅；這裡測的是投影行為，不是編制大小。
+            assert set(main.agents) >= {"p01", "p07", "p17"}, "握手後 agents 未建立"
 
             # （未知 id 不再拒收——那是頻道派工的入口，見文末；拒收只剩「員工派完」）
             # start：走工位 + 任務泡 + 掛起
@@ -196,11 +198,11 @@ def run() -> None:
             assert recv(ws)["text"] == "▶ 開工"
             assert main.conv_npc == {"slack:C999": "p01"}
 
-            # 第二個頻道同時上工 → 指派下一位閒置員工
+            # 第二個頻道同時上工 → 指派下一位閒置員工（是誰隨編制而變，只驗「不是同一人」）
             post(c, agent="slack:C888", kind="start", label="另一頻道任務")
-            assert recv(ws)["agent_id"] == "p07"  # move_to
+            second = recv(ws)["agent_id"]  # move_to
             assert recv(ws)["text"] == "▶ 開工"
-            assert main.conv_npc["slack:C888"] == "p07"
+            assert second != "p01" and main.conv_npc["slack:C888"] == second
 
             post(c, agent="slack:C999", kind="done", label="ok")
             m = recv(ws)
@@ -210,11 +212,15 @@ def run() -> None:
             m = recv(ws)
             assert (m["agent_id"], m["text"]) == ("p01", "→ 回報")
 
-            # 員工派完就拒收（任務照跑，只是辦公室演不了）
-            post(c, agent="slack:C777", kind="start", label="第三頻道")
-            assert recv(ws)["agent_id"] == "p17"  # 最後一位閒置員工（move_to）
-            assert recv(ws)["text"] == "▶ 開工"
-            assert post(c, agent="slack:C666", kind="start", label="沒人了")["ok"] is False
+            # 員工派完就拒收（任務照跑，只是辦公室演不了）。開新頻道直到分不出人為止——
+            # 迴圈而非寫死人數，加減員工不會讓這條合約失效。
+            for n in range(1, 20):
+                if not post(c, agent=f"slack:D{n}", kind="start", label="填滿名冊")["ok"]:
+                    break
+                assert recv(ws)["action"] == "move_to"
+                assert recv(ws)["text"] == "▶ 開工"
+            else:
+                raise AssertionError("名冊填不滿：頻道指派沒有在人派完時停手")
 
             # office 平台（Web 派工）：conv=office:pXX 直接指名員工，不走動態指派
             post(c, agent="office:p07", kind="msg", label="週報整理好了")
@@ -227,6 +233,8 @@ def run() -> None:
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
             # HITL 投影：走到老闆房門口站著等
             assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
+            # 等審批＝球在別人手上：掏手機，不是站著像雕像（站著不動＝閒置，兩者不能同形）
+            assert recv(ws) == {"agent_id": "p07", "action": "use", "target": "phone"}
             assert recv(ws)["text"] == "⚠ 等待審批"
             assert main.occupied["p07"] == "boss_1"
             assert "p07" in main.busy  # 等審批＝工作中，生活迴圈不得插隊蓋掉罰站走位
@@ -313,7 +321,76 @@ def run() -> None:
     finally:
         main.STATE_FILE.unlink(missing_ok=True)
 
-    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工）")
+    souls()
+    previews()
+    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步）")
+
+
+def previews() -> None:
+    """產出預覽的三道界線：路徑不得越界、副檔名白名單、卡片外的目錄一律拒絕。
+    這是唯一會把磁碟內容送出去的端點，破了就是任意檔案讀取。"""
+    import base64, tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        wd = Path(tmp) / "job"
+        wd.mkdir()
+        (wd / "a.md").write_text("# hi\n", encoding="utf-8")
+        (wd / "k.env").write_text("TOKEN=x\n", encoding="utf-8")   # 不在白名單
+        (wd / "i.png").write_bytes(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+        (Path(tmp) / "outside.txt").write_text("secret\n", encoding="utf-8")
+
+        main.history.clear(); main.last_report.clear()
+        card = main.report_card("p01", "預覽測試", str(wd))
+        cid = card["id"]
+        with TestClient(main.app) as c:
+            names = [f["name"] for f in c.get(f"/office/files/p01/{cid}").json()["files"]]
+            assert names == ["a.md", "i.png"], f"白名單外的檔案被列出來了：{names}"
+            assert c.get(f"/office/file/p01/{cid}", params={"p": "i.png"}).headers["content-type"] == "image/png"
+            for bad in ("../outside.txt", "/etc/passwd", "job/../../outside.txt"):
+                r = c.get(f"/office/file/p01/{cid}", params={"p": bad}).json()
+                assert r["ok"] is False and "越界" in r["error"], f"路徑越界沒擋住：{bad}"
+            assert c.get(f"/office/file/p01/{cid}", params={"p": "k.env"}).json()["ok"] is False
+
+            # HTML：預設純文字（不會在橋的來源上執行）；render=1 才是 text/html，且必帶 CSP sandbox
+            (wd / "page.html").write_text("<script>document.title='x'</script>", encoding="utf-8")
+            plain = c.get(f"/office/file/p01/{cid}", params={"p": "page.html"})
+            assert plain.headers["content-type"].startswith("text/plain")
+            assert "content-security-policy" not in plain.headers
+            shown = c.get(f"/office/file/p01/{cid}", params={"p": "page.html", "render": 1})
+            assert shown.headers["content-type"].startswith("text/html")
+            assert shown.headers["content-security-policy"] == "sandbox allow-scripts"
+            # render=1 不能拿來把別種檔案變成 HTML
+            assert c.get(f"/office/file/p01/{cid}", params={"p": "a.md", "render": 1}
+                         ).headers["content-type"].startswith("text/plain")
+            assert c.get(f"/office/files/p01/{cid + 999}").json()["ok"] is False
+    main.history.clear(); main.last_report.clear()
+
+
+def souls() -> None:
+    """人設同步的覆寫保護：手寫的 AGENTS.md 一個字都不能被動到。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        main.CHANNELS_DIR = Path(tmp)
+        aid = next(a for a in main.agents if (Path(main.__file__).parent / "personas" / f"{a}.md").exists())
+        dst = Path(tmp) / f"office_{aid}" / "AGENTS.md"
+
+        assert main.sync_souls()["wrote"] >= 1          # 第一次：建檔
+        assert dst.read_text(encoding="utf-8").startswith(main.SOUL_MARK)
+        assert main.agents[aid].persona["name"] in dst.read_text(encoding="utf-8")
+
+        n = main.sync_souls()                            # 第二次：內容相同就不重寫
+        assert n["wrote"] == 0 and n["same"] >= 1
+
+        mine = "# 我自己寫的專案指南\n不要動我。\n"        # 沒有標記＝人寫的
+        dst.write_text(mine, encoding="utf-8")
+        n = main.sync_souls()
+        assert dst.read_text(encoding="utf-8") == mine, "手寫的 AGENTS.md 被覆蓋了"
+        assert n["skipped"] >= 1
+
+        dst.unlink()                                     # 刪掉標記檔 → 下次照樣補回來
+        assert main.sync_souls()["wrote"] >= 1
+    main.CHANNELS_DIR = None                             # 沒設定就整個不啟用
+    assert main.sync_souls() == {"wrote": 0, "same": 0, "skipped": 0}
 
 
 if __name__ == "__main__":

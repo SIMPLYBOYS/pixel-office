@@ -7,11 +7,16 @@ public static class CharacterBuilder
 {
     const string CharRoot = "Assets/Sprites/LimeZu/Characters";
 
+    // 與 backend/personas/*.yaml 一一對應（多一個 persona 就在這加一行再 Build Characters）。
+    // spawn 必須落在 RoomBuilder.Collision 的 '.' 格：第 5、6 兩列是中央走道，整排可走。
     static readonly (string prefix, Vector3 spawn)[] Personas =
     {
         ("p17", new Vector3(8.5f, -5.5f, 0)),
         ("p01", new Vector3(4.5f, -6.5f, 0)),
         ("p07", new Vector3(11.5f, -6.5f, 0)),
+        ("p05", new Vector3(2.5f, -5.5f, 0)),
+        ("p12", new Vector3(6.5f, -6.5f, 0)),
+        ("p19", new Vector3(13.5f, -5.5f, 0)),
     };
 
     [MenuItem("Tools/Build Characters")]
@@ -80,6 +85,8 @@ public static class CharacterBuilder
         anim.walkLeft = Load("walk_left");
         anim.sitRight = Load("sit_right");
         anim.sitLeft = Load("sit_left");
+        anim.phone = Load("phone");
+        anim.sleep = Load("sleep");
 
         // 頭上泡泡
         var bubbleGo = new GameObject("Bubble");
@@ -103,13 +110,16 @@ public static class CharacterBuilder
         var textGo = new GameObject("Text");
         textGo.transform.SetParent(speechGo.transform, false);
         var tm = textGo.AddComponent<TextMesh>();
-        tm.font = Resources.GetBuiltinResource<Font>("LegacySystemFont.ttf");
+        // 內建的 LegacySystemFont.ttf 在新版 Unity 已經拿掉（每次 Build 都噴三行紅字）。
+        // 直接用 Resources/OfficeFont——執行期 NPCSpeech 本來就會換成它，這裡先用同一份，
+        // 編輯器預覽與實機才一致。
+        tm.font = Resources.Load<Font>("OfficeFont");
         tm.fontSize = 64;
         tm.characterSize = 0.045f;
         tm.anchor = TextAnchor.MiddleCenter;
         tm.alignment = TextAlignment.Center;
         tm.color = new Color32(45, 50, 68, 255);
-        textGo.GetComponent<MeshRenderer>().sharedMaterial = tm.font.material;
+        if (tm.font != null) textGo.GetComponent<MeshRenderer>().sharedMaterial = tm.font.material;
         textGo.GetComponent<MeshRenderer>().sortingOrder = 60;
         var speech = go.AddComponent<NPCSpeech>();
         speech.text = tm;
