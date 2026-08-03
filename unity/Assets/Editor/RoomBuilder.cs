@@ -18,6 +18,20 @@ public static class RoomBuilder
     const string FurnitureJson = "Assets/Sprites/LimeZu/Design/furniture.json";
     const float PPU = 16f;
 
+    // 刻意不擺的家具：下排四組工作站的【最右一組】與角落盆栽。
+    // 原因是走位——第 6~8 列封起來之後，上下半唯一的通道只剩最左那行 x=1，所有人跨區
+    // 都得繞去左邊，移動看起來很制式。拿掉這幾件就多一條右側南北通道（x=14），
+    // 上下也各剩 3 組工作站、視覺對稱。長桌 obj_24 本體留著（東端變成空桌面）。
+    static readonly HashSet<string> Hidden = new()
+    {
+        "obj_22",  // 第 4 組工作站（螢幕組）
+        "obj_23",  // 它左邊的隔板
+        "obj_28",  // 對應的椅子 (12,9)
+        "obj_29",  // 右下角盆栽 (14,9)——它是右側通道唯一的塞子
+    };
+    // ⚠ 長桌 obj_24 本身也要縮短（它把第 4 組的桌面與桌角盆栽畫在自己身上），
+    // 那件事在 tools/trim_props.py 做——單靠 Hidden 會留下沒收邊的切口。
+
     // 家具位置唯一真相 = tools/extract_design.py 的輸出 furniture.json，不手抄
     [System.Serializable]
     class Item { public string name; public int x, y, w, h; }
@@ -29,14 +43,14 @@ public static class RoomBuilder
     {
         "################",
         "################",
-        "#.#............#",
+        "#.##########...#",   // 上排隔間 obj_04 佔到第 2 列（覆蓋 43~77%），原本整排漏封
         "#..#########.###",
         "#..#########.###",
-        "#..............#",
-        "#..............#",
-        "#.############.#",   // x13＝下排長桌(obj_24)東端桌面，原本漏封→NPC 直接穿桌
-        "#.############.#",   // x14 是桌東側走道，實心像素為 0，維持可走
-        "#.............##",
+        "#..............#",   // 中央走道＝第 5 列（上排的椅子也在這排，可入座）
+        "#.#########....#",   // 下排辦公桌佔 6~8 三列；x11~13 是拿掉的第 4 組，改成走道
+        "#.#########....#",   // 長桌 obj_24 已裁到 x=178px（cell 11 只剩 2px 桌沿），見 tools/trim_props.py
+        "#.#########....#",   // x11~14 是拿掉第 4 組之後空出來的右側通道
+        "#..............#",   // x14 原本是盆栽 obj_29，拿掉後成為右側南北通道的出口
         "##########.#####",
         "##########.#####",
         "#######.#......#",   // 老闆房：桌子北側整排是地板（原本誤封）
@@ -52,16 +66,16 @@ public static class RoomBuilder
     {
         ("chair_1@sit_up", 4, 5), ("chair_2@sit_up", 7, 5), ("chair_3@sit_up", 10, 5), // 上排座位
         ("chair_4@sit_up", 3, 9), ("chair_5@sit_up", 6, 9),
-        ("chair_6@sit_up", 9, 9), ("chair_7@sit_up", 12, 9),  // 下排南側座位（對齊 obj_24~27 的 x=48/96/144/192）
+        ("chair_6@sit_up", 9, 9),     // 下排南側座位（chair_7 隨第 4 組工作站一起移除）
         ("chair_8@sit_right", 7, 12), // 左下房橘椅（椅背在西，坐姿面東）
         ("boss_1", 11, 14),           // 老闆房西側走道（等審批時站這裡罰站）
         ("boss_seat@sit_left", 13, 14),  // 老闆桌對面的那張椅子（椅背在東→坐姿面西對螢幕）
         ("cooler_1", 9, 12),          // 飲水機前（站著）
-        ("board_1@face_up", 10, 2),   // 折線圖白板前（obj_03 在 (10,0)），背對鏡頭＝面向板子
+        ("board_1@face_up", 12, 2),   // 右牆白板(obj_12)前——折線圖那面畫在隔間後方，站不進去
         // 各工位旁的站位：委派時主 agent 走過來，面向坐著的同事
-        ("side_1@face_up", 4, 6), ("side_2@face_up", 7, 6), ("side_3@face_up", 10, 6),
+        ("side_1@face_left", 5, 5), ("side_2@face_left", 8, 5), ("side_3@face_left", 11, 5),
         ("side_4@face_right", 2, 9), ("side_5@face_right", 5, 9),
-        ("side_6@face_right", 8, 9), ("side_7@face_right", 11, 9),
+        ("side_6@face_right", 8, 9),
         ("printer_1", 13, 5),         // 印表機前（站著）
     };
 
@@ -91,7 +105,7 @@ public static class RoomBuilder
         // （剛加進 180 張新角色圖那次就是），FindAssets 會查無資產 → 房間被砍掉、新物件的 sprite
         // 全是 null ＝ 整間辦公室變透明。先驗後拆，最壞只是「這次沒建成」。
         var need = new List<string> { "bg_base", "lz_wall" };
-        need.AddRange(data.items.Select(it => it.name));
+        need.AddRange(data.items.Where(it => !Hidden.Contains(it.name)).Select(it => it.name));
         var sprites = new Dictionary<string, Sprite>();
         foreach (var n in need.Distinct())
         {
@@ -129,6 +143,7 @@ public static class RoomBuilder
         props.transform.SetParent(room.transform, false);
         foreach (var it in data.items)
         {
+            if (Hidden.Contains(it.name)) continue;
             var go = new GameObject(it.name);
             go.transform.SetParent(props.transform, false);
             go.transform.localPosition = new Vector3(it.x / PPU, -(it.y + it.h) / PPU, 0);

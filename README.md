@@ -103,7 +103,11 @@ Unity 只是渲染面。
      python3 tools/extract_design.py limezu/Modern_Office_Revamped_v1.2/6_Office_Designs/Office_Design_2.aseprite
      for n in 17 1 7 5 12 19; do python3 tools/make_character.py $n; done   # 六位員工
      # 產物在 limezu/_extracted/，複製到 unity/Assets/Sprites/LimeZu/（Design/ 與 Characters/p*/）
+     python3 tools/trim_props.py    # ⚠ 複製【之後】才跑：它直接改 Unity 底下的 Design/
      ```
+   - `trim_props.py` 把下排長桌 `obj_24` 裁短。抽取工具依「相連像素」切元件，把第 4 組
+     工作站的桌面與桌角盆栽併進長桌同一張圖；拿掉最右一組（RoomBuilder 的 `Hidden`）時
+     桌子必須跟著縮短，否則留下沒收邊的切口。**漏跑這步 = 右側走道會被長回來的桌子擋住。**
    - Unity 選單 **Tools → Build Room**、**Tools → Build Characters** 重建場景
 
 ## 觀察與手動介入
