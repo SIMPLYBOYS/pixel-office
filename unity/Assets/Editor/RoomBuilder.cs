@@ -22,6 +22,8 @@ public static class RoomBuilder
     // 第 6~8 列封起來之後，上下半的跨區通道剩最左那行 x=1，移動看起來很制式；而右側
     // x=14 明明整條是走道，唯一的塞子就是 (14,9) 這盆——它底下的 bg_base 本來就是地板。
     // 拔掉它右側南北通道立刻打通，四組工作站一組都不用犧牲。
+    // ⚠ 它的葉尖碰到長桌、被 extract_design 併進 obj_24，藏 obj_29 只清得掉盆身——
+    //   剩下那撮葉子由 tools/clean_props.py 擦掉（素材不進 git，重新抽圖後要再跑一次）。
     static readonly HashSet<string> Hidden = new() { "obj_29" };
 
     // 家具位置唯一真相 = tools/extract_design.py 的輸出 furniture.json，不手抄
