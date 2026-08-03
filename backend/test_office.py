@@ -105,6 +105,8 @@ def run() -> None:
             post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
                  detail='{"agent_type":"code-reviewer"}')
             assert recv(ws) == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
+            # 主 agent 走到對方桌邊站著看——「兩人在同一張桌子旁」是唯一看得出協作的畫面語言
+            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "side_2"}
             pair = {(m["agent_id"], m["text"]) for m in (recv(ws), recv(ws))}
             assert pair == {("p17", "→ 交辦"), ("p01", "★ 支援中")}  # 兩條佇列並行，順序不保證
             assert "p01" in main.busy
@@ -117,6 +119,7 @@ def run() -> None:
             # 委派收工：回報泡 + 釋放
             post(c, agent="p17", kind="result", label="spawn_subagent:code-reviewer",
                  detail="LGTM，無阻塞問題")
+            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}  # 交接完回位
             m = recv(ws)
             assert (m["agent_id"], m["text"]) == ("p01", "✓ 回報完成")
             assert "p01" not in main.busy
@@ -128,6 +131,7 @@ def run() -> None:
             # 無名子 agent（探路者）：兩側正規化成空名，一樣開卡
             post(c, agent="p17", kind="tool", label="spawn_subagent")
             assert recv(ws)["agent_id"] == "p01"  # 又輪到有空的小美（move_to）
+            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "side_2"}
             texts = {recv(ws)["text"], recv(ws)["text"]}
             assert texts == {"→ 交辦", "★ 支援中"}
 
@@ -170,9 +174,13 @@ def run() -> None:
             # 閒聊不當任務：短問候不開新卡、不走工位，只在現有工作串記一句對話
             cards_before = len(c.get("/office/report/p17").json()["history"])
             post(c, agent="p17", kind="start", label="nice job")
+            # 有人在跟他講話：轉頭面向鏡頭（原本是背對坐著）——但不開卡、不走工位
+            assert recv(ws) == {"agent_id": "p17", "action": "use", "target": "face_down"}
             post(c, agent="p17", kind="msg", label="謝謝，有需要再找我。")
             assert recv(ws)["text"] == "→ 回報"      # 只有回話泡，沒有「開工」也沒有 move_to
             post(c, agent="p17", kind="done", label="ok")
+            # 聊完轉回去坐著（move_to 會清掉轉頭姿勢，回到 sit_up）
+            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
             r = c.get("/office/report/p17").json()
             assert len(r["history"]) == cards_before  # 沒開新卡
             assert r["status"] == "ok" and r["task"] == "盤點 repo 的 TODO"  # 舊卡狀態沒被動到

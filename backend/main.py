@@ -66,6 +66,7 @@ MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強�
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
 WORK_TIMEOUT = 300.0             # 上工中這麼久沒事件＝claw-cli 掛了（done 是 fire-and-forget 會丟）
+STUCK_AFTER = 60.0               # 上工中這麼久【只有 think/turn】沒有任何工具事件＝卡住了，去接杯水
 WATCH_TICK = 30.0                # watchdog 巡查間隔
 
 
@@ -112,6 +113,9 @@ def load_roster() -> None:
     for f in sorted(persona_dir.glob("p*.yaml")):
         agents[f.stem] = Agent(f.stem, persona_dir)
         arrived[f.stem] = asyncio.Event()
+        # 閒置計時從【現在】起算：預設 0.0 的話，「從沒接過任務」會被算成「閒了很久」，
+        # 於是一開機全員直接回工位趴著，再也不會走動（實測到的）。
+        last_work[f.stem] = time.monotonic()
     print(f"名冊載入 {len(agents)} 位員工：{'、'.join(a.name for a in agents.values())}")
 
 
@@ -236,12 +240,15 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
         try:
             if client is not None and not PROJECTION:
                 actions = await a.decide(client, tools, others_desc(a))
+            elif a.id in sleeping:
+                actions = []   # 已經趴著了：安靜等下一輪（有事件會把他叫醒）
             elif time.monotonic() - last_work.get(a.id, 0.0) > IDLE_SLEEP:
                 # 太久沒接到工作：回自己工位趴著。這是狀態投影不是裝飾——
                 # 「閒晃」與「沒事做」在畫面上長得一樣，久了看板就失去訊息量。
                 desk = WORK_DESK.get(a.id)
                 actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
                     if desk else [{"action": "use", "target": "sleep"}]
+                sleeping.add(a.id)
             else:  # 零成本 idle：不打 API，偶爾走動點綴
                 actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
         except Exception as e:
@@ -315,7 +322,13 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的固定工位
              "p05": "chair_4", "p12": "chair_5",
              "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
-BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡
+BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡（面向老闆桌）
+BOARD = "board_1"     # 白板前：規劃類子 agent 站這裡，不佔工位
+COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空轉的投影）
+# 各工位【旁邊】的站位：委派時主 agent 走過去，面向坐著的同事——
+# 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
+DESK_SIDE = {"p17": "side_1", "p01": "side_2", "p07": "side_3",
+             "p05": "side_4", "p12": "side_5", "p19": BOSS_DOOR}
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
@@ -363,11 +376,16 @@ async def drain_bubbles(aid: str) -> None:
 # busy 就永遠不釋放。橋端記最後事件時刻，逾時自動釋放（含名下委派卡）。
 work_last: dict[str, float] = {}  # 上工中的 agent -> 最後事件時刻
 last_work: dict[str, float] = {}  # agent -> 最後一次有任務事件的時刻（久了就趴著睡）
+last_tool: dict[str, float] = {}  # agent -> 最後一次【工具】事件的時刻（只有 think 在跑＝卡住）
+watering: set[str] = set()        # 卡住而去飲水機的人（工具事件一回來就叫他回位）
+sleeping: set[str] = set()        # 已經趴下的人：別每輪重送 move_to + sleep
 
 
 def release_work(aid: str) -> None:
     """收工/失聯：釋放主 agent 與其名下所有委派卡（沒回報的委派標 lost，不留永久 working）。"""
     work_last.pop(aid, None)
+    last_tool.pop(aid, None)
+    watering.discard(aid)
     busy.discard(aid)
     for key in [k for k in sub_active if k[0] == aid]:
         npc = sub_active.pop(key)
@@ -378,6 +396,19 @@ def release_work(aid: str) -> None:
 
 async def sweep_work() -> None:
     now = time.monotonic()
+    # 卡住＝上工中但一直沒有工具事件（模型長考、或在重試迴圈裡打轉）。think 事件本來完全
+    # 不投影，於是「正在燒錢想事情」與「坐著發呆」畫面上一模一樣。
+    # 只動【坐在自己位子上】的人：罰站等審批、站白板前、去別人桌邊的都不該被打斷。
+    for aid in list(work_last):
+        if aid in watering or aid in pending_approval:
+            continue
+        if occupied.get(aid) != WORK_DESK.get(aid):
+            continue
+        if now - last_tool.get(aid, now) > STUCK_AFTER:
+            watering.add(aid)
+            await goto(aid, COOLER)
+            await bubble(aid, "● 思考中…")
+
     for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
         release_work(aid)
@@ -489,8 +520,12 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             busy.add(npc)
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
-            if desk := WORK_DESK.get(npc):
-                await goto(npc, desk)
+            # 規劃類的活在白板前做（不佔工位，也讓「這是在想、不是在寫」看得出來）
+            spot = BOARD if name in ("planner", "correctness") else WORK_DESK.get(npc)
+            if spot:
+                await goto(npc, spot)
+            if side := DESK_SIDE.get(npc):   # 主 agent 走到對方桌邊站著看
+                await goto(parent, side)
             await bubble(parent, "→ 交辦")
             await bubble(npc, "★ 支援中")
             # 委派事件掛上子卡引用 → 主任務串裡直接看得到對方在做什麼
@@ -503,6 +538,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             npc = sub_active.pop((parent, name), None)
             if npc is None:
                 return False
+            if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
+                await goto(parent, desk)
             busy.discard(npc)
             notify("roster")
             close_card(npc, "ok" if kind == "result" else "error")
@@ -676,6 +713,13 @@ async def office_event(ev: dict):
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
         work_last[aid] = time.monotonic()
     last_work[aid] = time.monotonic()  # 有事件＝這位還在做事，重新計算「閒多久」
+    sleeping.discard(aid)              # 睡著的被叫醒（下一輪就恢復正常走動）
+    if kind in ("start", "tool", "result", "error"):   # 有實質進展（think/turn 不算）
+        last_tool[aid] = time.monotonic()
+        if aid in watering:            # 卡住的人有進展了：回位子繼續
+            watering.discard(aid)
+            if desk := WORK_DESK.get(aid):
+                await goto(aid, desk)
 
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
@@ -694,6 +738,7 @@ async def office_event(ev: dict):
             # 只在目前這張卡的串裡記一句對話——回一句問候卻被當成新任務很怪。
             chat_mode.add(aid)
             chatting = True
+            await pose(aid, "face_down")   # 有人在跟他講話：轉頭面向鏡頭（原本背對）
             log_ev(aid, f"💬 老闆：{label}")
         else:
             # 斷點續跑：cogito 送的 prompt 是那句系統提示，拿它當卡片標題沒人看得懂做過什麼。
@@ -719,6 +764,8 @@ async def office_event(ev: dict):
             card["report"] = label
         log_ev(aid, label[:200])
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
+        if chatting and (desk := WORK_DESK.get(aid)):
+            await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
         chat_mode.discard(aid)
         if not chatting:  # 閒聊不改任務卡狀態（那張卡早就完成了）
             close_card(aid, "ok" if label == "ok" else "error")

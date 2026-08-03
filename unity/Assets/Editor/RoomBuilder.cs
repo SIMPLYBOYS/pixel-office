@@ -57,6 +57,11 @@ public static class RoomBuilder
         ("boss_1", 11, 14),           // 老闆房西側走道（等審批時站這裡罰站）
         ("boss_seat@sit_left", 13, 14),  // 老闆桌對面的那張椅子（椅背在東→坐姿面西對螢幕）
         ("cooler_1", 9, 12),          // 飲水機前（站著）
+        ("board_1@face_up", 10, 2),   // 折線圖白板前（obj_03 在 (10,0)），背對鏡頭＝面向板子
+        // 各工位旁的站位：委派時主 agent 走過來，面向坐著的同事
+        ("side_1@face_up", 4, 6), ("side_2@face_up", 7, 6), ("side_3@face_up", 10, 6),
+        ("side_4@face_right", 2, 9), ("side_5@face_right", 5, 9),
+        ("side_6@face_right", 8, 9), ("side_7@face_right", 11, 9),
         ("printer_1", 13, 5),         // 印表機前（站著）
     };
 

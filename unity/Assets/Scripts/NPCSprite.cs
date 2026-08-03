@@ -41,6 +41,11 @@ public class NPCSprite : MonoBehaviour
                 "sit_right" => sitRight,
                 "phone" => phone,
                 "sleep" => sleep,
+                // 轉向：站著不動、只換朝向（走到同事桌邊要面對人，站白板前要面對板子）
+                "face_left" => idleLeft,
+                "face_right" => idleRight,
+                "face_up" => idleUp,
+                "face_down" => idleDown,
                 _ => idleUp, // sit_up：背對鏡頭
             };
         var f = mover.Facing;
