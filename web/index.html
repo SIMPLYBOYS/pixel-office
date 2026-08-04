@@ -34,6 +34,17 @@
   .emp .name { font-size: 14px; }
   .emp .role { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .emp .state { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; white-space: nowrap; }
+  /* 能力圖卡：工具與技能是【全員共用】的，所以擺在名冊底下一張，不是每個人一份 */
+  .capcard { margin: 10px 2px 0; border-top: 1px solid var(--line); }
+  .capcard summary { cursor: pointer; list-style: none; padding: 10px 8px 6px;
+                     font-size: 12px; color: var(--dim); display: flex; gap: 6px; align-items: baseline; }
+  .capcard summary::-webkit-details-marker { display: none; }
+  .capcard summary:hover { color: var(--text); }
+  .capcard summary small { color: #4c525d; }
+  .capcard .grp { font-size: 11px; color: #9aa2ae; padding: 6px 8px 2px; letter-spacing: .04em; }
+  .capcard .it { font-size: 11px; color: var(--dim); padding: 2px 8px 2px 14px; border-left: 1px solid var(--line); margin-left: 8px; }
+  .capcard .it b { color: var(--text); font-weight: 500; }
+  .capcard .err { font-size: 11px; color: var(--dim); padding: 4px 8px 10px; }
   .face {
     width: 32px; height: 32px; flex: none; border-radius: 7px; background: #222833;
     image-rendering: pixelated;  /* 像素頭像放大不要糊掉 */
@@ -166,6 +177,7 @@
     <h1>員工<small id="count"></small></h1>
     <div id="status" class="status"></div>
     <div id="roster"></div>
+    <details class="capcard" id="capcard"></details>
   </aside>
   <main id="stage"></main>
   <div class="grip" id="grip" title="拖曳調整寬度（雙擊還原）"></div>
@@ -223,6 +235,26 @@ fetch('/unity/index.html', { method: 'HEAD' }).then(r => {
     ? '<iframe src="/unity/index.html"></iframe>'
     : '<div class="placeholder">尚無 WebGL build<br>Unity 選單 Tools → Build WebGL (辦公室網頁版)<br>建置完重新整理本頁</div>';
 }).catch(() => $('stage').innerHTML = '<div class="placeholder">後端未連線</div>');
+
+// 能力圖卡：工具與技能是全員共用的（工具在各頻道各自 rooted，但掛的是同一組；
+// 技能全 bot 讀同一份），所以整個辦公室一張卡，不是每位員工一份。
+// 清單來自 cogito 本人（橋只轉發＋快取），不是寫死的表——工具是條件式掛載的。
+async function capcard() {
+  const box = $('capcard');
+  const r = await (await fetch('/office/caps')).json();
+  const open = box.open || localStorage.capsOpen === '1';
+  if (!r.ok) {
+    box.innerHTML = `<summary>🛠 全員能力</summary><div class="err">${esc(r.error || '取不到')}</div>`;
+  } else {
+    const line = x => `<div class="it"><b>${esc(x.name)}</b>　${
+      esc((x.description || '').split('\n')[0].slice(0, 70))}</div>`;
+    box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}</small></summary>
+      <div class="grp">🛠 工具</div>${r.tools.map(line).join('')}
+      ${r.skills.length ? `<div class="grp">📚 技能</div>${r.skills.map(line).join('')}` : ''}`;
+  }
+  box.open = open;
+  box.addEventListener('toggle', () => { localStorage.capsOpen = box.open ? '1' : '0'; });
+}
 
 async function roster() {
   try {
@@ -830,6 +862,7 @@ addEventListener('pagehide', closeStream);   // 分頁關掉/切走：立刻還�
 openStream();
 
 roster();
+capcard();
 setInterval(roster, 10000);
 setInterval(feed, 8000);
 </script>

@@ -877,6 +877,35 @@ async def office_chat(ev: dict):
     return {"ok": True}
 
 
+# 能力清單（工具／技能）：問 cogito 本人，不在橋這邊寫死——工具是按頻道組裝的
+# （MCP、背景任務、自我進化都是條件式掛載），寫死的表遲早跟現實不符。
+#
+# 這是【全員共用】的清單，不是某個人的屬性：工具在各頻道各自 rooted 到自己的工作目錄，
+# 但掛上的是同一組；技能更是全 bot 讀同一份 .claw/skills。所以挑任一位員工去問即可。
+# 快取到行程結束：同一個 bot 跑著的期間清單不會變。
+_caps_cache: dict | None = None
+
+
+@app.get("/office/caps")
+async def office_caps():
+    global _caps_cache
+    if _caps_cache:
+        return _caps_cache
+    if not COGITO_HTTP:
+        return {"ok": False, "error": "未設 COGITO_HTTP——問不到 cogito 的能力清單"}
+    probe = next(iter(agents), "")   # 清單全員相同，隨便挑一位當探針
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            r = await cl.get(f"{COGITO_HTTP}/capabilities", params={"agent": probe},
+                             headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+        r.raise_for_status()
+        d = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        return {"ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
+    _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or []}
+    return _caps_cache
+
+
 @app.get("/office/profile/{aid}")
 def office_profile(aid: str):
     """點名冊看「這位員工是誰」：persona 欄位 + 同名 .md 的角色設定（soul）。
