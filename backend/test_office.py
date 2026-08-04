@@ -371,6 +371,24 @@ def previews() -> None:
             assert c.get(f"/office/file/p01/{cid}", params={"p": "a.md", "render": 1}
                          ).headers["content-type"].startswith("text/plain")
             assert c.get(f"/office/files/p01/{cid + 999}").json()["ok"] is False
+
+            # 工作區瀏覽（可進子目錄）：同一套界線，入口不同
+            (wd / "sub").mkdir()
+            (wd / "sub" / "note.txt").write_text("x\n", encoding="utf-8")
+            root = c.get("/office/ws/p01").json()
+            assert root["ok"] and root["up"] is None
+            names = [(e["name"], e["dir"]) for e in root["entries"]]
+            assert ("sub", True) in names and ("a.md", False) in names
+            assert ("k.env", False) in names, "白名單外的檔案要列出來（只是不給預覽）"
+            assert next(e for e in root["entries"] if e["name"] == "k.env")["kind"] == "raw"
+            deep = c.get("/office/ws/p01", params={"p": "sub"}).json()
+            assert deep["ok"] and deep["up"] == "" and deep["entries"][0]["name"] == "note.txt"
+            for bad in ("..", "../..", "/etc"):
+                assert c.get("/office/ws/p01", params={"p": bad}).json()["ok"] is False, bad
+            for bad in ("../outside.txt", "/etc/passwd"):
+                assert c.get("/office/wsfile/p01", params={"p": bad}).json()["ok"] is False, bad
+            assert c.get("/office/wsfile/p01", params={"p": "sub/note.txt"}
+                         ).headers["content-type"].startswith("text/plain")
     main.history.clear(); main.last_report.clear()
 
 

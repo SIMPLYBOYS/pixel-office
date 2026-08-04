@@ -910,6 +910,94 @@ def card_dir(aid: str, cid) -> Path | None:
     return Path(wd) if wd and Path(wd).is_dir() else None
 
 
+def agent_dir(aid: str) -> Path | None:
+    """這位員工的工作區根目錄：優先用最近一張帶 workdir 的卡（那是 cogito 自己報的路徑），
+    沒有卡就退回 COGITO_CHANNELS/office_<aid>（還沒接過任務的新人也看得到自己的資料夾）。"""
+    for card in reversed(history.get(aid, [])):
+        wd = card.get("workdir", "")
+        if wd and Path(wd).is_dir():
+            return Path(wd)
+    if CHANNELS_DIR:
+        d = CHANNELS_DIR / f"office_{aid}"
+        if d.is_dir():
+            return d
+    return None
+
+
+def resolve_in(base: Path, rel: str) -> Path | None:
+    """把客戶端給的相對路徑鎖在 base 底下（解析後必須仍在 base 內，擋 ../ 與符號連結）。"""
+    try:
+        f = (base / rel).resolve() if rel else base.resolve()
+        f.relative_to(base.resolve())
+        return f
+    except (ValueError, OSError):
+        return None
+
+
+def listing(base: Path, rel: str) -> dict:
+    """列一層目錄：資料夾在前、檔名排序；隱藏檔跳過；不在白名單的副檔名只列不給預覽。"""
+    d = resolve_in(base, rel)
+    if d is None or not d.is_dir():
+        return {"ok": False, "error": "路徑越界或不是資料夾"}
+    base = base.resolve()   # iterdir() 給的是實體路徑；macOS 的 /var→/private/var 會讓
+    dirs, files = [], []    # relative_to 對不上（測試抓到的）
+    for f in sorted(d.iterdir(), key=lambda x: x.name.lower()):
+        if f.name.startswith("."):
+            continue
+        r = str(f.relative_to(base))
+        if f.is_dir():
+            dirs.append({"name": f.name, "path": r, "dir": True})
+        else:
+            ext = f.suffix.lstrip(".").lower()
+            files.append({"name": f.name, "path": r, "dir": False, "ext": ext,
+                          "size": f.stat().st_size,
+                          "kind": "image" if PREVIEW_TYPES.get(ext, "").startswith("image")
+                                  else "pdf" if ext == "pdf"
+                                  else "text" if ext in PREVIEW_TYPES else "raw"})
+        if len(dirs) + len(files) >= 200:   # 目錄爆量時只列前 200 筆
+            break
+    up = str(Path(rel).parent) if rel and str(Path(rel).parent) != "." else ("" if rel else None)
+    return {"ok": True, "path": rel, "up": up, "entries": dirs + files}
+
+
+def serve_file(base: Path, rel: str, render: int):
+    f = resolve_in(base, rel)
+    if f is None:
+        return {"ok": False, "error": "路徑越界"}
+    ext = f.suffix.lstrip(".").lower()
+    if not f.is_file() or ext not in PREVIEW_TYPES:
+        return {"ok": False, "error": "不支援預覽這種檔案"}
+    if f.stat().st_size > PREVIEW_MAX:
+        return {"ok": False, "error": f"檔案超過 {PREVIEW_MAX >> 20} MB，請開資料夾看"}
+    headers = {"X-Content-Type-Options": "nosniff",
+               "Content-Disposition": f'inline; filename="{f.name}"'}
+    media = PREVIEW_TYPES[ext]
+    if render and ext in ("html", "svg"):
+        media = "text/html; charset=utf-8" if ext == "html" else media
+        headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    return FileResponse(f, media_type=media, headers=headers)
+
+
+@app.get("/office/ws/{aid}")
+def office_ws(aid: str, p: str = ""):
+    """員工工作區瀏覽：可進子目錄（卡片的產出清單只列第一層，那是給任務看的）。"""
+    base = agent_dir(aid)
+    if base is None:
+        return {"ok": False, "error": "這位員工還沒有工作區"}
+    r = listing(base, p)
+    if r.get("ok"):
+        r["root"] = base.name
+    return r
+
+
+@app.get("/office/wsfile/{aid}")
+def office_wsfile(aid: str, p: str, render: int = 0):
+    base = agent_dir(aid)
+    if base is None:
+        return {"ok": False, "error": "這位員工還沒有工作區"}
+    return serve_file(base, p, render)
+
+
 @app.get("/office/files/{aid}/{cid}")
 def office_files(aid: str, cid: int):
     """任務卡的產出清單（只列第一層、只列白名單副檔名、最多 40 筆）。"""
@@ -938,23 +1026,7 @@ def office_file(aid: str, cid: int, p: str, render: int = 0):
     base = card_dir(aid, cid)
     if base is None:
         return {"ok": False, "error": "這張卡沒有產出目錄"}
-    try:   # 解析後必須仍在工作目錄底下——p 是客戶端給的，./.. 與符號連結都要擋
-        f = (base / p).resolve()
-        f.relative_to(base.resolve())
-    except (ValueError, OSError):
-        return {"ok": False, "error": "路徑越界"}
-    ext = f.suffix.lstrip(".").lower()
-    if not f.is_file() or ext not in PREVIEW_TYPES:
-        return {"ok": False, "error": "不支援預覽這種檔案"}
-    if f.stat().st_size > PREVIEW_MAX:
-        return {"ok": False, "error": f"檔案超過 {PREVIEW_MAX >> 20} MB，請開資料夾看"}
-    headers = {"X-Content-Type-Options": "nosniff",
-               "Content-Disposition": f'inline; filename="{f.name}"'}
-    media = PREVIEW_TYPES[ext]
-    if render and ext in ("html", "svg"):
-        media = "text/html; charset=utf-8" if ext == "html" else media
-        headers["Content-Security-Policy"] = "sandbox allow-scripts"
-    return FileResponse(f, media_type=media, headers=headers)
+    return serve_file(base, p, render)
 
 
 @app.post("/office/open")
