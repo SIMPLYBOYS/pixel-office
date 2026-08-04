@@ -12,10 +12,10 @@
   body {
     background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
     font: 14px/1.6 "PingFang TC", "Noto Sans TC", sans-serif;
-    display: grid; grid-template-columns: 232px 1fr 6px var(--dock);
+    display: grid; grid-template-columns: var(--rail) 6px 1fr 6px var(--dock);
   }
   /* 右欄寬度：拖把手改這個變數（下面 --dock 的初值），存 localStorage 下次沿用 */
-  :root { --dock: 400px; }
+  :root { --rail: 232px; --dock: 400px; }
   .grip { background: var(--line); cursor: col-resize; }
   .grip:hover, body.dragging .grip { background: var(--accent); }
   /* 拖曳中讓 iframe 不吃事件——否則游標一進 Unity 畫布就斷開 */
@@ -41,9 +41,22 @@
   .capcard summary::-webkit-details-marker { display: none; }
   .capcard summary:hover { color: var(--text); }
   .capcard summary small { color: #4c525d; }
-  .capcard .grp { font-size: 11px; color: #9aa2ae; padding: 6px 8px 2px; letter-spacing: .04em; }
-  .capcard .it { font-size: 11px; color: var(--dim); padding: 2px 8px 2px 14px; border-left: 1px solid var(--line); margin-left: 8px; }
-  .capcard .it b { color: var(--text); font-weight: 500; }
+  /* 兩層收折：卡片 → 工具／技能各一組 → 每一項再點開看說明。
+     一次攤開二十幾個工具的說明，在 232px 的欄位裡等於一片字牆。 */
+  .capcard .grp > summary { cursor: pointer; list-style: none; padding: 5px 8px; font-size: 11px;
+                            color: #9aa2ae; display: flex; gap: 6px; align-items: baseline; }
+  .capcard .grp > summary::-webkit-details-marker { display: none; }
+  .capcard .grp > summary:hover { color: var(--text); }
+  .capcard .grp > summary .n { margin-left: auto; color: #4c525d; }
+  .capcard .find { width: calc(100% - 16px); margin: 2px 8px 4px; background: #0f1115;
+                   border: 1px solid var(--line); border-radius: 6px; color: var(--text);
+                   font: inherit; font-size: 11px; padding: 3px 7px; }
+  .capcard .it { font-size: 11px; color: var(--text); padding: 2px 8px 2px 14px;
+                 border-left: 1px solid var(--line); margin-left: 8px; cursor: pointer; }
+  .capcard .it:hover { background: #1d212a; }
+  .capcard .it .d { display: none; color: var(--dim); padding: 1px 0 3px 2px; }
+  .capcard .it.open .d { display: block; }
+  .capcard .it[hidden] { display: none; }
   .capcard .err { font-size: 11px; color: var(--dim); padding: 4px 8px 10px; }
   .face {
     width: 32px; height: 32px; flex: none; border-radius: 7px; background: #222833;
@@ -173,14 +186,15 @@
 </style>
 </head>
 <body>
-  <aside>
+  <aside id="rail">
     <h1>員工<small id="count"></small></h1>
     <div id="status" class="status"></div>
     <div id="roster"></div>
     <details class="capcard" id="capcard"></details>
   </aside>
+  <div class="grip" id="gripL" title="拖曳調整名冊寬度（雙擊還原）"></div>
   <main id="stage"></main>
-  <div class="grip" id="grip" title="拖曳調整寬度（雙擊還原）"></div>
+  <div class="grip" id="gripR" title="拖曳調整寬度（雙擊還原）"></div>
   <section>
     <div class="head" id="head"><div class="empty">點左側員工查看工作串</div></div>
     <details class="prof" id="profile"></details>
@@ -199,35 +213,46 @@
 const $ = id => document.getElementById(id);
 let selected = null, agentsData = {};
 
-// 右欄拉寬／收窄：把手拖曳改 --dock。用 pointer capture，游標拖過 Unity 畫布也不會斷。
-const DOCK_MIN = 280, STAGE_MIN = 420, SIDE = 238;   // SIDE＝左側名冊 232 + 把手 6
+// 左右兩欄都可拖寬：左＝名冊（能力卡展開時要看得清楚），右＝工作串。
+// 用 pointer capture，游標拖過中間的 Unity 畫布也不會斷。
+const RAIL_MIN = 180, RAIL_DEF = 232, DOCK_MIN = 280, DOCK_DEF = 400, STAGE_MIN = 380, GRIPS = 12;
+const cssW = v => parseInt(getComputedStyle(document.documentElement).getPropertyValue(v)) || 0;
+// 兩欄互相讓：任一邊的上限都是「扣掉對面與畫布保底之後剩下的」，所以拖到底也不會把畫布擠沒
+const setRail = w => document.documentElement.style.setProperty('--rail',
+  Math.min(Math.max(w, RAIL_MIN), Math.max(RAIL_MIN, innerWidth - GRIPS - cssW('--dock') - STAGE_MIN)) + 'px');
 const setDock = w => document.documentElement.style.setProperty('--dock',
-  Math.min(Math.max(w, DOCK_MIN), Math.max(DOCK_MIN, innerWidth - SIDE - STAGE_MIN)) + 'px');
-setDock(+localStorage.dockW || 400);
-let dragging = false;
+  Math.min(Math.max(w, DOCK_MIN), Math.max(DOCK_MIN, innerWidth - GRIPS - cssW('--rail') - STAGE_MIN)) + 'px');
+setRail(+localStorage.railW || RAIL_DEF);
+setDock(+localStorage.dockW || DOCK_DEF);
+
+let dragging = null;   // 正在拖的把手設定（null＝沒在拖）
 const endDrag = () => {
   if (!dragging) return;
-  dragging = false;
+  localStorage[dragging.key] = cssW(dragging.varName);
+  dragging = null;
   document.body.classList.remove('dragging');
-  localStorage.dockW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--dock'));
 };
-$('grip').addEventListener('pointerdown', e => {
-  e.preventDefault();
-  $('grip').setPointerCapture(e.pointerId);
-  dragging = true;
-  document.body.classList.add('dragging');
-});
-$('grip').addEventListener('pointermove', e => {
-  if (!dragging) return;
-  // e.buttons === 0 ＝ 按鍵早就放開了（在視窗外放手時 pointerup 不會回來）。
-  // 沒這道判斷，游標之後只要「經過」黃線就會拖著寬度跑——按鍵沒按也在調整。
-  if (!e.buttons) return endDrag();
-  setDock(innerWidth - e.clientX);
-});
-['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev =>
-  $('grip').addEventListener(ev, endDrag));
-$('grip').addEventListener('dblclick', () => { setDock(400); localStorage.dockW = 400; });
-addEventListener('resize', () => setDock(parseInt(getComputedStyle(document.documentElement).getPropertyValue('--dock'))));
+function bindGrip(id, opt) {
+  const g = $(id);
+  g.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    dragging = opt;
+    document.body.classList.add('dragging');
+  });
+  g.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    // e.buttons === 0 ＝ 按鍵早就放開了（在視窗外放手時 pointerup 不會回來）。
+    // 沒這道判斷，游標之後只要「經過」黃線就會拖著寬度跑——按鍵沒按也在調整。
+    if (!e.buttons) return endDrag();
+    opt.set(opt.fromX(e.clientX));
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => g.addEventListener(ev, endDrag));
+  g.addEventListener('dblclick', () => { opt.set(opt.def); localStorage[opt.key] = opt.def; });
+}
+bindGrip('gripL', { set: setRail, fromX: x => x, def: RAIL_DEF, key: 'railW', varName: '--rail' });
+bindGrip('gripR', { set: setDock, fromX: x => innerWidth - x, def: DOCK_DEF, key: 'dockW', varName: '--dock' });
+addEventListener('resize', () => { setRail(cssW('--rail')); setDock(cssW('--dock')); });
 
 // 中間畫布：有 WebGL build 就嵌，沒有就提示
 fetch('/unity/index.html', { method: 'HEAD' }).then(r => {
@@ -242,18 +267,48 @@ fetch('/unity/index.html', { method: 'HEAD' }).then(r => {
 async function capcard() {
   const box = $('capcard');
   const r = await (await fetch('/office/caps')).json();
-  const open = box.open || localStorage.capsOpen === '1';
   if (!r.ok) {
     box.innerHTML = `<summary>🛠 全員能力</summary><div class="err">${esc(r.error || '取不到')}</div>`;
-  } else {
-    const line = x => `<div class="it"><b>${esc(x.name)}</b>　${
-      esc((x.description || '').split('\n')[0].slice(0, 70))}</div>`;
-    box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}</small></summary>
-      <div class="grp">🛠 工具</div>${r.tools.map(line).join('')}
-      ${r.skills.length ? `<div class="grp">📚 技能</div>${r.skills.map(line).join('')}` : ''}`;
+    box.open = localStorage.capsOpen === '1';
+    return;
   }
-  box.open = open;
+  box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}</small></summary>`;
+  box.open = localStorage.capsOpen === '1';
+  box.appendChild(capGroup('tools', '🛠 工具', r.tools));
+  if (r.skills.length) box.appendChild(capGroup('skills', '📚 技能', r.skills));
   box.addEventListener('toggle', () => { localStorage.capsOpen = box.open ? '1' : '0'; });
+}
+
+// 一組能力：預設收合、只顯示名稱；點某一項才展開它的說明。
+// 超過 10 項再給搜尋框——工具接了 MCP 之後動輒二三十個，捲著找比打字慢。
+function capGroup(key, title, items) {
+  const g = el('details', undefined, 'grp');
+  g.open = localStorage['cap_' + key] === '1';
+  g.innerHTML = `<summary>${title}<span class="n">${items.length}</span></summary>`;
+  const rows = [];
+  for (const x of items) {
+    const it = el('div', undefined, 'it');
+    it.innerHTML = `<b>${esc(x.name)}</b>`;
+    const desc = (x.description || '').split('\n')[0];
+    if (desc) {
+      it.appendChild(el('div', desc, 'd'));
+      it.onclick = () => it.classList.toggle('open');
+    }
+    rows.push([x.name.toLowerCase() + ' ' + desc.toLowerCase(), it]);
+    g.appendChild(it);
+  }
+  if (items.length > 10) {
+    const find = el('input', undefined, 'find');
+    find.placeholder = `在 ${items.length} 項中搜尋…`;
+    find.oninput = () => {
+      const q = find.value.trim().toLowerCase();
+      for (const [hay, node] of rows) node.hidden = q && !hay.includes(q);
+    };
+    find.onclick = e => e.stopPropagation();
+    g.insertBefore(find, g.querySelector('.it'));
+  }
+  g.addEventListener('toggle', () => { localStorage['cap_' + key] = g.open ? '1' : '0'; });
+  return g;
 }
 
 async function roster() {
