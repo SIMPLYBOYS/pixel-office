@@ -1226,10 +1226,21 @@ def load_state() -> None:
     conv_npc.update(data.get("conv_npc", {}))
     pending_approval.update(data.get("pending_approval", {}))
     approval_src.update(data.get("approval_src", {}))
-    for cards in history.values():   # 舊 bug 留下的雜項卡：派工那行曾經自己開卡並卡在「進行中」
-        for t in cards:
-            if t["task"] == "（雜項）" and t["status"] == "working":
-                t["status"] = "note"
+    # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
+    # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
+    # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。
+    junk = 0
+    for aid, cards in history.items():
+        keep = [t for t in cards
+                if not (t["task"] == "（雜項）" and len(t.get("events", [])) <= 1)]
+        junk += len(cards) - len(keep)
+        if len(keep) != len(cards):
+            history[aid] = deque(keep, maxlen=20)
+            last_report[aid] = history[aid][-1] if keep else None
+            if last_report[aid] is None:
+                last_report.pop(aid, None)
+    if junk:
+        print(f"清掉 {junk} 張雜項空殼卡（舊版派工留下的）")
     for aid, card in last_report.items():
         if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
             busy.add(aid)
