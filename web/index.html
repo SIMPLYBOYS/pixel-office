@@ -43,6 +43,9 @@
   .capcard summary small { color: #4c525d; }
   /* 兩層收折：卡片 → 工具／技能各一組 → 每一項再點開看說明。
      一次攤開二十幾個工具的說明，在 232px 的欄位裡等於一片字牆。 */
+  .capcard .grp .grp > summary { padding-left: 20px; }
+  .capcard .grp .grp .it { margin-left: 20px; }
+  .capcard .grp .grp .find { width: calc(100% - 28px); margin-left: 20px; }
   .capcard .grp > summary { cursor: pointer; list-style: none; padding: 5px 8px; font-size: 11px;
                             color: #9aa2ae; display: flex; gap: 6px; align-items: baseline; }
   .capcard .grp > summary::-webkit-details-marker { display: none; }
@@ -272,19 +275,41 @@ async function capcard() {
     box.open = localStorage.capsOpen === '1';
     return;
   }
-  box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}</small></summary>`;
+  const mcp = r.mcp || [];
+  box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}${
+    mcp.length ? '・MCP ' + mcp.length : ''}</small></summary>`;
   box.open = localStorage.capsOpen === '1';
   box.appendChild(capGroup('tools', '🛠 工具', r.tools));
+  // MCP 單獨列：它們不在 registry 裡（模型透過 mcp_call_tool 呼叫），混在一起會誤導。
+  // 再依 server 拆組——名稱本來就是 <server>__<tool>，一台一組才掃得動（實測 38 個）。
+  if (mcp.length) {
+    const byServer = new Map();
+    for (const t of mcp) {
+      const [srv, ...rest] = t.name.split('__');
+      const short = rest.join('__') || t.name;
+      (byServer.get(srv) || byServer.set(srv, []).get(srv)).push({ ...t, name: short });
+    }
+    const parent = capBox('mcp', '🔌 MCP', mcp.length);   // 各 server 收在這一層底下
+    for (const [srv, list] of byServer) parent.appendChild(capGroup('mcp_' + srv, srv, list));
+    box.appendChild(parent);
+  }
   if (r.skills.length) box.appendChild(capGroup('skills', '📚 技能', r.skills));
   box.addEventListener('toggle', () => { localStorage.capsOpen = box.open ? '1' : '0'; });
+}
+
+// 一層收合盒（卡片內共用）：標題 + 計數，展開狀態記在 localStorage
+function capBox(key, title, count) {
+  const g = el('details', undefined, 'grp');
+  g.open = localStorage['cap_' + key] === '1';
+  g.innerHTML = `<summary>${esc(title)}<span class="n">${count}</span></summary>`;
+  g.addEventListener('toggle', () => { localStorage['cap_' + key] = g.open ? '1' : '0'; });
+  return g;
 }
 
 // 一組能力：預設收合、只顯示名稱；點某一項才展開它的說明。
 // 超過 10 項再給搜尋框——工具接了 MCP 之後動輒二三十個，捲著找比打字慢。
 function capGroup(key, title, items) {
-  const g = el('details', undefined, 'grp');
-  g.open = localStorage['cap_' + key] === '1';
-  g.innerHTML = `<summary>${title}<span class="n">${items.length}</span></summary>`;
+  const g = capBox(key, title, items.length);
   const rows = [];
   for (const x of items) {
     const it = el('div', undefined, 'it');
@@ -307,7 +332,6 @@ function capGroup(key, title, items) {
     find.onclick = e => e.stopPropagation();
     g.insertBefore(find, g.querySelector('.it'));
   }
-  g.addEventListener('toggle', () => { localStorage['cap_' + key] = g.open ? '1' : '0'; });
   return g;
 }
 

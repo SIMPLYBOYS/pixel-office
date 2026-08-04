@@ -902,7 +902,10 @@ async def office_caps():
         d = r.json()
     except (httpx.HTTPError, ValueError) as e:
         return {"ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
-    _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or []}
+    # mcp：外部 MCP 工具不個別註冊（cogito 只掛 mcp_call_tool／mcp_describe_tool 兩個閘道），
+    # 所以清單得從 gateway 的目錄另外拿——否則看板上只看得到兩個閘道，看不出實際掛了什麼。
+    _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or [],
+                   "mcp": d.get("mcp") or []}
     return _caps_cache
 
 
