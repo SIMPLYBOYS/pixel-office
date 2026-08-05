@@ -60,7 +60,7 @@ public static class RoomBuilder
     {
         ("chair_1@sit_up", 4, 5), ("chair_2@sit_up", 7, 5), ("chair_3@sit_up", 10, 5), // 上排座位
         ("chair_4@sit_up", 3, 9), ("chair_5@sit_up", 6, 9),
-        ("chair_6@sit_up", 9, 9), ("chair_7@sit_up", 12, 9),  // 下排南側座位
+        ("chair_6@sit_up", 9, 9),     // 下排南側座位（chair_7 的椅子 obj_28 已隨第 4 組移除，坐上去是空氣）
         ("chair_8@sit_right", 7, 12), // 左下房橘椅（椅背在西，坐姿面東）
         ("boss_1", 11, 14),           // 老闆房西側走道（等審批時站這裡罰站）
         ("boss_seat@sit_left", 13, 14),  // 老闆桌對面的那張椅子（椅背在東→坐姿面西對螢幕）
@@ -69,7 +69,7 @@ public static class RoomBuilder
         // 各工位旁的站位：委派時主 agent 走過來，面向坐著的同事
         ("side_1@face_left", 5, 5), ("side_2@face_left", 8, 5), ("side_3@face_left", 11, 5),
         ("side_4@face_right", 2, 9), ("side_5@face_right", 5, 9),
-        ("side_6@face_right", 8, 9), ("side_7@face_right", 11, 9),
+        ("side_6@face_right", 8, 9),
         ("printer_1", 13, 5),         // 印表機前（站著）
     };
 

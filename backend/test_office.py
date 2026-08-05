@@ -248,6 +248,8 @@ def run() -> None:
             assert "p07" in main.busy  # 等審批＝工作中，生活迴圈不得插隊蓋掉罰站走位
             r = c.get("/office/report/p07").json()
             assert r["approval"].startswith("⚠️ *高危操作審批請求*")
+            # 名冊要看得出「誰在等你決定」（提示音之外的視覺線索）
+            assert c.get("/agents").json()["p07"]["approval"] is True
             tl = [e["text"] for e in r["timeline"]]
             assert not any("正在執行工具" in x for x in tl)  # 進度類已濾
             assert any(x.startswith("💬 ⚠️") for x in tl)
@@ -331,7 +333,60 @@ def run() -> None:
 
     souls()
     previews()
-    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步）")
+    alerts()
+    clear_day()
+    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
+
+
+def clear_day() -> None:
+    """清除某一天的歷史：只刪那一天、【不刪進行中的卡】、指標跟著移動。
+    這是整個看板唯一會刪資料的端點，每一條都值得釘住。"""
+    main.history.clear(); main.last_report.clear()
+    a, b = main.report_card("p01", "前天做完的", ""), main.report_card("p01", "前天也做完的", "")
+    a["day"] = b["day"] = "2026-01-01"
+    a["status"] = b["status"] = "ok"
+    stuck = main.report_card("p01", "前天沒收工的", "")   # 同一天但還在跑
+    stuck["day"] = "2026-01-01"
+    today = main.report_card("p01", "今天的", "")
+    old = main.report_card("p01", "沒有日期的舊卡", "")
+    old.pop("day"); old["status"] = "ok"
+
+    with TestClient(main.app) as c:
+        r = c.delete("/office/history/p01", params={"day": "2026-01-01"}).json()
+        assert r["ok"] and r["removed"] == 2 and r["skipped"] == 1, r
+        tasks = [t["task"] for t in main.history["p01"]]
+        assert tasks == ["前天沒收工的", "今天的", "沒有日期的舊卡"], tasks
+        assert main.last_report["p01"]["task"] == "沒有日期的舊卡"   # 指標跟著移到最後一張
+
+        r = c.delete("/office/history/p01", params={"day": ""}).json()   # 空 day＝舊卡那組
+        assert r["ok"] and r["removed"] == 1
+        assert [t["task"] for t in main.history["p01"]] == ["前天沒收工的", "今天的"]
+
+        r = c.delete("/office/history/p01", params={"day": "2026-01-01"}).json()
+        assert r["ok"] is False and "進行中" in r["error"], r   # 只剩進行中的那張：不刪
+        assert c.delete("/office/history/p99", params={"day": ""}).json()["ok"] is False
+    main.history.clear(); main.last_report.clear()
+    main.STATE_FILE.unlink(missing_ok=True)   # TestClient 收工會存檔，別留下測試殘骸
+
+
+def alerts() -> None:
+    """提示音事件：使用者不會盯著畫面，所以【該響的三件事】要進 SSE。
+    刻意只有三種——每個工具呼叫都叮一聲等於沒有聲音，這條約定值得被釘住。"""
+    got = []
+    main.subscribers.clear()
+    q: asyncio.Queue = asyncio.Queue()
+    main.subscribers.add(q)
+    try:
+        main.notify("roster", "p01", alert="approval")
+        main.notify("agent", "p01", alert="done")
+        main.notify("agent", "p01", alert="error")
+        main.notify("roster", "p01")            # 一般狀態變更：不該帶 alert
+        while not q.empty():
+            got.append(q.get_nowait())
+    finally:
+        main.subscribers.discard(q)
+    assert [e.get("alert") for e in got] == ["approval", "done", "error", None], got
+    assert all(e["type"] in ("roster", "agent") for e in got)
 
 
 def previews() -> None:

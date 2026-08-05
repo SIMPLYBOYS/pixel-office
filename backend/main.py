@@ -413,6 +413,7 @@ async def sweep_work() -> None:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
         release_work(aid)
         close_card(aid, "lost")
+        notify("agent", aid, alert="error")
         log_ev(aid, "⚠ 任務失聯中斷")
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
@@ -587,6 +588,9 @@ def report_card(aid: str, task: str, workdir: str = "") -> dict:
     _card_seq += 1
     card = {"id": _card_seq, "task": task, "status": "working", "report": "",
             "workdir": workdir,  # cogito 該會話的工作目錄——產出落在哪，看板直接標出來
+            # day：卡片會跨天累積，只有 HH:MM 分不出「這是哪一天做的」（實際踩到）。
+            # 不改 at 的格式——Unity 的報告面板與既有卡都吃它。
+            "day": time.strftime("%Y-%m-%d"),
             "events": [], "at": time.strftime("%H:%M"), "end": ""}
     history.setdefault(aid, deque(maxlen=20)).append(card)
     last_report[aid] = card
@@ -621,12 +625,17 @@ subscribers: set[asyncio.Queue] = set()
 _dirty = False  # 有狀態變更待落地（存檔器每 2 秒巡）
 
 
-def notify(kind: str, aid: str = "") -> None:
+def notify(kind: str, aid: str = "", alert: str = "") -> None:
+    """alert＝要提示音的事件（approval／done／error）。刻意只有三種：使用者不會盯著畫面，
+    但也不該每個工具呼叫都叮一聲——那跟沒有聲音一樣沒有資訊量。"""
     global _dirty
     _dirty = True  # 所有狀態變更都會走到 notify——持久化搭同一班車
+    ev = {"type": kind, "id": aid}
+    if alert:
+        ev["alert"] = alert
     for q in list(subscribers):
         if q.qsize() < 100:  # 塞爆代表客戶端死了，丟事件等它斷線清理
-            q.put_nowait({"type": kind, "id": aid})
+            q.put_nowait(ev)
 
 
 def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
@@ -776,6 +785,7 @@ async def office_event(ev: dict):
         approval_src.pop(aid, None)
         release_work(aid)
         if not chatting:
+            notify("agent", aid, alert="done" if label == "ok" else "error")
             log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
             a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
     else:
@@ -867,7 +877,7 @@ async def office_chat(ev: dict):
         # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
         busy.add(aid)
         work_last[aid] = time.monotonic()
-        notify("roster")
+        notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
         # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）
         if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
             await goto(aid, BOSS_DOOR)
@@ -1008,6 +1018,37 @@ def serve_file(base: Path, rel: str, render: int):
         media = "text/html; charset=utf-8" if ext == "html" else media
         headers["Content-Security-Policy"] = "sandbox allow-scripts"
     return FileResponse(f, media_type=media, headers=headers)
+
+
+@app.delete("/office/history/{aid}")
+def office_clear_day(aid: str, day: str = ""):
+    """清掉某一天的任務卡（day=""＝那些沒有日期欄位的舊卡）。
+
+    ⚠ 進行中的卡不刪：那是還在跑的任務，刪了畫面與事件流就對不上（事件還會繼續進來，
+    又會被 log_ev 開一張新的雜項卡）。等它收工再清。
+    """
+    cards = history.get(aid)
+    if not cards:
+        return {"ok": False, "error": "這位員工沒有工作紀錄"}
+    keep, removed, skipped = [], 0, 0
+    for t in cards:
+        if t.get("day", "") != day:
+            keep.append(t)
+        elif t["status"] == "working":
+            keep.append(t)
+            skipped += 1
+        else:
+            removed += 1
+    if not removed:
+        return {"ok": False, "error": "那一天沒有可清的卡" + ("（都還在進行中）" if skipped else "")}
+    history[aid] = deque(keep, maxlen=20)
+    # 最新卡指標要跟著移動；整串被清空就連指標一起收掉
+    if keep:
+        last_report[aid] = keep[-1]
+    else:
+        last_report.pop(aid, None)
+    notify("agent", aid)
+    return {"ok": True, "removed": removed, "skipped": skipped, "left": len(keep)}
 
 
 @app.get("/office/ws/{aid}")
@@ -1168,6 +1209,7 @@ def get_agents():
         aid: {"name": a.name, "role": a.persona.get("role", "員工"),
               "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
+              "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
               "memory": list(a.memory)}
         for aid, a in agents.items()
     }

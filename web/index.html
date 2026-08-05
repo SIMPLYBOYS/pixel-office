@@ -30,6 +30,10 @@
   .emp.sel { background: #232936; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4150; flex: none; display: inline-block; }
   .dot.busy { background: var(--accent); margin-right: 5px; }
+  .dot.wait { background: #e07070; margin-right: 5px; animation: blink 1.1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .mute { cursor: pointer; float: right; opacity: .7; }
+  .mute:hover { opacity: 1; }
   .emp .who { min-width: 0; }
   .emp .name { font-size: 14px; }
   .emp .role { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -110,6 +114,8 @@
   .ws .row .sz { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; }
   .ws .row.na { cursor: default; color: var(--dim); }
   .ws .row.na:hover { background: none; }
+  .ws summary .rl { margin-left: auto; opacity: .55; padding: 0 2px; }
+  .ws summary .rl:hover { opacity: 1; color: var(--accent); }
   .feed { flex: 1; overflow-y: auto; padding: 12px 16px; }
   .ev { margin-bottom: 10px; }
   @keyframes evin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -123,11 +129,31 @@
   pre.code { position: relative; background: #0f1319; border: 1px solid var(--line); border-radius: 8px;
              padding: 9px 11px; margin: 6px 0; overflow-x: auto; }
   pre.code code { background: none; padding: 0; display: block; white-space: pre; line-height: 1.55; }
+  /* 語法高亮：低飽和配色，程式碼區塊本來就是深底，太鮮豔反而更難讀 */
+  pre.code .cmt { color: #6b7280; font-style: italic; }
+  pre.code .str { color: #98c379; }
+  pre.code .num { color: #d19a66; }
+  pre.code .kw  { color: #7aa2f7; }
+  pre.code .key { color: #e5c07b; }
   pre.code .lang { position: absolute; right: 8px; top: 4px; font-size: 10px; color: var(--dim);
                    text-transform: uppercase; letter-spacing: .06em; }
   .tx strong, .report strong, .appr strong { font-weight: 600; color: #eef1f6; }
   .tx .h, .report .h, .appr .h { font-weight: 600; color: #eef1f6; font-size: 14.5px; }
   .tx .hr, .report .hr, .appr .hr { display: block; border-top: 1px solid var(--line); margin: 8px 0; }
+  /* 日期分組：過去的每一天收成一條，點開才展開那天的卡 */
+  .daybox { margin-bottom: 10px; }
+  .daybox > summary { cursor: pointer; list-style: none; display: flex; gap: 8px; align-items: baseline;
+                      padding: 5px 4px; font-size: 12px; color: var(--dim); border-bottom: 1px solid var(--line); }
+  .daybox > summary::-webkit-details-marker { display: none; }
+  .daybox > summary:hover { color: var(--text); }
+  .daybox > summary .dt { color: #9aa2ae; }
+  .daybox > summary .cnt { margin-left: auto; font-size: 11px; color: #4c525d; }
+  .daybox > summary .bad { color: #e07070; }
+  .daybox > summary .del { opacity: 0; padding: 0 2px; cursor: pointer; transition: opacity .12s; }
+  .daybox > summary:hover .del { opacity: .5; }        /* 平常藏起來：刪除鍵不該一直盯著你 */
+  .daybox > summary .del:hover { opacity: 1; }
+  .daybox[open] > summary { margin-bottom: 8px; }
+  .daybox .dayitems { padding-left: 2px; }
   .tcard { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; background: #131720; }
   .tcard summary {
     cursor: pointer; padding: 9px 12px; display: flex; align-items: center; gap: 8px;
@@ -149,7 +175,11 @@
   .pv { margin: 6px 0 2px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0f1319; }
   .pv img { display: block; max-width: 100%; margin: 0 auto; }
   .pv iframe { display: block; width: 100%; height: 460px; border: 0; background: #fff; }
-  .pv pre { margin: 0; padding: 10px 12px; max-height: 340px; overflow: auto; white-space: pre; }
+  /* 預覽的捲動【只發生在 .txt 這一層】：md 檔裡本來就可能有好幾個程式碼區塊，
+     每塊各自捲的話會變成一頁好幾條捲軸（實際踩到）。內層只留長行的橫向捲動。 */
+  .pv .txt { max-height: 460px; overflow: auto; }
+  .pv .txt pre.code { margin: 6px 0; border: 0; max-height: none; overflow-x: auto; overflow-y: hidden; }
+  .pv .txt > pre.code:first-child { margin-top: 0; }
   .sbar { padding: 6px 8px; border-bottom: 1px solid var(--line); }
   .sbar button { font: inherit; font-size: 11px; cursor: pointer; border: 1px solid #6d5a2a;
                  background: #2b2417; color: var(--accent); border-radius: 6px; padding: 2px 10px; }
@@ -358,7 +388,8 @@ async function roster() {
                onerror="this.replaceWith(Object.assign(document.createElement('span'),
                         {className:'face ph', textContent:'${esc(a.name[0])}'}))">
           <span class="who"><div class="name">${esc(a.name)}</div><div class="role">${esc(a.role)}</div></span>
-          <span class="state">${a.busy ? '<span class="dot busy"></span>工作中' : '<span class="dot"></span>'}</span>
+          <span class="state">${a.approval ? '<span class="dot wait"></span>等審批'
+            : a.busy ? '<span class="dot busy"></span>工作中' : '<span class="dot"></span>'}</span>
         </div>`;
       }).join('')}`).join('') || '<div class="empty">後端未載入名冊</div>';
     updateComposer();
@@ -374,9 +405,23 @@ async function status() {
       : s.stale ? '<span class="warn">🟡 畫面無回應——重整分頁</span>'
       : `🟢 畫面已連線${s.canvas > 1 ? `（${s.canvas} 個）` : ''}`;
     const disp = s.dispatch ? '🟢 可派工' : '<span class="warn">🔴 派工未接（COGITO_HTTP）</span>';
-    $('status').innerHTML = `${canvas}<br>${disp}`;
+    const bell = `<span class="mute" title="${muted() ? '提示音已關' : '提示音開著'}"
+      onclick="toggleMute()">${muted() ? '🔕' : '🔔'}</span>`;
+    $('status').innerHTML = `${bell}${canvas}<br>${disp}`;
   } catch { $('status').textContent = ''; }
 }
+
+function toggleMute() {
+  localStorage.muted = muted() ? '0' : '1';
+  if (!muted()) cue('done');   // 開啟時試響一聲，順便讓瀏覽器解鎖音訊
+  status();
+}
+
+// 等審批沒人理時每 60 秒再叫一次——HITL 有 5 分鐘逾時，錯過就自動拒絕了。
+// 只在【有人真的在等】時才響，而且靠 /agents 的 approval 旗標判斷，不是自己記狀態。
+setInterval(() => {
+  if (Object.values(agentsData).some(a => a.approval)) cue('approval');
+}, 60000);
 
 // 忙碌防呆：選中的員工工作中 → 鎖送出（審批按鈕不受影響，那是任務中互動）
 function updateComposer() {
@@ -401,15 +446,24 @@ function pick(id) {
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。
 // 路徑一律由橋鎖在該員工的工作區內，這裡只送相對路徑。
+let wsPath = '';   // 目前看的相對路徑：重新載入與自動刷新都要回到同一層
+
 async function workspace(id, path) {
   const box = $('ws');
   const r = await (await fetch(`/office/ws/${id}?p=${encodeURIComponent(path)}`)).json();
   box.hidden = !r.ok;
   if (!r.ok) return;
+  wsPath = path;
   const wasOpen = box.open || localStorage.wsOpen === '1';
-  box.innerHTML = `<summary>📂 工作區${path ? '｜' + esc(path) : ''}</summary>
+  // ↻：agent 剛寫完檔案時，這個面板不會自己知道（它只在換人時抓一次）
+  box.innerHTML = `<summary>📂 工作區${path ? '｜' + esc(path) : ''}
+      <span class="rl" title="重新載入">↻</span></summary>
     <div class="body"><div class="crumb"></div><div class="rows"></div>
     <div class="pv" style="display:none"></div></div>`;
+  box.querySelector('.rl').onclick = e => {
+    e.preventDefault(); e.stopPropagation();   // 不要順手把面板收起來
+    workspace(id, wsPath);
+  };
   box.open = wasOpen;
   box.querySelector('.crumb').innerHTML =
     `<b>${esc(r.root)}</b>${path ? ' / ' + esc(path) : ''}　${r.entries.length} 項`;
@@ -525,6 +579,75 @@ async function drain() {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ── 提示音：使用者不會盯著畫面，HITL 卡住時尤其需要被叫。
+// 用 WebAudio 合成而不是放音檔：沒有 404、沒有授權問題、沒有第一次播放的載入延遲。
+// 刻意只有三種聲音——每個工具呼叫都叮一聲，等於沒有聲音。
+//
+// 寫成【短樂句】而不是單音：單音很容易被當成系統雜音略過（實測會漏聽），
+// 一段有旋律走向 + 低音襯底的樂句，在背景做別的事時仍然聽得出「是那個東西在叫」。
+const HZ = { E3: 164.81, G3: 196.00, A3: 220.00, C4: 261.63, E4: 329.63, G4: 392.00,
+             A4: 440.00, C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99,
+             A5: 880.00, C6: 1046.50, E6: 1318.51 };
+// [音高, 起點秒, 長度秒, 音量倍率]
+const CUES = {
+  // 審批：上行琶音 + 重複兩次的鉤子（最需要被聽到，也最長）
+  approval: {
+    type: 'triangle', gain: .16,
+    seq: [[HZ.C5, .00, .14, 1], [HZ.E5, .12, .14, 1], [HZ.G5, .24, .14, 1], [HZ.C6, .36, .26, 1.1],
+          [HZ.G5, .66, .12, .9], [HZ.C6, .78, .34, 1.1],
+          [HZ.G5, 1.16, .12, .9], [HZ.C6, 1.28, .44, 1.15]],
+    bass: [[HZ.C4, .00, .60, .5], [HZ.G3, .62, .55, .5], [HZ.C4, 1.16, .60, .5]],
+  },
+  // 完成：四音上行收在八度，短而輕（好消息不需要打擾）
+  done: {
+    type: 'sine', gain: .13,
+    seq: [[HZ.C5, .00, .11, 1], [HZ.E5, .10, .11, 1], [HZ.G5, .20, .11, 1], [HZ.C6, .30, .34, 1]],
+    bass: [[HZ.C4, .00, .55, .45]],
+  },
+  // 失敗：下行小三度收尾，帶點粗糙感（一聽就知道不是好消息）
+  error: {
+    type: 'sawtooth', gain: .10,
+    seq: [[HZ.E5, .00, .16, 1], [HZ.C5, .15, .16, 1], [HZ.A4, .30, .18, 1], [HZ.E4, .47, .42, 1]],
+    bass: [[HZ.A3, .00, .40, .5], [HZ.E3, .42, .55, .5]],
+  },
+};
+let audio = null;
+const muted = () => localStorage.muted === '1';
+function cue(name) {
+  const c = CUES[name];
+  if (!c || muted()) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();   // 自動播放政策：等使用者互動過才會真的出聲
+    // 低通讓合成音不刺耳（尤其 sawtooth）——在別的視窗工作時聽起來才不像警報器壞掉
+    const filt = audio.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 3200;
+    filt.connect(audio.destination);
+    const t0 = audio.currentTime + 0.03;
+    const voice = (notes, type, vol) => {
+      for (const [freq, at, dur, g = 1] of notes) {
+        const osc = audio.createOscillator(), env = audio.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        const t = t0 + at;
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol * g, t + 0.015);        // 快起音，不爆音
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);      // 自然衰減
+        osc.connect(env).connect(filt);
+        osc.start(t); osc.stop(t + dur + 0.05);
+      }
+    };
+    voice(c.seq, c.type, c.gain);
+    if (c.bass) voice(c.bass, 'sine', c.gain);   // 低音一律用 sine：只負責厚度，不搶旋律
+  } catch { /* 沒有音訊裝置：安靜失敗，不影響看板 */ }
+}
+// 瀏覽器要求先有使用者互動才能出聲：任何一次點擊都補建 context
+addEventListener('pointerdown', () => {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  if (audio && audio.state === 'suspended') audio.resume();
+}, { once: true });
+
 // 自動跟捲：使用者貼在底部時，內容長出來就跟著捲到底；往上捲看歷史就停止跟捲。
 // 必須在打字的【每一幀】跟捲——文字是逐字長出來的，只在事件插入時捲一次會落後。
 let stuck = true;
@@ -556,6 +679,60 @@ function typewrite(el, text) {
       requestAnimationFrame(step);
     })(t0);
   });
+}
+
+// ── 語法高亮：自己寫一個小 tokenizer，不引外部函式庫。
+// 一個通用規則 + 每語言的關鍵字表就涵蓋九成閱讀需求（註解／字串／數字／關鍵字），
+// 而 highlight.js 那類要塞十萬字進 repo，為了看一眼 agent 寫的檔案不值得。
+// ⚠ 一律用 DOM 節點組裝、不碰 innerHTML——這裡顯示的是 agent 產生的內容。
+const KW = {
+  python: 'def class return if elif else for while import from as try except finally with lambda None True False and or not in is pass raise yield assert async await global del',
+  javascript: 'const let var function return if else for while do class new import export default from async await try catch finally throw typeof instanceof null undefined true false this switch case break continue',
+  typescript: 'const let var function return if else for while class new import export default from async await try catch finally throw type interface enum implements extends public private readonly null undefined true false this',
+  go: 'func package import type struct interface map chan go defer return if else for range switch case default break continue var const nil true false error string int int64 float64 bool byte make new',
+  bash: 'if then else elif fi for while do done case esac function return export local readonly echo cd set trap exit source',
+  sql: 'select from where join left right inner outer group by order having limit insert update delete create table alter drop index into values as on and or not null distinct',
+  css: 'important media keyframes import supports',
+};
+const LINE_COMMENT = { python: '#', bash: '#', yaml: '#', javascript: '//', typescript: '//', go: '//', sql: '--', css: null, json: null };
+const BLOCK_COMMENT = { javascript: 1, typescript: 1, go: 1, css: 1 };
+
+function tokenizer(lang) {
+  const parts = [];
+  if (BLOCK_COMMENT[lang]) parts.push('\\/\\*[\\s\\S]*?\\*\\/');
+  const lc = lang in LINE_COMMENT ? LINE_COMMENT[lang] : '#';   // 未知語言：當 # 與 // 都算註解
+  if (lc) parts.push(`${lc.replace(/[/\-]/g, '\\$&')}[^\n]*`);
+  if (!(lang in LINE_COMMENT)) parts.push('\\/\\/[^\n]*');
+  parts.push('"(?:[^"\\\\\n]|\\\\.)*"', "'(?:[^'\\\\\n]|\\\\.)*'", '`(?:[^`\\\\]|\\\\.)*`');
+  parts.push('\\b\\d[\\d_.]*\\b');
+  if (KW[lang]) parts.push(`\\b(?:${KW[lang].split(' ').join('|')})\\b`);
+  return new RegExp(parts.join('|'), 'g');
+}
+const TOKEN_RE = {};
+
+function highlight(code, text, lang) {
+  const key = lang || '';
+  const re = TOKEN_RE[key] || (TOKEN_RE[key] = tokenizer(key));
+  re.lastIndex = 0;
+  const frag = document.createDocumentFragment();
+  let i = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > i) frag.appendChild(document.createTextNode(text.slice(i, m.index)));
+    const tok = m[0];
+    const c = tok[0];
+    const cls = /["'`]/.test(c) ? 'str'
+      : c === '#' || tok.startsWith('//') || tok.startsWith('/*') || tok.startsWith('--') ? 'cmt'
+      : /\d/.test(c) ? 'num' : 'kw';
+    // json/yaml 沒有關鍵字，字串後面接冒號的當成 key（那才是掃讀時的定位點）
+    const isKey = (key === 'json' || key === 'yaml') && cls === 'str'
+      && /^\s*:/.test(text.slice(m.index + tok.length));
+    frag.appendChild(el('span', tok, isKey ? 'key' : cls));
+    i = m.index + tok.length;
+  }
+  if (!frag.childNodes.length) return;          // 整段沒有可標的東西：維持純文字
+  if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+  code.textContent = '';
+  code.appendChild(frag);
 }
 
 // 內容渲染：``` 圍欄 → 程式碼區塊、`行內` → 行內碼、**粗** 與 *粗*（cogito 出訊是 Slack 語法）、
@@ -664,12 +841,72 @@ async function renderBody(box, text, animate) {
       // 新到的程式碼逐字浮現（看 agent 把檔案「寫出來」）；補歷史時直接上字。
       // typewrite 依時間推進、總長 ≲1.4 秒，所以檔案再長也不會讓人乾等。
       if (animate) await typewrite(code, seg.v); else code.textContent = seg.v;
+      highlight(code, seg.v, seg.lang);   // 打完字才上色（打字中反覆重建 DOM 會閃）
       continue;
     }
     const span = el('span');
     box.appendChild(span);
     if (animate) await typewrite(span, plainOf(seg.v));   // 打字階段就不帶語法符號
     markdown(span, seg.v);                                // 打完只是換上樣式，字不會跳
+  }
+}
+
+// 時間標籤：今天的卡只顯示時刻，跨天的補上日期——一整串卡累積下來，
+// 只有 HH:MM 根本分不出是哪一天處理的。舊卡沒有 day 欄位，就維持原樣只顯示時刻。
+const today = () => new Date().toLocaleDateString('sv');   // sv 剛好是 YYYY-MM-DD
+function when(t) {
+  const span = t.at + (t.end ? '–' + t.end : '');
+  if (!t.day || t.day === today()) return span;
+  const [, m, d] = t.day.split('-');
+  return `${+m}/${+d} ${span}`;
+}
+
+// 依完成日分組：今天的任務直接攤在外面（你正在做的事不該還要點一下），
+// 過去的每一天收成一組，點開才看得到——一週下來上百張卡，攤平就沒法用了。
+// 日期不明的舊卡（沒有 day 欄位）另收一組排在最上面。
+function dayBox(feed, t) {
+  const day = t.day || '';
+  if (day === today()) return feed;              // 今天：不進分組，直接掛在 feed 底下
+  let box = feed.querySelector(`:scope > .daybox[data-day="${day}"]`);
+  if (box) return box.querySelector('.dayitems');
+  box = el('details', undefined, 'daybox');
+  box.dataset.day = day;
+  const [, m, d] = day ? day.split('-') : [];
+  box.innerHTML = `<summary><span class="dt">${day ? `${+m}/${+d}` : '更早（日期不明）'}</span>
+      <span class="cnt"></span><span class="del" title="清掉這一天的紀錄">🗑</span>
+    </summary><div class="dayitems"></div>`;
+  box.querySelector('.del').onclick = e => {
+    e.preventDefault(); e.stopPropagation();     // 別順手把分組展開／收起
+    clearDay(day, box);
+  };
+  // 舊卡那組永遠排最前面，其餘依日期排序——卡片本身是照時間來的，容器順序要自己顧
+  const boxes = [...feed.querySelectorAll(':scope > .daybox')];
+  const after = boxes.find(b => (b.dataset.day || '') > day);
+  feed.insertBefore(box, after || feed.querySelector(':scope > .tcard') || null);
+  return box.querySelector('.dayitems');
+}
+
+// 清掉某一天的紀錄。不可逆，所以先問一次——這是整個看板唯一會刪資料的動作。
+async function clearDay(day, box) {
+  const n = box.querySelectorAll('.tcard').length;
+  const label = day ? day.split('-').slice(1).map(Number).join('/') : '日期不明';
+  if (!confirm(`清掉「${label}」這 ${n} 件任務紀錄？\n（進行中的不會被刪，此動作無法復原）`)) return;
+  const r = await (await fetch(`/office/history/${selected}?day=${encodeURIComponent(day)}`,
+    { method: 'DELETE' })).json();
+  if (!r.ok) { $('hint').textContent = `清不掉：${r.error}`; return; }
+  $('hint').textContent = `已清 ${r.removed} 件` + (r.skipped ? `（${r.skipped} 件進行中保留）` : '');
+  $('feed').dataset.agent = '';   // 逼下一輪整串重建，不然被刪的 DOM 還留著
+  feed();
+}
+
+// 每組標題的計數：幾件、有沒有出事——收起來時也要看得出那天發生過什麼
+function dayCounts(feed) {
+  for (const box of feed.querySelectorAll(':scope > .daybox')) {
+    const cards = box.querySelectorAll('.tcard');
+    const bad = [...cards].filter(c => c.querySelector('.badge')?.classList.contains('error')
+      || c.querySelector('.badge')?.classList.contains('lost')).length;
+    box.querySelector('.cnt').innerHTML = `${cards.length} 件` +
+      (bad ? ` <span class="bad">· ${bad} 未完成</span>` : '');
   }
 }
 
@@ -687,6 +924,15 @@ function evEl(e) {
   return d;
 }
 
+// 真的看得到嗎：卡片自己展開還不夠——它可能整組被收在日期分組裡（往上每一層
+// details 都要是展開的）。少了這道判斷就會對著看不見的內容慢慢打字，白佔佇列。
+function onScreen(node) {
+  for (let d = node.closest('details'); d; d = d.parentElement?.closest('details')) {
+    if (!d.open) return false;
+  }
+  return true;
+}
+
 // 新事件上畫面：歷史事件與收合中的卡直接塞（沒人看，別排隊擋住後面），
 // 使用者看得到的才走佇列逐字浮現。
 function appendEv(body, e, live) {
@@ -697,7 +943,7 @@ function appendEv(body, e, live) {
   const mine = gen;
   enqueue(async rush => {
     if (mine !== gen) return;                       // 期間換了員工：這則作廢
-    if (rush || document.hidden || !body.closest('details')?.open) return instant();
+    if (rush || document.hidden || !onScreen(body)) return instant();
     body.appendChild(d);
     keepBottom();
     d.classList.add('in');
@@ -786,11 +1032,21 @@ function showFile(pv, row, chip, f, url) {  // preview() 已被收合摘要用�
     pv.appendChild(fr);
   } else {                                              // 文字：抓回來用程式碼區塊顯示
     if (f.ext === 'html') pv.appendChild(sandboxBar(pv, f, url));
-    const pre = el('pre');
-    pv.appendChild(pre);
+    // 容器用 div 不用 pre：renderBody 產生的已經是 pre.code，外面再包一層就變成
+    // 「捲軸裡的捲軸」。捲動一律交給 .txt 這一層（見 CSS）。
+    const holder = el('div', undefined, 'txt');
+    pv.appendChild(holder);
     fetch(url).then(r => r.text()).then(txt => {
-      pre.textContent = '';
-      renderBody(pre, '```' + (LANG_BY_EXT[f.ext] || '') + '\n' + txt.slice(0, 20000) + '\n```', false);
+      const body = txt.slice(0, 40000);
+      if (f.ext === 'md') return renderBody(holder, body, false);   // md 就當 md 排版
+      // 其餘檔案【不包圍欄】直接建程式碼區塊：包了的話，檔案內容自己的 ``` 會把外層
+      // 提早關掉，整份被切成好幾段、每段一個捲動框（實際踩到的症狀）。
+      const pre = el('pre', undefined, 'code');
+      if (LANG_BY_EXT[f.ext]) pre.appendChild(el('span', LANG_BY_EXT[f.ext], 'lang'));
+      const code = el('code', body);
+      pre.appendChild(code);
+      holder.appendChild(pre);
+      highlight(code, body, LANG_BY_EXT[f.ext] || '');
     });
   }
   keepBottom();
@@ -828,7 +1084,7 @@ function sync(el, t, bodySel, live) {
   const b = el.querySelector(':scope > summary .badge');
   b.className = 'badge ' + t.status;
   b.textContent = BADGE[t.status] || t.status;
-  el.querySelector(':scope > summary .trange').textContent = t.at + (t.end ? '–' + t.end : '');
+  el.querySelector(':scope > summary .trange').textContent = when(t);
   const pv = el.querySelector(':scope > summary .spreview');
   if (pv) pv.textContent = preview(t);
 
@@ -882,12 +1138,13 @@ async function feed() {
     }
     for (const [i, t] of (r.history || []).entries()) {
       t.id = t.id ?? 'ix' + i;   // 沒編號的卡不能全叫 undefined——會互搶同一張 DOM 卡
-      let el = f.querySelector(`:scope > .tcard[data-id="${t.id}"]`);
-      if (!el) { el = cardEl(t); f.appendChild(el); }
+      let el = f.querySelector(`.tcard[data-id="${t.id}"]`);   // 可能在某個日期分組裡
+      if (!el) { el = cardEl(t); dayBox(f, t).appendChild(el); }
       // 新開的卡也要逐則浮現：舊寫法是「卡已存在才算 live」，於是每張新任務卡的
       // 開頭幾則會一起瞬間冒出來——那正是還看得到的「一次好幾則」。
       sync(el, t, '.tbody', !initial);
     }
+    dayCounts(f);
     keepBottom();
 
     const card = $('approvalCard');
@@ -927,8 +1184,16 @@ function openStream() {
   es = new EventSource('/office/stream');
   es.onmessage = e => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.alert) cue(ev.alert);          // 不管在看哪一位，該響的都要響
     if (ev.type === 'roster') roster();
-    else if (ev.type === 'agent' && ev.id === selected) feed();
+    else if (ev.type === 'agent') {
+      if (ev.id === selected) {
+        feed();
+        // 任務收工＝產出落地了：工作區面板開著就順手刷新，不用手動按 ↻
+        if ((ev.alert === 'done' || ev.alert === 'error') && $('ws').open) workspace(selected, wsPath);
+      }
+      roster();
+    }
   };
 }
 function closeStream() { if (es) { es.close(); es = null; } }
