@@ -394,6 +394,7 @@ async function roster() {
       }).join('')}`).join('') || '<div class="empty">後端未載入名冊</div>';
     updateComposer();
     status();
+    titleAlert();   // 有人在等審批就寫進分頁標題——這條不受自動播放政策影響
   } catch { $('roster').innerHTML = '<div class="empty">後端未連線</div>'; }
 }
 
@@ -405,15 +406,18 @@ async function status() {
       : s.stale ? '<span class="warn">🟡 畫面無回應——重整分頁</span>'
       : `🟢 畫面已連線${s.canvas > 1 ? `（${s.canvas} 個）` : ''}`;
     const disp = s.dispatch ? '🟢 可派工' : '<span class="warn">🔴 派工未接（COGITO_HTTP）</span>';
-    const bell = `<span class="mute" title="${muted() ? '提示音已關' : '提示音開著'}"
-      onclick="toggleMute()">${muted() ? '🔕' : '🔔'}</span>`;
+    const blocked = !muted() && (!audio || audio.state !== 'running');
+    const bell = `<span class="mute" title="${
+      muted() ? '提示音已關（點我開啟）'
+      : blocked ? '瀏覽器擋住音訊——點我解鎖（點 Unity 畫布不算互動）'
+      : '提示音開著'}" onclick="toggleMute()">${muted() ? '🔕' : blocked ? '🔇' : '🔔'}</span>`;
     $('status').innerHTML = `${bell}${canvas}<br>${disp}`;
   } catch { $('status').textContent = ''; }
 }
 
 function toggleMute() {
   localStorage.muted = muted() ? '0' : '1';
-  if (!muted()) cue('done');   // 開啟時試響一聲，順便讓瀏覽器解鎖音訊
+  if (!muted()) { unlock(); cue('done'); }   // 開啟時試響一聲，順便解鎖音訊
   status();
 }
 
@@ -642,11 +646,21 @@ function cue(name) {
     if (c.bass) voice(c.bass, 'sine', c.gain);   // 低音一律用 sine：只負責厚度，不搶旋律
   } catch { /* 沒有音訊裝置：安靜失敗，不影響看板 */ }
 }
-// 瀏覽器要求先有使用者互動才能出聲：任何一次點擊都補建 context
-addEventListener('pointerdown', () => {
-  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
-  if (audio && audio.state === 'suspended') audio.resume();
-}, { once: true });
+// 瀏覽器要求「使用者對【這個頁面】互動過」才准出聲。點 Unity 畫布不算——那是 iframe，
+// 父頁面收不到。所以【每次】互動都試著解鎖，直到 context 真的 running 為止。
+function unlock() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; } }
+  if (audio.state === 'suspended') audio.resume().then(status, status);
+}
+for (const ev of ['pointerdown', 'keydown']) addEventListener(ev, unlock);
+
+// 音訊被擋住時，聲音一定漏聽——所以另外用【瀏覽器分頁標題】當備援警示：
+// 切到別的視窗也看得到，而且完全不受自動播放政策影響。
+const TITLE = 'AI 辦公室';
+function titleAlert() {
+  const n = Object.values(agentsData).filter(a => a.approval).length;
+  document.title = n ? `⚠️ ${n} 件待審批 · ${TITLE}` : TITLE;
+}
 
 // 自動跟捲：使用者貼在底部時，內容長出來就跟著捲到底；往上捲看歷史就停止跟捲。
 // 必須在打字的【每一幀】跟捲——文字是逐字長出來的，只在事件插入時捲一次會落後。

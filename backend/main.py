@@ -1177,7 +1177,7 @@ async def office_dispatch(d: dict):
     elif verb in ("approve", "reject"):
         pending_approval.pop(aid, None)  # cogito 確認收到才收卡
         approval_src.pop(aid, None)
-        notify("agent", aid)
+        notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
         await bubble(aid, "✓ 放行" if verb == "approve" else "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")
         if desk := WORK_DESK.get(aid):  # 審批完回工位繼續
