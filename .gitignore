@@ -38,6 +38,8 @@ unity/Assets/_Recovery.meta
 # 橋端工作紀錄落地（任務卡/黏性指派）
 backend/office_state.json
 backend/office_state.tmp
+# 測試把 STATE_FILE 導到這個檔（test_office.py），每跑一次就重生
+backend/office_state_test.json
 
 # Playwright MCP 診斷產物（截圖/console log）
 .playwright-mcp/
