@@ -56,6 +56,14 @@ public static class RoomBuilder
 
     // (名稱, cell x, cell y)，cell 以設計圖左上為 (0,0)
     // 「@動作」後綴：NPC 到點後執行（sit_up=背對鏡頭入座、sit_left/right=側面坐姿）
+    //
+    // ⚠️ sit_up 不是坐姿。素材只切得出兩個真坐姿（NPCSprite.sitLeft/sitRight，見
+    // tools/make_character.py 的 SITS）；sit_up 在 NPCSprite.Pick() 是 fallback 到 idleUp——
+    // 站著的背影。工位看起來像坐著，靠的是【椅子畫在人前面】(Y-sort by pivot) 擋住下半身。
+    // 那個把戲只在「椅背朝鏡頭」時成立，所以：
+    //   ✅ 排在桌子南側、椅背朝鏡頭的工位 → sit_up 可用
+    //   ❌ 會議桌／圓桌那種人坐在桌子【對面】的擺法 → 會變成「站在桌子後面」，
+    //      要改成長桌東西兩側對坐（sit_left ↔ sit_right），一邊三個。
     static readonly (string name, int cx, int cy)[] Waypoints =
     {
         ("chair_1@sit_up", 4, 5), ("chair_2@sit_up", 7, 5), ("chair_3@sit_up", 10, 5), // 上排座位
