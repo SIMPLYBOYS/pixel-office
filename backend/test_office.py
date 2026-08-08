@@ -335,6 +335,7 @@ def run() -> None:
     previews()
     alerts()
     clear_day()
+    kanban()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
 
 
@@ -472,6 +473,44 @@ def souls() -> None:
         assert main.sync_souls()["wrote"] >= 1
     main.CHANNELS_DIR = None                             # 沒設定就整個不啟用
     assert main.sync_souls() == {"wrote": 0, "same": 0, "skipped": 0}
+
+
+def kanban() -> None:
+    """看板是名冊卡但不是 NPC：不能被當成空閒員工去接別人的頻道，也不該有身體。
+    另外驗具名 agent 有落地——沒有它，主持人點名點到的是空氣。"""
+    import tempfile
+
+    # 1. 不進「可指派的空閒 NPC」名單：否則任何一個沒指名的頻道都可能被派給看板，
+    #    那個頻道的事件就會全部演不出來（看板沒有身體）。
+    assert main.KANBAN in main.agents, "看板要在名冊裡（任務卡/工作串靠它）"
+    assert main.KANBAN not in main.npcs(), "看板不該被當成有身體的員工"
+    main.conv_npc.clear()
+    for _ in range(len(main.npcs()) + 2):        # 把所有 NPC 都佔滿，逼它去找下一個可用的
+        main.resolve_npc(f"slack:{_}")
+    assert main.KANBAN not in main.conv_npc.values(), "看板被當成空閒員工指派出去了"
+    main.conv_npc.clear()
+
+    # 2. 具名 agent 落地：檔名用【名字】，主持人就是照名字點名的。
+    with tempfile.TemporaryDirectory() as tmp:
+        main.CHANNELS_DIR = Path(tmp)
+        assert main.sync_agents() >= 1
+        d = Path(tmp) / f"office_{main.KANBAN}" / ".claw" / "agents"
+        names = {p.stem for p in d.glob("*.md")}
+        assert main.agents["p19"].name in names, f"老徐沒被寫成具名 agent：{names}"
+        assert main.agents[main.KANBAN].name not in names, "看板不該把自己也列成可點名的成員"
+
+        one = next(d.glob("*.md"))
+        head = one.read_text(encoding="utf-8")
+        assert head.startswith("---\nname: "), "缺 frontmatter，cogito 解析不出名字"
+        assert "description: " in head.split("---")[1], "缺 description——主持人就不知道何時該點他"
+
+        assert main.sync_agents() == 0            # 內容相同不重寫
+        mine = "# 我自己寫的\n不要動。\n"           # 沒有標記＝人寫的
+        one.write_text(mine, encoding="utf-8")
+        main.sync_agents()
+        assert one.read_text(encoding="utf-8") == mine, "手寫的具名 agent 被覆蓋了"
+    main.CHANNELS_DIR = None
+    assert main.sync_agents() == 0                # 沒設定就整個不啟用
 
 
 if __name__ == "__main__":

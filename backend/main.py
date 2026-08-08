@@ -42,6 +42,19 @@ app = FastAPI()
 viewers: set[WebSocket] = set()
 events: list[dict] = []
 agents: dict[str, Agent] = {}
+
+# ── 看板：一張沒有 NPC 的名冊卡。
+# kanban 是「模式」不是「人」——同一個任務交給整個團隊，而不是某一個人。放進 agents 是為了讓
+# 任務卡、工作串、歷史分組、檔案預覽【整套沿用】（那些全部只認 aid 字串）；代價是要在兩個地方
+# 把它擋掉：生活迴圈（它沒有身體）與投影走位（它沒有工位）。擋在共用函式而不是每個呼叫點——
+# 新增的投影動作漏擋就會露餡，擋在源頭才不用靠紀律。
+# 對應的 cogito 會話是 office:kanban，記憶與 .claw/agents/ 都落在它自己的目錄（共同記憶）。
+KANBAN = "kanban"
+
+
+def npcs() -> dict[str, Agent]:
+    """真的有身體的那些。生活迴圈、同事名單、頻道自動指派都只看這個。"""
+    return {aid: a for aid, a in agents.items() if aid != KANBAN}
 arrived: dict[str, asyncio.Event] = {}
 loops: list[asyncio.Task] = []
 waypoint_list: list[str] = []
@@ -117,6 +130,8 @@ def load_roster() -> None:
         # 於是一開機全員直接回工位趴著，再也不會走動（實測到的）。
         last_work[f.stem] = time.monotonic()
     print(f"名冊載入 {len(agents)} 位員工：{'、'.join(a.name for a in agents.values())}")
+    # 看板放在名冊【之後】才加：上面那行的人數才不會把它算成員工。
+    agents[KANBAN] = Agent(KANBAN, persona_dir)
 
 
 def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
@@ -128,8 +143,8 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         return
     stop_agents()
     waypoint_list = waypoints
-    for aid, a in agents.items():
-        colleagues = [o.name for oid, o in agents.items() if oid != aid]
+    for aid, a in npcs().items():   # 看板沒有身體，不進生活迴圈也不算同事
+        colleagues = [o.name for oid, o in npcs().items() if oid != aid]
         tools = build_tools(waypoints, colleagues)
         loops.append(asyncio.create_task(agent_loop(a, tools)))
     global watchdog
@@ -339,11 +354,15 @@ def say(aid: str, text: str) -> dict:
 async def pose(aid: str, action: str) -> None:
     """讓 NPC 擺一個姿勢（move_to 會自動清掉，不必手動還原）。
     只投影「站著不動看不出來」的狀態——等外部回應、長時間沒事做。"""
+    if aid == KANBAN:
+        return
     await send_cmd({"agent_id": aid, "action": "use", "target": action})
 
 
 async def goto(aid: str, target: str) -> None:
     """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。"""
+    if aid == KANBAN:   # 沒有身體的東西不會走路
+        return
     occupied[aid] = target
     await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
 
@@ -355,6 +374,8 @@ pacers: dict[str, asyncio.Task] = {}
 
 
 async def bubble(aid: str, text: str, collapsible: bool = False) -> None:
+    if aid == KANBAN:   # 沒有頭，就沒有頭上的泡泡（工作串照樣看得到）
+        return
     q = bubble_q.setdefault(aid, [])
     if collapsible and q and q[-1][1]:
         q[-1] = (text, True)
@@ -703,7 +724,7 @@ def resolve_npc(ext: str) -> str | None:
         return ext.split(":", 1)[1]  # Web 外殼派工：conv 就是指名的員工
     if ext in conv_npc:
         return conv_npc[ext]
-    free = [x for x in agents if x not in busy and x not in conv_npc.values()]
+    free = [x for x in npcs() if x not in busy and x not in conv_npc.values()]
     if not free:
         return None  # 全員有主：事件丟棄（辦公室演不了，任務本身照跑）
     conv_npc[ext] = free[0]
@@ -1210,6 +1231,7 @@ def get_agents():
               "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
               "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
+              "npc": aid != KANBAN,   # False＝這張卡沒有身體（看板），前端不畫走位/位置
               "memory": list(a.memory)}
         for aid, a in agents.items()
     }
@@ -1237,6 +1259,50 @@ def soul_doc(aid: str, body: str) -> str:
     return (f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生。手改會在橋下次啟動時被覆蓋；\n"
             f"     想自己維護這個檔案，把這兩行標記刪掉即可，橋就不會再動它。 -->\n\n"
             f"{head}\n\n{body.strip()}\n")
+
+
+def agent_doc(aid: str, body: str) -> str:
+    """把人設寫成 cogito 具名 agent 的格式（frontmatter name/description + body 當 system prompt）。
+    description 會出現在主持人的工具說明裡——那不是註解，是 prompt：寫得爛，主持人就不知道
+    什麼時候該點名這個人。所以取人設的「決策偏好」那句而不是職稱了事。"""
+    p = agents[aid].persona
+    desc = "；".join(x for x in [p.get("role", ""), p.get("personality", "")] if x)
+    return (f"---\nname: {p.get('name', aid)}\ndescription: {desc}\n---\n"
+            f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生，刪掉這行即可自行維護。 -->\n\n"
+            f"{body.strip()}\n")
+
+
+def sync_agents() -> int:
+    """把六個人設另外投影成 kanban 頻道的【具名 agent】（.claw/agents/<名字>.md），
+    讓主持人能用 spawn_subagent 點名真正的人設，而不是在 task_prompt 裡臨時捏一個。
+
+    只寫進 kanban 頻道：基本模式下每位 agent 就是他自己，不需要具名子 agent；只有協作模式的
+    主持人需要點名。這個分界不是刻意設計的，是「誰需要誰」自己落出來的。
+    沿用 SOUL_MARK 保護：沒有標記的檔案是人寫的，不覆蓋。"""
+    if CHANNELS_DIR is None:
+        return 0
+    persona_dir = Path(__file__).parent / "personas"
+    dst_dir = CHANNELS_DIR / f"office_{KANBAN}" / ".claw" / "agents"
+    wrote = 0
+    for aid, a in npcs().items():
+        src = persona_dir / f"{aid}.md"
+        if not src.exists():
+            continue
+        dst = dst_dir / f"{a.name}.md"
+        want = agent_doc(aid, src.read_text(encoding="utf-8"))
+        if dst.exists():
+            old = dst.read_text(encoding="utf-8")
+            if SOUL_MARK not in old:   # ⚠ 保護：手寫的一律不動
+                print(f"⚠ {dst} 不是由人設產生的（沒有標記），保留原檔不覆蓋")
+                continue
+            if old == want:
+                continue
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst.write_text(want, encoding="utf-8")
+        wrote += 1
+    if wrote:
+        print(f"具名 agent 同步（{dst_dir}）：寫入 {wrote}")
+    return wrote
 
 
 def sync_souls() -> dict[str, int]:
@@ -1338,6 +1404,7 @@ async def state_saver() -> None:
 async def _startup() -> None:
     load_state()
     sync_souls()
+    sync_agents()   # kanban 頻道的具名 agent（主持人才點得到名）
     # watchdog 脫鉤 Unity：純 Web 派工（不開 Unity）失聯保險也要在
     global watchdog
     if watchdog is None or watchdog.done():

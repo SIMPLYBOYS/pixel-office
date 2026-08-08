@@ -370,15 +370,17 @@ async function roster() {
     const d = await (await fetch('/agents')).json();
     agentsData = d;
     const ids = Object.keys(d);
-    $('count').textContent = ids.length || '';
+    $('count').textContent = ids.filter(id => d[id].npc !== false).length || '';   // 看板不是員工，別算人頭
     // 依 team 分組（persona 的 team 欄位；沒填的歸「未分組」，排最後）
     const teams = new Map();
     for (const id of ids) {
       const t = d[id].team || '未分組';
       (teams.get(t) || teams.set(t, []).get(t)).push(id);
     }
+    // 「模式」（整組都沒有身體，例如看板）置頂：它是入口不是同事，藏在字母序中間很難找。
+    const isMode = t => teams.get(t).every(id => d[id].npc === false);
     const ordered = [...teams.keys()].sort((a, b) =>
-      (a === '未分組') - (b === '未分組') || a.localeCompare(b, 'zh-Hant'));
+      (isMode(b) - isMode(a)) || (a === '未分組') - (b === '未分組') || a.localeCompare(b, 'zh-Hant'));
     $('roster').innerHTML = ordered.map(t => `
       <div class="team">${esc(t)}<small>${teams.get(t).length}</small></div>
       ${teams.get(t).map(id => {
