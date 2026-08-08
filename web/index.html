@@ -440,9 +440,14 @@ function updateComposer() {
   btn.textContent = workingNow ? '中止' : '送出';
   btn.classList.toggle('stop', workingNow);
   btn.onclick = () => dispatch(workingNow ? '/stop' : $('box').value);
+  // 看板不是人，措辭不能沿用派工那套：「派給這位員工」會讓人以為只有一個人在做，
+  // 實際上它會開一場全隊會議、產出 spec、再分工。說清楚它會做什麼，比說它是誰重要。
+  const isMode = a && a.npc === false;
   $('box').placeholder = workingNow
-    ? `⏳ ${a.name} 工作中——可按「中止」停下這件事`
-    : '描述任務派給這位員工…';
+    ? (isMode ? '⏳ 協作進行中——可按「中止」停下整場'
+              : `⏳ ${a.name} 工作中——可按「中止」停下這件事`)
+    : (isMode ? '描述一件要整隊完成的任務——會先開會、收斂成 spec，再分工…'
+              : '描述任務派給這位員工…');
 }
 
 function pick(id) {
@@ -501,7 +506,8 @@ async function profile(id) {
   if (!r.ok) return;
   box.hidden = false;
   box.open = localStorage.profOpen === '1';
-  box.innerHTML = `<summary>👤 ${esc(r.name)}｜${esc(r.role || '—')}｜${esc(r.team || '—')}</summary>
+  const icon = agentsData[id] && agentsData[id].npc === false ? '📋' : '👤';   // 模式不是人
+  box.innerHTML = `<summary>${icon} ${esc(r.name)}｜${esc(r.role || '—')}｜${esc(r.team || '—')}</summary>
     <div class="body"><div class="traits"></div></div>`;
   const t = box.querySelector('.traits');
   for (const [k, v] of [['個性', r.personality], ['說話風格', r.style], ['習慣', r.habits]]) {
