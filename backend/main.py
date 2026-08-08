@@ -1467,7 +1467,9 @@ if _WEBGL.exists():
 else:
     print("ℹ 尚無 WebGL build（unity/Builds/WebGL）——/shell 中間畫布會提示先去 Unity 建置")
 app.mount("/shell", StaticFiles(directory=_ROOT / "web", html=True), name="shell")
-# 名冊頭像（LimeZu 衍生物，不進 git）：跑 tools/make_avatars.py 產生；沒有就用文字頭像頂替
+# 名冊頭像（LimeZu 衍生物，不進 git）：跑 tools/make_avatars.py 產生；沒有就用文字頭像頂替。
+# 看板那張是【原創】像素圖（沒有對應的角色素材，文字頭像「看」又看不出是什麼）：
+# tools/make_kanban_avatar.py。輸出跟著這個目錄一起被 ignore，進 git 的是那支腳本。
 _AVATARS = Path(__file__).parent / "avatars"
 if _AVATARS.exists():
     app.mount("/avatars", StaticFiles(directory=_AVATARS), name="avatars")
