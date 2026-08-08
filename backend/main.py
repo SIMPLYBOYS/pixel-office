@@ -409,9 +409,9 @@ def release_work(aid: str) -> None:
     watering.discard(aid)
     busy.discard(aid)
     for key in [k for k in sub_active if k[0] == aid]:
-        npc = sub_active.pop(key)
-        busy.discard(npc)
-        close_card(npc, "lost")
+        for npc in sub_active.pop(key):   # 同一個鍵可能掛著多個並行子 agent，整批釋放
+            busy.discard(npc)
+            close_card(npc, "lost")
     notify("roster")
 
 
@@ -517,11 +517,17 @@ def office_bubble(kind: str, label: str) -> str | None:
 SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07",
            "implementer": "p12", "performance": "p05", "correctness": "p17"}
 SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
-sub_active: dict[tuple[str, str], str] = {}  # (主 agent, 子 agent 名) -> 演出的 NPC
+# (主 agent, 子 agent 名) -> 演出的 NPC【清單】。
+# 為什麼是清單而不是單一值：一次會議會並行派六個子 agent，未具名的 name 全部正規化成 ""，
+# 具名的也可能同名並行——鍵一模一樣。原本存單一值，後派的就把先派的覆蓋掉，於是那些 NPC
+# 連 release_work 都找不到，永遠停在「工作中」（實際踩到：會議跑完四個人卡住不動）。
+# 收工時 FIFO 取一個：同名的兄弟對橋來說本來就分不出誰是誰，報告掛到哪一個是任意的，
+# 但「每個都會被釋放」這件事是確定的——那才是重點。
+sub_active: dict[tuple[str, str], list[str]] = {}
 
 
 def pick_sub_npc(parent: str, name: str) -> str | None:
-    free = [x for x in agents if x != parent and x not in busy]
+    free = [x for x in npcs() if x != parent and x not in busy]   # 看板沒有身體，不能被派去支援
     cand = SUB_NPC.get(name)
     if cand in free:
         return cand
@@ -538,7 +544,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             npc = pick_sub_npc(parent, name)
             if npc is None:
                 return False  # 沒人有空：主 agent 頭上冒泡就好
-            sub_active[(parent, name)] = npc
+            sub_active.setdefault((parent, name), []).append(npc)
             busy.add(npc)
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
@@ -557,7 +563,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
             return True
         if kind in ("result", "error"):  # 委派收工
-            npc = sub_active.pop((parent, name), None)
+            queue = sub_active.get((parent, name)) or []
+            npc = queue.pop(0) if queue else None
+            if not queue:
+                sub_active.pop((parent, name), None)
             if npc is None:
                 return False
             if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
@@ -576,9 +585,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
         return True  # spawn 的其他事件不投影
     sub = SUB_RE.match(label)
     if sub:
-        npc = sub_active.get((parent, sub.group(1) or ""))
-        if npc is None:
+        queue = sub_active.get((parent, sub.group(1) or "")) or []
+        if not queue:
             return False  # 沒開成卡：退回主 agent 帶小名冒泡
+        npc = queue[0]    # 同名並行時分不出是哪個兄弟送來的，一律掛第一個（見 sub_active 的說明）
         stripped = SUB_RE.sub("", label)
         text = office_bubble(kind, stripped)
         if text:
@@ -1381,6 +1391,17 @@ def load_state() -> None:
                 last_report.pop(aid, None)
     if junk:
         print(f"清掉 {junk} 張雜項空殼卡（舊版派工留下的）")
+    # 孤兒卡：同一個人【最新那張以外】還開著的 working 卡，一定是上一個行程留下的——
+    # 委派的映射（sub_active）只活在記憶體裡，重啟後沒有任何東西會再去收它們，永遠轉圈。
+    # 最新那張留著不動，下面那段要用它判斷「可能還在跑」。
+    orphan = 0
+    for aid, cards in history.items():
+        for card in list(cards)[:-1]:
+            if card["status"] == "working":
+                card["status"] = "lost"
+                orphan += 1
+    if orphan:
+        print(f"清掉 {orphan} 張孤兒卡（上個行程沒收完的委派）")
     for aid, card in last_report.items():
         if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
             busy.add(aid)

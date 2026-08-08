@@ -335,6 +335,7 @@ def run() -> None:
     previews()
     alerts()
     clear_day()
+    parallel_subs()
     kanban()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -473,6 +474,40 @@ def souls() -> None:
         assert main.sync_souls()["wrote"] >= 1
     main.CHANNELS_DIR = None                             # 沒設定就整個不啟用
     assert main.sync_souls() == {"wrote": 0, "same": 0, "skipped": 0}
+
+
+def parallel_subs() -> None:
+    """並行派多個【同名】子 agent：每一個都要被釋放。
+    原本 sub_active 存單一 NPC，後派的覆蓋先派的，先派的那些連 release_work 都找不到——
+    會議跑完四個人永遠停在「工作中」。"""
+    with TestClient(main.app) as c:
+        main.busy.clear()
+        main.sub_active.clear()
+        parent = "p01"
+        post(c, agent=parent, kind="start", label="開會")
+
+        # 三個【未具名】子 agent（name 都正規化成 ""）同時上工
+        for _ in range(3):
+            post(c, agent=parent, kind="tool", label="spawn_subagent")
+        helpers = [n for lst in main.sub_active.values() for n in lst]
+        assert len(helpers) == 3, f"三個並行委派應各佔一位 NPC，got {helpers}"
+        assert len(set(helpers)) == 3, f"同一個人被派了兩次：{helpers}"
+        assert all(h in main.busy for h in helpers)
+
+        for _ in range(3):   # 三個都收工
+            post(c, agent=parent, kind="result", label="spawn_subagent")
+        assert not any(h in main.busy for h in helpers), \
+            f"收工後還卡在工作中：{[h for h in helpers if h in main.busy]}"
+        assert not main.sub_active, f"映射沒清乾淨：{main.sub_active}"
+
+        # 只收回兩個就收工：release_work 要把剩下那個也釋放，不能留永久 working
+        for _ in range(3):
+            post(c, agent=parent, kind="tool", label="spawn_subagent")
+        left = [n for lst in main.sub_active.values() for n in lst]
+        post(c, agent=parent, kind="result", label="spawn_subagent")
+        post(c, agent=parent, kind="done", label="ok")
+        assert not any(h in main.busy for h in left), \
+            f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
 
 
 def kanban() -> None:
