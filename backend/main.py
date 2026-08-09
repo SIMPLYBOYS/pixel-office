@@ -1128,6 +1128,53 @@ def office_ws(aid: str, p: str = ""):
     return r
 
 
+# ── 看板投影：把協作任務的狀態畫成四欄。
+# 資料來源是 kanban 頻道工作區裡的 board.json——【agent 寫、人只看】。所以這裡沒有拖拉、沒有
+# 版本號、沒有並發控制：卡片是被主持人移動的，不是被使用者拖的。
+#
+# 「等待相依」不是一個要 agent 自己維護的狀態，而是【算出來的】：todo 且相依還沒全部完成＝等待。
+# 少一個狀態就少一種寫錯的可能——agent 只要維護 todo/doing/done 三種。
+BOARD_COLUMNS = [("todo", "待辦"), ("blocked", "等待相依"), ("doing", "進行中"), ("done", "完成")]
+
+
+def board_column(task: dict, done_ids: set[str]) -> str:
+    st = task.get("status", "todo")
+    if st in ("doing", "done"):
+        return st
+    deps = task.get("deps") or []
+    return "blocked" if any(d not in done_ids for d in deps) else "todo"
+
+
+@app.get("/office/board")
+def office_board():
+    """看板快照。沒有 board.json 就回 ok=False——協作還沒開始，面板整個不顯示。"""
+    base = agent_dir(KANBAN)
+    if base is None:
+        return {"ok": False, "error": "看板還沒有工作區"}
+    f = base / "board.json"
+    if not f.exists():
+        return {"ok": False, "error": "還沒有進行中的協作任務"}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"board.json 讀不動：{type(e).__name__}"}
+    tasks = data.get("tasks") or []
+    done_ids = {t.get("id") for t in tasks if t.get("status") == "done"}
+    cols = {k: [] for k, _ in BOARD_COLUMNS}
+    for t in tasks:
+        col = board_column(t, done_ids)
+        # owner 是 persona id 的話換成名字——板子上要看得懂是誰，不是 p07
+        owner = t.get("owner")
+        cols[col].append({
+            "id": t.get("id", ""), "title": t.get("title") or t.get("id", ""),
+            "deps": t.get("deps") or [],
+            "owner": agents[owner].name if owner in agents else owner,
+            "out": t.get("out"),
+        })
+    return {"ok": True, "task": data.get("task", ""),
+            "columns": [{"key": k, "name": n, "cards": cols[k]} for k, n in BOARD_COLUMNS]}
+
+
 @app.get("/office/wsfile/{aid}")
 def office_wsfile(aid: str, p: str, render: int = 0):
     base = agent_dir(aid)

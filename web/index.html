@@ -104,6 +104,20 @@
   .prof .body { padding: 2px 16px 14px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   .prof .traits { color: var(--dim); font-size: 12px; line-height: 1.9; margin-bottom: 8px; }
   .prof .traits b { color: var(--text); font-weight: 500; }
+  /* 看板：四欄橫排、窄欄就橫向捲。人不編輯它（卡片是 agent 移動的），所以沒有拖拉互動 */
+  .board .cols { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; white-space: normal; }
+  .board .col { flex: 1 0 128px; background: var(--panel2, #1b1e24); border-radius: 6px; padding: 6px; }
+  .board .col > h4 { margin: 0 0 6px; font-size: 11px; color: var(--dim); font-weight: 500;
+                     display: flex; justify-content: space-between; }
+  .board .card { background: var(--panel, #23272e); border-radius: 4px; padding: 6px 7px;
+                 margin-bottom: 5px; font-size: 12px; line-height: 1.45;
+                 border-left: 3px solid var(--line); }
+  .board .col.doing .card { border-left-color: #5ea6e0; }
+  .board .col.done .card { border-left-color: #76c47a; }
+  .board .col.blocked .card { border-left-color: #e8c454; }
+  .board .card .who { color: var(--dim); font-size: 11px; }
+  .board .card .dep { color: #e8c454; font-size: 11px; }
+  .board .empty { color: var(--dim); font-size: 11px; padding: 4px 2px; }
   /* 工作區瀏覽：麵包屑 + 一層一層進資料夾，點檔案就地預覽 */
   .ws .crumb { font-size: 11px; color: var(--dim); padding: 2px 0 8px; word-break: break-all; }
   .ws .crumb b { color: var(--text); font-weight: 500; }
@@ -231,6 +245,7 @@
   <section>
     <div class="head" id="head"><div class="empty">點左側員工查看工作串</div></div>
     <details class="prof" id="profile"></details>
+    <details class="prof board" id="board"></details>
     <details class="prof ws" id="ws"></details>
     <div class="feed" id="feed"></div>
     <div class="composer">
@@ -451,13 +466,55 @@ function updateComposer() {
 }
 
 function pick(id) {
-  selected = id; roster(); feed(); profile(id); workspace(id, '');
+  selected = id; roster(); feed(); profile(id); board(id); workspace(id, '');
   updateComposer();
 }
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。
 // 路徑一律由橋鎖在該員工的工作區內，這裡只送相對路徑。
 let wsPath = '';   // 目前看的相對路徑：重新載入與自動刷新都要回到同一層
+
+// 看板面板：唯讀的四欄投影。只在「看板」那張卡上顯示——board.json 是協作模式的產物，
+// 掛在別人身上沒有意義。人不拖卡片，所以這裡沒有任何互動，只有一顆 ↻（agent 寫檔時橋不會知道）。
+async function board(id) {
+  const box = $('board');
+  if (!agentsData[id] || agentsData[id].npc !== false) { box.hidden = true; return; }
+  const r = await (await fetch('/office/board')).json();
+  box.hidden = !r.ok;
+  if (!r.ok) return;
+  const wasOpen = box.open || localStorage.boardOpen === '1';
+  box.innerHTML = `<summary>📋 看板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
+      <span class="rl" title="重新載入">↻</span></summary>
+    <div class="body"><div class="cols"></div></div>`;
+  box.querySelector('.rl').onclick = e => {
+    e.preventDefault(); e.stopPropagation();   // 不要順手把面板收起來
+    board(id);
+  };
+  box.open = wasOpen;
+  // ontoggle 而非 addEventListener：這個函式每收到一則事件就重跑一次，addEventListener 會愈疊愈多
+  box.ontoggle = () => localStorage.boardOpen = box.open ? '1' : '0';
+  const cols = box.querySelector('.cols');
+  for (const c of r.columns) {
+    const col = el('div', '');
+    col.className = 'col ' + c.key;
+    const h = el('h4', '');
+    h.appendChild(el('span', c.name));
+    h.appendChild(el('span', String(c.cards.length)));
+    col.appendChild(h);
+    if (!c.cards.length) col.appendChild(Object.assign(el('div', '—'), { className: 'empty' }));
+    for (const card of c.cards) {
+      const d = el('div', '');
+      d.className = 'card';
+      d.appendChild(el('div', card.title));
+      if (card.owner) d.appendChild(Object.assign(el('div', '👤 ' + card.owner), { className: 'who' }));
+      // 等待相依時把「在等誰」寫出來——只標「等待中」等於沒說，看板的價值就在這條邊
+      if (c.key === 'blocked' && card.deps.length)
+        d.appendChild(Object.assign(el('div', '⏳ 等 ' + card.deps.join('、')), { className: 'dep' }));
+      col.appendChild(d);
+    }
+    cols.appendChild(col);
+  }
+}
 
 async function workspace(id, path) {
   const box = $('ws');
@@ -1256,6 +1313,8 @@ function openStream() {
         feed();
         // 任務收工＝產出落地了：工作區面板開著就順手刷新，不用手動按 ↻
         if ((ev.alert === 'done' || ev.alert === 'error') && $('ws').open) workspace(selected, wsPath);
+        // 看板每一則事件都可能改到 board.json（主持人在推進任務），開著就跟著更新
+        if (!$('board').hidden && $('board').open) board(selected);
       }
       roster();
     }

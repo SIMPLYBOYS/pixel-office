@@ -343,6 +343,7 @@ def run() -> None:
     clear_day()
     parallel_subs()
     kanban()
+    board()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
 
 
@@ -514,6 +515,40 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def board() -> None:
+    """看板投影：四欄，而「等待相依」是【算出來的】不是 agent 自己標的。
+    少一個要維護的狀態，就少一種寫錯的可能——agent 只管 todo/doing/done。"""
+    import tempfile
+    with TestClient(main.app) as c:
+        assert c.get("/office/board").json()["ok"] is False   # 沒有 board.json：面板整個不顯示
+
+        with tempfile.TemporaryDirectory() as tmp:
+            main.CHANNELS_DIR = Path(tmp)
+            wd = Path(tmp) / f"office_{main.KANBAN}"
+            wd.mkdir(parents=True)
+            (wd / "board.json").write_text(json.dumps({
+                "task": "蓋一間會議室",
+                "tasks": [
+                    {"id": "api", "title": "後端端點", "deps": [], "status": "done"},
+                    {"id": "ui", "title": "面板", "deps": ["api"], "status": "doing", "owner": "p12"},
+                    {"id": "test", "title": "驗收", "deps": ["api", "ui"], "status": "todo"},
+                    {"id": "art", "title": "美術", "deps": [], "status": "todo"},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            r = c.get("/office/board").json()
+            assert r["ok"] and r["task"] == "蓋一間會議室"
+            by = {col["key"]: col["cards"] for col in r["columns"]}
+            assert [x["id"] for x in by["done"]] == ["api"]
+            assert [x["id"] for x in by["doing"]] == ["ui"]
+            # art 沒有相依 → 待辦；test 等 ui（還沒完成）→ 等待相依。兩者 status 都是 todo。
+            assert [x["id"] for x in by["todo"]] == ["art"], "沒有相依的不該被算成等待中"
+            assert [x["id"] for x in by["blocked"]] == ["test"], "相依沒完成的要進等待欄"
+            assert by["blocked"][0]["deps"] == ["api", "ui"], "要說明在等誰，只標『等待中』等於沒說"
+            assert by["doing"][0]["owner"] == main.agents["p12"].name, "owner 要換成看得懂的名字"
+    main.CHANNELS_DIR = None
 
 
 def kanban() -> None:
