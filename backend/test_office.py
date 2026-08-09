@@ -241,6 +241,9 @@ def run() -> None:
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
             # HITL 投影：走到老闆房門口站著等
             assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
+            # 姿勢要等【真的走到】才擺——move_to 會清掉姿勢，走路途中送等於沒送。
+            # 這個測試原本緊接著就斷言 phone，等於把 bug 寫死成規格：實機上那個動作從來沒出現過。
+            ws.send_json({"type": "arrived", "agent_id": "p07", "at": "boss_1"})
             # 等審批＝球在別人手上：掏手機，不是站著像雕像（站著不動＝閒置，兩者不能同形）
             assert recv(ws) == {"agent_id": "p07", "action": "use", "target": "phone"}
             assert recv(ws)["text"] == "⚠ 等待審批"

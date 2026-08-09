@@ -359,6 +359,26 @@ async def pose(aid: str, action: str) -> None:
     await send_cmd({"agent_id": aid, "action": "use", "target": action})
 
 
+async def goto_then_pose(aid: str, target: str, action: str) -> None:
+    """走過去，【等真的走到】再擺姿勢。
+
+    move_to 會清掉姿勢（見 pose 的說明），所以「送走位、立刻送姿勢」等於沒送——姿勢在人還在
+    走的時候就被走路動畫蓋掉了。實際踩到：等審批的人走到老闆房門口後只是站著，講電話的動作
+    從來沒出現過。
+
+    背景跑（create_task）：呼叫端多半是 HTTP handler，不該為了等人走完路把回應卡住。
+    走不到就不擺姿勢——那會讓動作出現在半路上，比沒有更怪。"""
+    if aid == KANBAN or aid not in arrived:
+        return
+    arrived[aid].clear()
+    await goto(aid, target)
+    try:
+        await asyncio.wait_for(arrived[aid].wait(), timeout=30.0)
+    except asyncio.TimeoutError:
+        return
+    await pose(aid, action)
+
+
 async def goto(aid: str, target: str) -> None:
     """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。"""
     if aid == KANBAN:   # 沒有身體的東西不會走路
@@ -909,10 +929,12 @@ async def office_chat(ev: dict):
         busy.add(aid)
         work_last[aid] = time.monotonic()
         notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
-        # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）
+        # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）。
+        # 球在別人手上：講電話，不是站著發呆——但姿勢必須【走到之後】才擺，否則被走路動畫蓋掉。
         if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
-            await goto(aid, BOSS_DOOR)
-        await pose(aid, "phone")   # 球在別人手上：講電話，不是站著發呆
+            asyncio.create_task(goto_then_pose(aid, BOSS_DOOR, "phone"))
+        else:
+            await pose(aid, "phone")   # 原地等：沒有走位，就不必等抵達
         await bubble(aid, "⚠ 等待審批")
     log_ev(aid, f"💬 {text[:300]}")
     return {"ok": True}
