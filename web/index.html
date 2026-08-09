@@ -769,10 +769,16 @@ let stuck = true;
 function keepBottom() {
   if (stuck) { const f = $('feed'); f.scrollTop = f.scrollHeight; }
 }
-addEventListener('DOMContentLoaded', () => $('feed').addEventListener('scroll', () => {
+addEventListener('DOMContentLoaded', () => {
   const f = $('feed');
-  stuck = f.scrollTop + f.clientHeight >= f.scrollHeight - 40;
-}));
+  f.addEventListener('scroll', () => {
+    stuck = f.scrollTop + f.clientHeight >= f.scrollHeight - 40;
+  });
+  // feed 的高度一變就重新貼底。壓縮 feed 的不只審批卡——拖曳側欄、縮放視窗、展開工作區面板
+  // 都會。被擠短之後使用者就懸在半空，而且那一下的捲動事件會把 stuck 關掉，從此再也不跟捲。
+  // 只在原本就貼著底時才動（keepBottom 自己會判斷），往上捲看歷史的人不會被拉回去。
+  new ResizeObserver(keepBottom).observe(f);
+});
 
 // 打字機：用 rAF 依【時間】推進，速度恆定才滑順（cogito 的 provider 阻塞式生成、沒有
 // token delta 可串，所以這是事件級串流：每則一到就逐字浮現）。
@@ -1267,7 +1273,6 @@ async function feed() {
       sync(el, t, '.tbody', !initial);
     }
     dayCounts(f);
-    keepBottom();
 
     const card = $('approvalCard');
     if (r.approval) {
@@ -1280,6 +1285,7 @@ async function feed() {
         <button class="no" onclick="dispatch('reject')">駁回</button></div>`);
       renderBody(card.querySelector('.tx'), r.approval, false);
     } else { card.style.display = 'none'; }
+    keepBottom();   // 必須在審批卡渲染【之後】：它會把 feed 擠短，先貼底等於沒貼
   } catch { /* 後端暫時斷線：下輪再試 */ }
 }
 
