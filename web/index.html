@@ -470,8 +470,14 @@ function updateComposer() {
 }
 
 function pick(id) {
-  selected = id; roster(); feed(); profile(id); board(id); workspace(id, '');
+  selected = id;
+  roster();
   updateComposer();
+  // 順序有意義：上方三塊面板【先】定位，工作串最後畫。
+  // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
+  // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→
+  // 573→245），看起來就是閃爍。讓面板先settle，feed 只需要重排一次。
+  Promise.all([profile(id), board(id), workspace(id, '')]).then(feed);
 }
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。
@@ -480,12 +486,21 @@ let wsPath = '';   // 目前看的相對路徑：重新載入與自動刷新都�
 
 // 看板面板：唯讀的四欄投影。只在「看板」那張卡上顯示——board.json 是協作模式的產物，
 // 掛在別人身上沒有意義。人不拖卡片，所以這裡沒有任何互動，只有一顆 ↻（agent 寫檔時橋不會知道）。
+let lastBoard = null;   // 上一次成功取得的快照：用來判斷「這次切過來會不會有板子」
 async function board(id) {
   const box = $('board');
   if (!agentsData[id] || agentsData[id].npc !== false) { box.hidden = true; return; }
+  // 已經知道有板子，就【先把版面撐好】再去抓。等 fetch 回來才決定顯不顯示的話，右欄會在切換
+  // 時多跳一次（量到 feed 高度 573→245 隔了一整幀），看起來就是閃一下。
+  if (lastBoard) box.hidden = false;
   const r = await (await fetch('/office/board')).json();
   box.hidden = !r.ok;
+  lastBoard = r.ok ? r : null;
   if (!r.ok) return;
+  // 內容沒變就不要重畫：推進中每一則事件都會呼叫這裡，每次都重建 innerHTML 就是持續閃爍。
+  const sig = JSON.stringify(r);
+  if (box.dataset.sig === sig && box.children.length) return;
+  box.dataset.sig = sig;
   // 預設【展開】——人設/工作區那兩個面板是附屬資訊所以預設收合，看板不是：協作模式下它就是
   // 主角，每次都要手動展開等於沒做。只有使用者自己收起來過（存成 '0'）才維持收合。
   const wasOpen = box.open || localStorage.boardOpen !== '0';
