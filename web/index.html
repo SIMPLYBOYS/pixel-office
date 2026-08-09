@@ -482,7 +482,9 @@ async function board(id) {
   const r = await (await fetch('/office/board')).json();
   box.hidden = !r.ok;
   if (!r.ok) return;
-  const wasOpen = box.open || localStorage.boardOpen === '1';
+  // 預設【展開】——人設/工作區那兩個面板是附屬資訊所以預設收合，看板不是：協作模式下它就是
+  // 主角，每次都要手動展開等於沒做。只有使用者自己收起來過（存成 '0'）才維持收合。
+  const wasOpen = box.open || localStorage.boardOpen !== '0';
   box.innerHTML = `<summary>📋 看板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
       <span class="rl" title="重新載入">↻</span></summary>
     <div class="body"><div class="cols"></div></div>`;
