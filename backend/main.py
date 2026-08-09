@@ -553,9 +553,19 @@ SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
 sub_active: dict[tuple[str, str], list[str]] = {}
 
 
+def npc_by_name(name: str) -> str | None:
+    """用【人名】反查 persona id（小美 → p01）。"""
+    return next((aid for aid, a in npcs().items() if a.name == name), None)
+
+
 def pick_sub_npc(parent: str, name: str) -> str | None:
     free = [x for x in npcs() if x != parent and x not in busy]   # 看板沒有身體，不能被派去支援
-    cand = SUB_NPC.get(name)
+    # 先用人名對名冊，再退回角色表。
+    # kanban 頻道的具名 agent 用的是【人名】（小美、老徐…），SUB_NPC 那張表收的卻是【角色名】
+    # （planner、implementer…）。只查角色表的話「派給小美」會落到隨便一個閒著的人身上——
+    # 於是板子寫「👤 小美」、畫面上走過去的是阿海，兩邊各說各話。
+    # 本人正忙就仍然退回別人代打：演出可以換角，但不能停演。
+    cand = npc_by_name(name) or SUB_NPC.get(name)
     if cand in free:
         return cand
     return free[0] if free else None

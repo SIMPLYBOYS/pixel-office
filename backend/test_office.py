@@ -12,8 +12,20 @@ import main
 from fastapi.testclient import TestClient
 
 
-def recv(ws) -> dict:
-    return json.loads(ws.receive_text())
+def recv(ws, aid: str | None = None) -> dict:
+    """收一則投影指令。帶 aid 就跳過【其他人】的指令再回傳。
+
+    握手之後生活迴圈就開始跑，會不定時對閒著的人發隨機走位——那對「工作投影」的斷言是雜訊。
+    先前每則都嚴格比對「下一則訊息」，測試一慢就撞上去，變成間歇性失敗（實際踩到：掏手機
+    那段改成等抵達之後才擺，多了往返，五次會紅兩次）。間歇性失敗比穩定失敗更糟：它會訓練
+    人忽略紅燈。"""
+    if aid is None:
+        return json.loads(ws.receive_text())
+    for _ in range(40):
+        cmd = json.loads(ws.receive_text())
+        if cmd.get("agent_id") == aid:
+            return cmd
+    raise AssertionError(f"等不到 {aid} 的指令（都是別人的）")
 
 
 def post(c, **ev) -> dict:
@@ -243,13 +255,16 @@ def run() -> None:
             # 只要有人曾經走到門口再也沒移動過，後面的人就永遠被幽靈擋住（實際踩到）。
             main.occupied["p19"] = main.BOSS_DOOR   # 老徐上次走到門口就沒再動過，但他沒在等審批
             # HITL 投影：走到老闆房門口站著等
-            assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
+            assert recv(ws, "p07") == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
             # 姿勢要等【真的走到】才擺——move_to 會清掉姿勢，走路途中送等於沒送。
             # 這個測試原本緊接著就斷言 phone，等於把 bug 寫死成規格：實機上那個動作從來沒出現過。
             ws.send_json({"type": "arrived", "agent_id": "p07", "at": "boss_1"})
-            # 等審批＝球在別人手上：掏手機，不是站著像雕像（站著不動＝閒置，兩者不能同形）
-            assert recv(ws) == {"agent_id": "p07", "action": "use", "target": "phone"}
-            assert recv(ws)["text"] == "⚠ 等待審批"
+            # 等審批＝球在別人手上：掏手機，不是站著像雕像（站著不動＝閒置，兩者不能同形）。
+            # 姿勢與泡泡【誰先到不保證】：泡泡走節流佇列、姿勢走等抵達的背景任務，兩條路徑
+            # 沒有順序關係。先前照順序斷言，五次會紅兩次——那是測試在假設一個不存在的契約。
+            got = [recv(ws, "p07") for _ in range(2)]
+            assert {"agent_id": "p07", "action": "use", "target": "phone"} in got, got
+            assert any(c.get("text") == "⚠ 等待審批" for c in got), got
             assert main.occupied["p07"] == "boss_1"
             assert "p07" in main.busy  # 等審批＝工作中，生活迴圈不得插隊蓋掉罰站走位
             r = c.get("/office/report/p07").json()
@@ -342,6 +357,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    sub_by_name()
     kanban()
     board()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
@@ -523,6 +539,25 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def sub_by_name() -> None:
+    """派給「小美」就要由小美演。
+    kanban 頻道的具名 agent 用人名，SUB_NPC 那張表收的是角色名——只查角色表的話，
+    板子上寫 👤 小美、畫面走過去的卻是別人，兩邊各說各話。"""
+    main.busy.clear()
+    main.sub_active.clear()
+    mei = "p01"
+    assert main.agents[mei].name == "小美"
+    assert main.pick_sub_npc("p19", "小美") == mei, "人名沒對到名冊"
+    assert main.pick_sub_npc("p19", "planner") == "p01", "原本的角色表要繼續有效"
+    # 本人正忙：可以換角代打，但不能因此停演
+    main.busy.add(mei)
+    other = main.pick_sub_npc("p19", "小美")
+    assert other is not None and other != mei, "本人忙碌時該找別人代打"
+    main.busy.discard(mei)
+    # 派給自己不會挑到自己（那會變成一個人同時是主也是支援）
+    assert main.pick_sub_npc(mei, "小美") != mei
 
 
 def board() -> None:
