@@ -556,6 +556,14 @@ def board() -> None:
             assert [x["id"] for x in by["blocked"]] == ["test"], "相依沒完成的要進等待欄"
             assert by["blocked"][0]["deps"] == ["api", "ui"], "要說明在等誰，只標『等待中』等於沒說"
             assert by["doing"][0]["owner"] == main.agents["p12"].name, "owner 要換成看得懂的名字"
+
+            # live：主持人沒在跑的時候，板子上的「進行中」是舊資料——畫面要講出來，不能
+            # 讓人以為現在有人在做。這是投影誠實，不是裝飾。
+            main.busy.discard(main.KANBAN)
+            assert c.get("/office/board").json()["live"] is False
+            main.busy.add(main.KANBAN)
+            assert c.get("/office/board").json()["live"] is True
+            main.busy.discard(main.KANBAN)
     main.CHANNELS_DIR = None
 
 

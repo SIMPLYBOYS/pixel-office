@@ -1181,7 +1181,10 @@ def office_board():
             "owner": agents[owner].name if owner in agents else owner,
             "out": t.get("out"),
         })
-    return {"ok": True, "task": data.get("task", ""),
+    # live＝主持人現在真的在推進這塊板。board.json 只有主持人在跑時才會更新，它一收工
+    # 「進行中」那欄就永遠停在原地——畫面上看起來有人在做，實際沒有。投影不能說謊：
+    # 板子是不是活的，橋知道，就要講出來。
+    return {"ok": True, "task": data.get("task", ""), "live": KANBAN in busy,
             "columns": [{"key": k, "name": n, "cards": cols[k]} for k, n in BOARD_COLUMNS]}
 
 

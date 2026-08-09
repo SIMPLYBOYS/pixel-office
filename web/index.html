@@ -118,6 +118,10 @@
   .board .card .who { color: var(--dim); font-size: 11px; }
   .board .card .dep { color: #e8c454; font-size: 11px; }
   .board .empty { color: var(--dim); font-size: 11px; padding: 4px 2px; }
+  /* 未在推進：整塊板降低存在感，「進行中」那欄的卡不再用亮色暗示有人在做 */
+  .board .idle { color: #e8c454; font-size: 11px; }
+  .board.stale .cols { opacity: .55; }
+  .board.stale .col.doing .card { border-left-color: var(--line); }
   /* 工作區瀏覽：麵包屑 + 一層一層進資料夾，點檔案就地預覽 */
   .ws .crumb { font-size: 11px; color: var(--dim); padding: 2px 0 8px; word-break: break-all; }
   .ws .crumb b { color: var(--text); font-weight: 500; }
@@ -485,7 +489,11 @@ async function board(id) {
   // 預設【展開】——人設/工作區那兩個面板是附屬資訊所以預設收合，看板不是：協作模式下它就是
   // 主角，每次都要手動展開等於沒做。只有使用者自己收起來過（存成 '0'）才維持收合。
   const wasOpen = box.open || localStorage.boardOpen !== '0';
-  box.innerHTML = `<summary>📋 看板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
+  // 圖示與名詞都要跟上面那張人設卡分開——兩個「📋 看板」並排，沒人分得出誰是誰。
+  // 「未在推進」要講出來：board.json 只有主持人在跑時才更新，它收工後「進行中」那欄會停在
+  // 原地，畫面上看起來有人在做、實際沒有。投影寧可顯得樸素，也不能說謊。
+  box.innerHTML = `<summary>🗂 任務板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
+      ${r.live ? '' : '<span class="idle">⏸ 未在推進</span>'}
       <span class="rl" title="重新載入">↻</span></summary>
     <div class="body"><div class="cols"></div></div>`;
   box.querySelector('.rl').onclick = e => {
@@ -493,6 +501,7 @@ async function board(id) {
     board(id);
   };
   box.open = wasOpen;
+  box.classList.toggle('stale', !r.live);
   // ontoggle 而非 addEventListener：這個函式每收到一則事件就重跑一次，addEventListener 會愈疊愈多
   box.ontoggle = () => localStorage.boardOpen = box.open ? '1' : '0';
   const cols = box.querySelector('.cols');
