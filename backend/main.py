@@ -929,9 +929,14 @@ async def office_chat(ev: dict):
         busy.add(aid)
         work_last[aid] = time.monotonic()
         notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
-        # 走到老闆房門口站著等（門口被別人佔著就原地等，不擠）。
+        # 走到老闆房門口站著等（門口真的有人在等就原地等，不擠）。
         # 球在別人手上：講電話，不是站著發呆——但姿勢必須【走到之後】才擺，否則被走路動畫蓋掉。
-        if BOSS_DOOR not in {t for a, t in occupied.items() if a != aid}:
+        #
+        # 「有沒有人佔著」要問【現在誰真的在等審批】，不能查 occupied：那張表只會被同一個人的
+        # 下一次走位覆蓋，從不釋放。只要有誰的任務在門口失聯/逾時，他就永遠佔著那個點，
+        # 之後每一個要過去的人都被幽靈擋住——實際踩到：HITL 觸發了，人卻完全沒動。
+        crowded = any(a != aid and occupied.get(a) == BOSS_DOOR for a in pending_approval)
+        if not crowded:
             asyncio.create_task(goto_then_pose(aid, BOSS_DOOR, "phone"))
         else:
             await pose(aid, "phone")   # 原地等：沒有走位，就不必等抵達

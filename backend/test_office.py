@@ -239,6 +239,9 @@ def run() -> None:
                           "text": "🛠️ *正在執行工具*：`bash`"}).json()["ok"]
             appr = "⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `bash`\n任務 ID: `T1`"
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
+            # 「門口有人」的判斷要看【現在誰在等審批】，不是查 occupied——那張表從不釋放，
+            # 只要有人曾經走到門口再也沒移動過，後面的人就永遠被幽靈擋住（實際踩到）。
+            main.occupied["p19"] = main.BOSS_DOOR   # 老徐上次走到門口就沒再動過，但他沒在等審批
             # HITL 投影：走到老闆房門口站著等
             assert recv(ws) == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
             # 姿勢要等【真的走到】才擺——move_to 會清掉姿勢，走路途中送等於沒送。
