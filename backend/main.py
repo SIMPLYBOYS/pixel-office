@@ -371,20 +371,27 @@ async def goto_then_pose(aid: str, target: str, action: str) -> None:
     if aid == KANBAN or aid not in arrived:
         return
     arrived[aid].clear()
-    await goto(aid, target)
+    if not await goto(aid, target):
+        print(f"⚠ {aid} 走位指令沒送出（沒有畫面在線）——{target}／{action} 這段投影跳過")
+        return
     try:
         await asyncio.wait_for(arrived[aid].wait(), timeout=30.0)
     except asyncio.TimeoutError:
+        print(f"⚠ {aid} 走去 {target} 逾時沒回報抵達——不擺 {action}（動作出現在半路上更怪）")
         return
+    if aid not in pending_approval and action == "phone":
+        return   # 等待期間審批就結束了：不用再掏手機
     await pose(aid, action)
 
 
-async def goto(aid: str, target: str) -> None:
-    """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。"""
+async def goto(aid: str, target: str) -> bool:
+    """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。
+    回傳「指令有沒有真的送出去」——沒有畫面在線時 send_cmd 會靜靜回 False，忽略它就會出現
+    「有的人動、有的人不動」而完全查不到原因（實際踩到）。"""
     if aid == KANBAN:   # 沒有身體的東西不會走路
-        return
+        return False
     occupied[aid] = target
-    await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
+    return await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
 
 
 # ── 投影泡泡節流：每個 NPC 一條佇列 + 播報器，最小間隔 BUBBLE_GAP。

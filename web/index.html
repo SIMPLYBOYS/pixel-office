@@ -632,26 +632,32 @@ const muted = () => localStorage.muted === '1';
 // ② 音高每次微幅隨機，機械式的同一顆音聽三秒就煩。
 // ③ 極短（22ms）＋低音量＋低通，讓它退到背景當質感，不跟提示音（審批/完成/失敗）搶注意力。
 //    提示音是要你抬頭的，打字聲不是——兩者混在一起就都失效了。
-let lastKey = 0;
+let lastKey = 0, noiseBuf = null;
 function keyClick() {
   if (muted() || !audio || audio.state !== 'running') return;   // 沒解鎖就別做白工
   const now = audio.currentTime;
   if (now - lastKey < 0.055) return;
   lastKey = now;
   try {
-    const osc = audio.createOscillator();
+    // 敲擊是【雜訊】不是音高。先前用方波振盪器，聽起來是「嗶」——那是電子音效不是打字，
+    // 而且固定音高聽三秒就煩。改成一小段白雜訊過帶通：能量散在整個頻段，耳朵聽到的是
+    // 「東西被敲了一下」而不是「某個音」。
+    if (!noiseBuf) {
+      noiseBuf = audio.createBuffer(1, Math.floor(audio.sampleRate * 0.03), audio.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const src = audio.createBufferSource();
+    src.buffer = noiseBuf;
+    const bp = audio.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1700 + Math.random() * 700;  // 每次略微不同，避免機械重複感
+    bp.Q.value = 1.1;                                 // Q 太高會變回「有音高」，太低會變沙沙聲
     const g = audio.createGain();
-    const filt = audio.createBiquadFilter();
-    filt.type = 'lowpass';
-    filt.frequency.value = 2600;
-    osc.type = 'square';
-    osc.frequency.value = 1500 + Math.random() * 500;
-    // 起音幾乎瞬間、收得極快：是「敲擊」不是「音符」
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.exponentialRampToValueAtTime(0.035, now + 0.002);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.022);
-    osc.connect(filt); filt.connect(g); g.connect(audio.destination);
-    osc.start(now); osc.stop(now + 0.03);
+    g.gain.setValueAtTime(0.05, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.018);  // 極快衰減＝短促的「嗒」
+    src.connect(bp); bp.connect(g); g.connect(audio.destination);
+    src.start(now); src.stop(now + 0.03);
   } catch { /* 音訊出問題不該影響顯示 */ }
 }
 
