@@ -407,6 +407,7 @@ def previews() -> None:
         wd.mkdir()
         (wd / "a.md").write_text("# hi\n", encoding="utf-8")
         (wd / "k.env").write_text("TOKEN=x\n", encoding="utf-8")   # 不在白名單
+        (wd / "AGENTS.md").write_text("人設\n", encoding="utf-8")   # 橋自己同步的基礎設施，不是產出
         (wd / "i.png").write_bytes(base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
         (Path(tmp) / "outside.txt").write_text("secret\n", encoding="utf-8")
@@ -439,14 +440,21 @@ def previews() -> None:
             # 工作區瀏覽（可進子目錄）：同一套界線，入口不同
             (wd / "sub").mkdir()
             (wd / "sub" / "note.txt").write_text("x\n", encoding="utf-8")
+            (wd / "sub" / "AGENTS.md").write_text("這份是 agent 自己寫的\n", encoding="utf-8")
             root = c.get("/office/ws/p01").json()
             assert root["ok"] and root["up"] is None
             names = [(e["name"], e["dir"]) for e in root["entries"]]
             assert ("sub", True) in names and ("a.md", False) in names
+            # 根目錄的 AGENTS.md 是橋同步進去的人設，不是產出——工作區面板要回答
+            # 「這次做出了什麼」，混進基礎設施就是雜訊
+            assert ("AGENTS.md", False) not in names, f"根目錄的 AGENTS.md 該被濾掉：{names}"
             assert ("k.env", False) in names, "白名單外的檔案要列出來（只是不給預覽）"
             assert next(e for e in root["entries"] if e["name"] == "k.env")["kind"] == "raw"
             deep = c.get("/office/ws/p01", params={"p": "sub"}).json()
-            assert deep["ok"] and deep["up"] == "" and deep["entries"][0]["name"] == "note.txt"
+            subnames = [e["name"] for e in deep["entries"]]
+            assert deep["ok"] and deep["up"] == "" and "note.txt" in subnames
+            # 子目錄裡的同名檔是 agent 自己寫的，屬於產出——只濾根目錄那一份
+            assert "AGENTS.md" in subnames, f"子目錄的 AGENTS.md 不該被濾：{subnames}"
             for bad in ("..", "../..", "/etc"):
                 assert c.get("/office/ws/p01", params={"p": bad}).json()["ok"] is False, bad
             for bad in ("../outside.txt", "/etc/passwd"):

@@ -1041,6 +1041,16 @@ def resolve_in(base: Path, rel: str) -> Path | None:
         return None
 
 
+# 基礎設施檔：橋自己同步進工作區的東西，不是 agent 的產出。列檔的兩條路徑（卡片產出清單、
+# 工作區瀏覽）共用這個判斷——兩邊各寫一份的話，改一邊忘另一邊只是時間問題。
+# 只在【工作區根目錄】適用：子目錄裡的同名檔是 agent 自己寫的，那就是產出。
+INFRA_FILES = {"AGENTS.md"}
+
+
+def infra_file(name: str) -> bool:
+    return name in INFRA_FILES
+
+
 def listing(base: Path, rel: str) -> dict:
     """列一層目錄：資料夾在前、檔名排序；隱藏檔跳過；不在白名單的副檔名只列不給預覽。"""
     d = resolve_in(base, rel)
@@ -1049,7 +1059,7 @@ def listing(base: Path, rel: str) -> dict:
     base = base.resolve()   # iterdir() 給的是實體路徑；macOS 的 /var→/private/var 會讓
     dirs, files = [], []    # relative_to 對不上（測試抓到的）
     for f in sorted(d.iterdir(), key=lambda x: x.name.lower()):
-        if f.name.startswith("."):
+        if f.name.startswith(".") or (not rel and infra_file(f.name)):
             continue
         r = str(f.relative_to(base))
         if f.is_dir():
@@ -1192,7 +1202,7 @@ def office_files(aid: str, cid: int):
     out = []
     for f in sorted(base.iterdir()):
         ext = f.suffix.lstrip(".").lower()
-        if not f.is_file() or f.name.startswith(".") or ext not in PREVIEW_TYPES:
+        if not f.is_file() or f.name.startswith(".") or ext not in PREVIEW_TYPES or infra_file(f.name):
             continue
         out.append({"name": f.name, "size": f.stat().st_size, "ext": ext,
                     "kind": "image" if PREVIEW_TYPES[ext].startswith("image") else
