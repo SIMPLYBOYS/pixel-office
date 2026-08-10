@@ -757,6 +757,14 @@ def notify(kind: str, aid: str = "", alert: str = "") -> None:
 CHAT_MARK = "💬"   # /office/chat 那條路會帶這個前綴；/office/event(msg) 不帶
 
 
+NOTE_MARK = "🧑‍💼 老闆交辦："
+
+
+def note_body(note: str) -> str:
+    """剝掉「老闆交辦：」前綴，只留老闆真正說的那句話。"""
+    return note.removeprefix(NOTE_MARK).strip()
+
+
 def body_of(text: str) -> str:
     """去掉投影用的前綴符號，只留內容——同一句話經不同路徑會帶不同前綴（💬 / 無）。"""
     return text.lstrip("💬 ").strip()
@@ -921,7 +929,11 @@ async def office_event(ev: dict):
                     supersede_card(prev)
             report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
             log_ev(aid, f"📋 接到任務：{task}")
-            if note := pending_note.pop(aid, None):   # 派工那行掛回它要開始的任務
+            # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
+            # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
+            # 或 cogito 改寫過任務名時，這行才帶來新資訊。
+            note = pending_note.pop(aid, None)
+            if note and note_body(note)[:40] != task.strip()[:40]:
                 log_ev(aid, note)
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
@@ -1428,7 +1440,7 @@ async def office_dispatch(d: dict):
             # ⚠ 不能直接 log_ev：這一刻上一張卡已經收了、cogito 的 start 還沒到，
             # log_ev 會為了放這行字開一張「（雜項）」卡並掛成「進行中」，永遠不會關。
             # 寄放著，等 start 開出真的任務卡再掛進去——這行本來就屬於它要開始的那件事。
-            pending_note[aid] = f"🧑‍💼 老闆交辦：{text[:200]}"
+            pending_note[aid] = f"{NOTE_MARK}{text[:200]}"
     return {"ok": True}
 
 

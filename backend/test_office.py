@@ -357,6 +357,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    note_not_echoed()
     stop_clears_approval()
     dup_msg()
     sub_by_name()
@@ -584,6 +585,25 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def note_not_echoed() -> None:
+    """派工那行與任務卡標題是同一句話時，不要並排記兩次。
+    卡片標題本來就是老闆說的那句；兩行擺一起只是同一段文字說兩次。"""
+    with TestClient(main.app) as c:
+        task = "用 orchestrate 模式做一份工具權限政策的稽核報告"
+        main.pending_note["p07"] = main.NOTE_MARK + task
+        post(c, agent="p07", kind="start", label=task)
+        evs = [e["text"] for e in c.get("/office/report/p07").json()["timeline"]]
+        assert sum(1 for t in evs if task[:20] in t) == 1, f"同一句話記了兩次：{evs}"
+        post(c, agent="p07", kind="done", label="ok")
+
+        # 但續跑時卡名被換掉（🔄 續跑：…），老闆原話就是新資訊，要留著
+        main.pending_note["p07"] = main.NOTE_MARK + "請接續昨天那個稽核"
+        post(c, agent="p07", kind="start", label="🔄 續跑：稽核報告")
+        evs = [e["text"] for e in c.get("/office/report/p07").json()["timeline"]]
+        assert any("請接續昨天那個稽核" in t for t in evs), "卡名不同時老闆原話要留著"
+        post(c, agent="p07", kind="done", label="ok")
 
 
 def stop_clears_approval() -> None:
