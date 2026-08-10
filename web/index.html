@@ -1293,13 +1293,15 @@ function sync(el, t, bodySel, live) {
     if (sub) sync(sub, e.subcard, '.subbody', live);
   }
 
-  // 報告全文常＝最後一則訊息，重複就不貼。
+  // 報告全文常＝某一則訊息的完整版，重複就不貼。
   // ⚠ 比對前要剝掉投影前綴：事件是「💬 內容」而報告是「內容」，直接 startsWith 永遠不成立，
   //   這道防護等於沒有（實際踩到：同一段話在畫面上出現三次，這是其中一次）。
-  // 也不只看最後一則——那兩條路徑誰先到不保證，同一段話可能落在倒數第二則。
+  // ⚠ 掃【全部】事件而不是最後幾則：報告寫進去之後還會再來「✅ 任務完成」「🧠 學到 N 條」
+  //   「✔ 任務完成」，它的雙胞胎轉眼就掉出窗外（實測是倒數第四則）。窗口大小是錯的抽象——
+  //   報告要比的是「這段話在這張卡裡出現過沒有」，跟位置無關。單卡事件上限 150，掃全部很便宜。
   const bodyOf = s => (s || '').replace(/^💬\s*/, '').trim();
   const head = bodyOf(t.report).slice(0, 40);
-  const dup = head && evs.slice(-3).some(e => bodyOf(e.text).startsWith(head));
+  const dup = head && evs.some(e => bodyOf(e.text).startsWith(head));
   const want = t.report && !dup ? t.report : '';
   let rep = body.querySelector(':scope > .report');
   if (want && !rep) {
