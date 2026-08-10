@@ -754,7 +754,7 @@ def notify(kind: str, aid: str = "", alert: str = "") -> None:
             q.put_nowait(ev)
 
 
-DUP_HEAD = 60   # 比對前綴長度：兩條路徑的截斷長度不同，只有開頭這段一定相同
+CHAT_MARK = "💬"   # /office/chat 那條路會帶這個前綴；/office/event(msg) 不帶
 
 
 def body_of(text: str) -> str:
@@ -763,17 +763,30 @@ def body_of(text: str) -> str:
 
 
 def dup_of_last(aid: str, text: str) -> bool:
-    """這段文字是不是剛剛才記過（同一則訊息走兩條路送來）。
-    比前綴而不是整段：兩條路一個截 300、一個截 200，整段永遠不相等。
-    只擋長訊息：短的記號（「✓ bash」「▸ 第 3 輪」）本來就會重複出現，那不是 bug。"""
-    if len(body_of(text)) < DUP_HEAD:
-        return False
+    """這段文字是不是同一則訊息走【另一條路】又送了一次。
+
+    規則刻意精準：內容相同【而且前綴狀態不同】（一個帶 💬、一個不帶）才算重複。
+    那正是兩條路徑雙胞胎的指紋——`/office/chat` 帶 💬，`/office/event(msg)` 不帶。
+
+    先前用「長度超過 60 才去重」當門檻，短訊息（實測踩到一句 38 字的）就漏掉了。
+    長度門檻本來就是錯的抽象：它想擋的是「✓ bash」「第 5 輪」那種會正常重複的記號，
+    但那些兩邊都不帶 💬，用前綴狀態就分得乾淨，跟長短無關。
+
+    截斷長度兩條路不同（300 vs 200），所以比【較短那段的前綴】而不是整段。
+    """
     card = last_report.get(aid)
     if not card or not card.get("events"):
         return False
-    head = body_of(text)[:DUP_HEAD]
+    body, is_chat = body_of(text), text.lstrip().startswith(CHAT_MARK)
+    if not body:
+        return False
     for ev in card["events"][-3:]:   # 只看最近幾則：更早的同句話是真的又說了一次
-        if body_of(ev.get("text", ""))[:DUP_HEAD] == head:
+        prev = ev.get("text", "")
+        if prev.lstrip().startswith(CHAT_MARK) == is_chat:
+            continue                 # 前綴狀態一樣＝同一條路來的，那是真的重複發言
+        pb = body_of(prev)
+        n = min(len(body), len(pb))
+        if n and body[:n] == pb[:n]:
             return True
     return False
 

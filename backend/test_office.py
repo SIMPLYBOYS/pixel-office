@@ -640,6 +640,20 @@ def dup_msg() -> None:
         evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
         assert sum(1 for t in evs if t.startswith("✗ bash")) == 2, "短記號不該被當成重複"
 
+        # 【短】訊息也要去重：實測踩到一句 38 字的雙胞胎，用長度當門檻就會漏掉。
+        short = "會開完，上板。board.json 每輪會被清（老教訓），先確認再決定重建或增補。"
+        post(c, agent="p05", kind="msg", label=short)
+        c.post("/office/chat", json={"agent": "office:p05", "text": short})
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        assert sum(1 for t in evs if short[:20] in t) == 1, f"短訊息的雙胞胎沒擋住：{evs[-3:]}"
+
+        # 但同一句話【由同一條路】說兩次，是真的說了兩次，不能吃掉
+        c.post("/office/chat", json={"agent": "office:p05", "text": "再說一次這句話給你聽好嗎"})
+        post(c, agent="p05", kind="tool", label="bash")
+        c.post("/office/chat", json={"agent": "office:p05", "text": "再說一次這句話給你聽好嗎"})
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        assert sum(1 for t in evs if "再說一次這句話" in t) == 2, "同一條路的重複發言是真的，不該被吃掉"
+
         # 但真的又說一次（隔了幾則）要記得下來——去重不能把重複發言吃掉
         for i in range(3):
             post(c, agent="p05", kind="tool", label=f"bash{i}")
