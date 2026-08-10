@@ -253,16 +253,21 @@
     <h1>員工<small id="count"></small></h1>
     <div id="status" class="status"></div>
     <div id="roster"></div>
-    <details class="capcard" id="capcard"></details>
+    <!-- 先放一個佔位 summary：capcard() 取完資料才會覆蓋，在那之前空的 <details>
+         會被畫成預設字樣「詳細資料」。它不像右欄那三塊可以先 hidden——這張卡是常駐的。 -->
+    <details class="capcard" id="capcard"><summary>🛠 全員能力</summary></details>
   </aside>
   <div class="grip" id="gripL" title="拖曳調整名冊寬度（雙擊還原）"></div>
   <main id="stage"></main>
   <div class="grip" id="gripR" title="拖曳調整寬度（雙擊還原）"></div>
   <section>
     <div class="head" id="head"><div class="empty">點左側員工查看工作串</div></div>
-    <details class="prof" id="profile"></details>
-    <details class="prof board" id="board"></details>
-    <details class="prof ws" id="ws"></details>
+    <!-- 三塊都預設 hidden：還沒選人時它們是空的，沒有 summary 的 <details> 會被瀏覽器
+         畫成預設字樣「詳細資料」，右上角就浮出三條沒有意義的列。各自的 render 函式
+         抓到資料才會取消 hidden。 -->
+    <details class="prof ws" id="ws" hidden></details>
+    <details class="prof board" id="board" hidden></details>
+    <details class="prof" id="profile" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="composer">
       <div id="approvalCard" style="display:none"></div>
