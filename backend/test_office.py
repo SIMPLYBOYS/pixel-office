@@ -360,7 +360,50 @@ def run() -> None:
     sub_by_name()
     kanban()
     board()
-    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、頻道派工、人設同步、提示音、清除歷史）")
+    sub_release_fallback()
+    turn_in_stream()
+    print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
+          "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
+
+
+def sub_release_fallback() -> None:
+    """子 agent 的釋放事件掉了 → sweep_work 按徵用時間強制放人、送回座位。
+
+    為何需要這條：主 agent 還活著時 work_last 一直在刷新，原本的失聯規則（WORK_TIMEOUT）
+    永遠不會觸發，於是那個被徵用的 NPC 永遠卡在 busy、永遠不回座位。實際症狀就是
+    「跑完一輪之後很多人杵著不動」。cogito 端已把釋放事件改成不可丟，這是橋端的第二道保險
+    （橋自己重啟會失憶，所以兩邊都要有）。"""
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [], "list": main.waypoint_list or ["chair_1"]}))
+        npc = "p05"
+        main.busy.add(npc)
+        main.sub_active[("p17", "planner")] = [npc]
+        main.sub_since[npc] = time.monotonic() - main.SUB_TIMEOUT - 1   # 徵用很久了，釋放沒來
+        main.report_card(npc, "支援：planner")
+
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(main.sweep_work())             if False else asyncio.run(main.sweep_work())
+
+        assert npc not in main.busy, "逾時未釋放：NPC 還卡在 busy，畫面上就是一直杵著"
+        assert npc not in main.sub_since, "徵用時間表沒清乾淨，下一輪會重複觸發"
+        assert ("p17", "planner") not in main.sub_active, "sub_active 沒清，之後的釋放會配到空佇列"
+        assert main.last_report[npc]["status"] == "lost", "卡片沒收，看板會永遠顯示進行中"
+
+
+def turn_in_stream() -> None:
+    """turn 事件只進【工作串】不冒泡。
+
+    少了它，兩次工具呼叫之間的長考在時間軸上是一段全空白，看起來像 agent 掛了
+    （實際回報：「訊息 streaming 跟行為對不上」）。但也不該冒泡——泡泡只有 8 字寬又有節流。"""
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [], "list": main.waypoint_list or ["chair_1"]}))
+        aid = "p17"
+        main.chat_mode.discard(aid)
+        c.post("/office/event", json={"agent": aid, "kind": "start", "label": "寫規格", "detail": "/w"})
+        before = len(main.last_report[aid]["events"])
+        c.post("/office/event", json={"agent": aid, "kind": "turn", "label": "7", "detail": ""})
+        evs = main.last_report[aid]["events"]
+        assert len(evs) == before + 1, "turn 沒寫進工作串"
+        assert "第 7 輪" in evs[-1]["text"], f"回合數沒帶進去：{evs[-1]}"
 
 
 def clear_day() -> None:

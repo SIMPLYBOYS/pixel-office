@@ -62,6 +62,12 @@ occupied: dict[str, str] = {}   # agent_id -> 佔用的 waypoint（防兩人擠�
 busy: set[str] = set()          # 對話/工作中的 agent（主迴圈掛起）
 watchdog: asyncio.Task | None = None  # 工作失聯巡查（start_agents 時啟動）
 canvas_stale = False  # 送了指令卻沒人回報：WebGL 分頁被瀏覽器凍結（WS 還開著，畫面已死）
+projection_offline = False  # 走位送不出去（沒有畫面在線）——只在狀態轉換時印，不刷屏
+# 子 agent 被徵用的時間（npc -> monotonic）。釋放事件掉了就沒人放他，於是那個 NPC 永遠
+# 卡在 busy、永遠不回座位——sweep_work 靠這張表兜底。主 agent 的失聯有 work_last 管，
+# 但那條只在【主 agent 自己】沒事件時觸發：主 agent 還活著、只有子 agent 的釋放掉了的
+# 情況，以前完全沒有人收拾。
+sub_since: dict[str, float] = {}
 
 client = anthropic.AsyncAnthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 if client is None:
@@ -80,6 +86,7 @@ BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
 WORK_TIMEOUT = 300.0             # 上工中這麼久沒事件＝claw-cli 掛了（done 是 fire-and-forget 會丟）
 STUCK_AFTER = 60.0               # 上工中這麼久【只有 think/turn】沒有任何工具事件＝卡住了，去接杯水
+SUB_TIMEOUT = 420.0              # 子 agent 被徵用這麼久還沒收到釋放事件＝那則事件掉了，強制放人
 WATCH_TICK = 30.0                # watchdog 巡查間隔
 
 
@@ -167,7 +174,10 @@ def stop_agents() -> None:
     occupied.clear()
     bubble_q.clear()
     pacers.clear()
-    keep = set(work_last) | set(sub_active.values())
+    # sub_active 的值是【list】（同名子 agent 可並行），set() 直接包會 TypeError:
+    # unhashable type: 'list'——於是「有子 agent 在跑時觀眾重連」會讓整個握手炸掉，
+    # 世界停在半死狀態。攤平才對。
+    keep = set(work_last) | {npc for q in sub_active.values() for npc in q}
     busy.intersection_update(keep)  # 只清生活對話的 busy，工作中的不動
     notify("roster")
 
@@ -332,7 +342,9 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 #   POST /office/event {"agent":"p17","kind":"...","label":"...","detail":"..."}
 #   kind ∈ start/turn/think/tool/result/error/msg/done
 # 投影表：start→走工位坐下+泡任務、tool→泡「▸工具」、error→泡「✗工具」、
-#   msg→泡內容、done→泡收工+釋放；think/turn/result 不投影（太吵）。
+#   msg→泡內容、done→泡收工+釋放；think/result 不投影（太吵）。
+#   turn→只寫【工作串】不冒泡：泡泡只有 8 字寬又有節流，多一則是噪音；但少了它，
+#   兩次工具呼叫之間的長考在時間軸上是一段全空白，看起來像 agent 掛了。
 # 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
 WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的固定工位
              "p05": "chair_4", "p12": "chair_5",
@@ -386,12 +398,26 @@ async def goto_then_pose(aid: str, target: str, action: str) -> None:
 
 async def goto(aid: str, target: str) -> bool:
     """走位＋佔位登記（工作投影專用；生活迴圈有自己的佔位守衛）。
-    回傳「指令有沒有真的送出去」——沒有畫面在線時 send_cmd 會靜靜回 False，忽略它就會出現
-    「有的人動、有的人不動」而完全查不到原因（實際踩到）。"""
+    回傳「指令有沒有真的送出去」——沒有畫面在線時 send_cmd 會靜靜回 False。
+
+    呼叫端【幾乎都忽略】這個回傳值（走位失敗沒有補救動作，投影本來就是盡力而為），所以
+    「沒送出去」必須在這裡就講出來，否則整條投影是無聲失效的：使用者看到「大家都杵著」，
+    真正原因可能只是瀏覽器不支援 WebGL、canvas 根本沒載入。實際踩到。
+
+    只在【狀態轉換】時印一次——離線期間每次都印會把 log 洗掉。"""
+    global projection_offline
     if aid == KANBAN:   # 沒有身體的東西不會走路
         return False
     occupied[aid] = target
-    return await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
+    ok = await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
+    if not ok and not projection_offline:
+        projection_offline = True
+        print("⚠ [投影] 沒有畫面在線（WebGL 未載入／分頁關了）——走位指令全數丟棄。"
+              "工作串與看板不受影響，只有 3D 畫面不會動。")
+    elif ok and projection_offline:
+        projection_offline = False
+        print("✓ [投影] 畫面回來了，走位恢復")
+    return ok
 
 
 # ── 投影泡泡節流：每個 NPC 一條佇列 + 播報器，最小間隔 BUBBLE_GAP。
@@ -438,6 +464,7 @@ def release_work(aid: str) -> None:
     for key in [k for k in sub_active if k[0] == aid]:
         for npc in sub_active.pop(key):   # 同一個鍵可能掛著多個並行子 agent，整批釋放
             busy.discard(npc)
+            sub_since.pop(npc, None)
             close_card(npc, "lost")
     notify("roster")
 
@@ -456,6 +483,25 @@ async def sweep_work() -> None:
             watering.add(aid)
             await goto(aid, COOLER)
             await bubble(aid, "● 思考中…")
+
+    # 子 agent 的釋放事件掉了：主 agent 可能還活得好好的（work_last 一直在刷新），
+    # 所以上面那條失聯規則救不到。這裡按【徵用時間】強制放人，否則那個 NPC 永遠不回座位。
+    # 這是投影層的兜底——cogito 端已把釋放事件改成不可丟（見 office_reporter 的 isCritical），
+    # 但橋長期掛掉時仍可能漏，且橋自己重啟也會失憶，所以兩邊都要有。
+    for npc in [n for n, t in list(sub_since.items()) if now - t > SUB_TIMEOUT]:
+        print(f"⚠ {npc} 被徵用 {SUB_TIMEOUT:.0f}s 未收到釋放事件，強制放人")
+        sub_since.pop(npc, None)
+        busy.discard(npc)
+        for key, queue in list(sub_active.items()):
+            if npc in queue:
+                queue.remove(npc)
+                if not queue:
+                    sub_active.pop(key, None)
+        close_card(npc, "lost")
+        log_ev(npc, "⚠ 委派回報沒收到，自動收工")
+        if desk := WORK_DESK.get(npc):
+            await goto(npc, desk)   # 關鍵：把人送回座位，不然畫面上他就一直杵著
+        notify("roster")
 
     for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
@@ -583,6 +629,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False  # 沒人有空：主 agent 頭上冒泡就好
             sub_active.setdefault((parent, name), []).append(npc)
             busy.add(npc)
+            sub_since[npc] = time.monotonic()
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
             # 規劃類的活在白板前做（不佔工位，也讓「這是在想、不是在寫」看得出來）
@@ -609,6 +656,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
                 await goto(parent, desk)
             busy.discard(npc)
+            sub_since.pop(npc, None)
             notify("roster")
             close_card(npc, "ok" if kind == "result" else "error")
             card = last_report.get(npc)
@@ -835,6 +883,12 @@ async def office_event(ev: dict):
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
             a.remember(f"接到工作任務「{label}」，開始上工")
+    elif kind == "turn":
+        # 進【工作串】不進泡泡：泡泡只有 8 字寬、又有 2.2s 節流，多一則就是噪音；
+        # 工作串才是拿來觀察的地方。少了它，兩次工具呼叫之間的長考在時間軸上是一段
+        # 完全沒有訊息的空白，看起來像 agent 掛了（實際回報：「訊息 streaming 跟行為對不上」）。
+        if aid not in chat_mode and last_report.get(aid):
+            log_ev(aid, f"🔄 第 {label} 輪")
     elif kind == "msg":
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
         if aid not in chat_mode:  # 閒聊的回話不覆蓋任務的報告全文
