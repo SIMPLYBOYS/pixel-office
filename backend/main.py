@@ -757,24 +757,35 @@ def notify(kind: str, aid: str = "", alert: str = "") -> None:
 DUP_HEAD = 60   # 比對前綴長度：兩條路徑的截斷長度不同，只有開頭這段一定相同
 
 
+def body_of(text: str) -> str:
+    """去掉投影用的前綴符號，只留內容——同一句話經不同路徑會帶不同前綴（💬 / 無）。"""
+    return text.lstrip("💬 ").strip()
+
+
 def dup_of_last(aid: str, text: str) -> bool:
     """這段文字是不是剛剛才記過（同一則訊息走兩條路送來）。
-    比前綴而不是整段：兩條路徑一個截 300、一個截 200，整段永遠不相等。"""
+    比前綴而不是整段：兩條路一個截 300、一個截 200，整段永遠不相等。
+    只擋長訊息：短的記號（「✓ bash」「▸ 第 3 輪」）本來就會重複出現，那不是 bug。"""
+    if len(body_of(text)) < DUP_HEAD:
+        return False
     card = last_report.get(aid)
     if not card or not card.get("events"):
         return False
-    head = text.strip()[:DUP_HEAD]
-    if not head:
-        return False
+    head = body_of(text)[:DUP_HEAD]
     for ev in card["events"][-3:]:   # 只看最近幾則：更早的同句話是真的又說了一次
-        prev = ev.get("text", "").lstrip("💬 ").strip()
-        if prev[:DUP_HEAD] == head:
+        if body_of(ev.get("text", ""))[:DUP_HEAD] == head:
             return True
     return False
 
 
 def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
-    """sub＝{agent, id}：這是一則委派事件，前端在此處內嵌對方的子任務卡。"""
+    """sub＝{agent, id}：這是一則委派事件，前端在此處內嵌對方的子任務卡。
+
+    去重擋在這裡而不是某一條呼叫路徑上：同一則助理訊息會經 /office/chat 與 /office/event(msg)
+    兩條路送來，先前只擋了「chat 比對既有事件」單一方向——先到的是 chat 時，後到的 msg 照樣
+    寫進去，畫面上還是兩份。擋在共用入口才沒有方向問題（也不必每個新來源記得自己擋）。"""
+    if sub is None and dup_of_last(aid, text):
+        return
     card = last_report.get(aid)
     if card is None:   # 沒有任何卡可掛（例：全新員工的第一則系統訊息）→ 開一張雜記卡。
         card = report_card(aid, "（雜項）")
@@ -1031,11 +1042,7 @@ async def office_chat(ev: dict):
         else:
             await pose(aid, "phone")   # 原地等：沒有走位，就不必等抵達
         await bubble(aid, "⚠ 等待審批")
-    # 同一則助理訊息 cogito 會走【兩條路】送來：/office/event(kind=msg) 與這裡的 /office/chat。
-    # 兩邊都記就會出現「內容一樣但截斷長度不同」的雙胞胎（300 vs 200），讀起來像壞掉。
-    # 後到的那則不再重複記——留先到的即可，兩者內容本來就同源。
-    if not dup_of_last(aid, text):
-        log_ev(aid, f"💬 {text[:300]}")
+    log_ev(aid, f"💬 {text[:300]}")   # 重複由 log_ev 統一擋（同一則訊息會走兩條路送來）
     return {"ok": True}
 
 

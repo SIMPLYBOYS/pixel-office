@@ -626,6 +626,20 @@ def dup_msg() -> None:
         bodies = [t.lstrip("💬 ").strip()[:40] for t in evs]
         assert bodies.count(long[:40]) == 1, f"同一則訊息被記了 {bodies.count(long[:40])} 次：{evs}"
 
+        # 反方向也要擋：chat 先到、msg 後到（誰先到不保證，只擋一邊等於沒擋）
+        long2 = "另一段夠長的助理訊息開頭" + "內容" * 200
+        c.post("/office/chat", json={"agent": "office:p05", "text": long2})
+        post(c, agent="p05", kind="msg", label=long2)
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        bodies = [t.lstrip("💬 ").strip()[:40] for t in evs]
+        assert bodies.count(long2[:40]) == 1, f"chat 先到時沒擋住：{bodies.count(long2[:40])} 次"
+
+        # 短記號本來就會重複出現（✓ bash 一天到晚有），不能被去重吃掉
+        for _ in range(2):
+            post(c, agent="p05", kind="error", label="bash")
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        assert sum(1 for t in evs if t.startswith("✗ bash")) == 2, "短記號不該被當成重複"
+
         # 但真的又說一次（隔了幾則）要記得下來——去重不能把重複發言吃掉
         for i in range(3):
             post(c, agent="p05", kind="tool", label=f"bash{i}")

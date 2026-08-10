@@ -1293,8 +1293,14 @@ function sync(el, t, bodySel, live) {
     if (sub) sync(sub, e.subcard, '.subbody', live);
   }
 
-  const last = evs.slice(-1)[0]?.text || '';   // 報告全文常＝最後一則訊息，重複就不貼
-  const want = t.report && !last.startsWith(t.report.slice(0, 40)) ? t.report : '';
+  // 報告全文常＝最後一則訊息，重複就不貼。
+  // ⚠ 比對前要剝掉投影前綴：事件是「💬 內容」而報告是「內容」，直接 startsWith 永遠不成立，
+  //   這道防護等於沒有（實際踩到：同一段話在畫面上出現三次，這是其中一次）。
+  // 也不只看最後一則——那兩條路徑誰先到不保證，同一段話可能落在倒數第二則。
+  const bodyOf = s => (s || '').replace(/^💬\s*/, '').trim();
+  const head = bodyOf(t.report).slice(0, 40);
+  const dup = head && evs.slice(-3).some(e => bodyOf(e.text).startsWith(head));
+  const want = t.report && !dup ? t.report : '';
   let rep = body.querySelector(':scope > .report');
   if (want && !rep) {
     rep = document.createElement('div');
