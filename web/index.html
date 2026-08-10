@@ -147,6 +147,16 @@
   pre.code { position: relative; background: #0f1319; border: 1px solid var(--line); border-radius: 8px;
              padding: 9px 11px; margin: 6px 0; overflow-x: auto; }
   pre.code code { background: none; padding: 0; display: block; white-space: pre; line-height: 1.55; }
+  /* 長程式碼收合：工作串是對話，整份檔案貼進來會把上下文淹掉。摘要保留語言與行數，
+     一眼知道折起來的是什麼、有多大，不用展開才知道要不要展開。 */
+  .codewrap { margin: 6px 0; }
+  .codewrap > summary { cursor: pointer; list-style: none; display: inline-flex; gap: 6px;
+                        font-size: 11px; color: var(--dim); padding: 3px 8px;
+                        border: 1px solid var(--line); border-radius: 6px; }
+  .codewrap > summary::-webkit-details-marker { display: none; }
+  .codewrap > summary::before { content: '▸'; }
+  .codewrap[open] > summary::before { content: '▾'; }
+  .codewrap > summary:hover { color: var(--text); }
   /* 語法高亮：低飽和配色，程式碼區塊本來就是深底，太鮮豔反而更難讀 */
   pre.code .cmt { color: #6b7280; font-style: italic; }
   pre.code .str { color: #98c379; }
@@ -982,19 +992,33 @@ function closeFences(t) {
 }
 
 // animate=false 時整段同步渲染（沒有 await，呼叫端可以當同步用）
-async function renderBody(box, text, animate) {
+// 工作串裡超過這個行數的程式碼區塊預設收起來。
+// 為什麼要有門檻而不是一律收：三五行的小修改就地看到最好，收起來反而多一次點擊；
+// write_file 一次貼進來上百行才是「對話被檔案內容淹沒」的元凶。
+const CODE_FOLD_LINES = 8;
+
+async function renderBody(box, text, animate, foldCode = false) {
   box.textContent = '';
   for (const seg of segments(closeFences(text))) {
     if (seg.code) {
+      const lines = seg.v.split('\n').length;
+      const fold = foldCode && lines > CODE_FOLD_LINES;
+      let host = box;
+      if (fold) {
+        const d = el('details', undefined, 'codewrap');
+        d.appendChild(el('summary', `${seg.lang || '程式碼'} · ${lines} 行`));
+        box.appendChild(d);
+        host = d;
+      }
       const pre = el('pre', undefined, 'code');
       if (seg.lang) pre.appendChild(el('span', seg.lang, 'lang'));
       const code = el('code');
       pre.appendChild(code);
-      box.appendChild(pre);
+      host.appendChild(pre);
       keepBottom();
       // 新到的程式碼逐字浮現（看 agent 把檔案「寫出來」）；補歷史時直接上字。
-      // typewrite 依時間推進、總長 ≲1.4 秒，所以檔案再長也不會讓人乾等。
-      if (animate) await typewrite(code, seg.v); else code.textContent = seg.v;
+      // 收起來的就別演了——沒人看得到，只是白等。
+      if (animate && !fold) await typewrite(code, seg.v); else code.textContent = seg.v;
       highlight(code, seg.v, seg.lang);   // 打完字才上色（打字中反覆重建 DOM 會閃）
       continue;
     }
@@ -1092,7 +1116,8 @@ function onScreen(node) {
 function appendEv(body, e, live) {
   const d = evEl(e);
   const tx = d.querySelector('.tx');
-  const instant = () => { renderBody(tx, e.text, false); body.appendChild(d); keepBottom(); };
+  // 工作串是【對話】，長程式碼收起來；預覽面板那邊不折（那裡本來就是要看內容的）
+  const instant = () => { renderBody(tx, e.text, false, true); body.appendChild(d); keepBottom(); };
   if (!live) return instant();
   const mine = gen;
   enqueue(async rush => {
@@ -1101,7 +1126,7 @@ function appendEv(body, e, live) {
     body.appendChild(d);
     keepBottom();
     d.classList.add('in');
-    await renderBody(tx, e.text, true);
+    await renderBody(tx, e.text, true, true);
     await sleep(140);                               // 兩則之間留一拍，才像一則一則說
   });
 }
