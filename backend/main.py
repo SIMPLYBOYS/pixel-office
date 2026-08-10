@@ -773,6 +773,20 @@ def body_of(text: str) -> str:
     return text.lstrip("💬 ").strip()
 
 
+_SIG_DROP = str.maketrans("", "", "*#`|-—_> \t\n\r：:，,。.（）()「」【】")
+
+
+def sig(text: str, n: int = 40) -> str:
+    """內容指紋：抽掉所有排版符號與空白，只留「說了什麼」。
+
+    為什麼不能直接比文字：cogito 會【針對平台改寫排版】——同一段話，chat 那條路送
+    `**🟢 收尾類**` ＋ ``` 程式碼區塊，event 那條送 `## 🟢 收尾類` ＋ markdown 表格。
+    實測那兩份在第 44 個字就分岔，比前綴永遠比不出來（我原本假設兩邊文字相同，那個假設是錯的）。
+    去掉排版之後剩下的字才是同一份。
+    """
+    return body_of(text).translate(_SIG_DROP)[:n]
+
+
 def dup_of_last(aid: str, text: str) -> bool:
     """這段文字是不是同一則訊息走【另一條路】又送了一次。
 
@@ -788,16 +802,14 @@ def dup_of_last(aid: str, text: str) -> bool:
     card = last_report.get(aid)
     if not card or not card.get("events"):
         return False
-    body, is_chat = body_of(text), text.lstrip().startswith(CHAT_MARK)
-    if not body:
+    mine, is_chat = sig(text), text.lstrip().startswith(CHAT_MARK)
+    if len(mine) < 12:               # 指紋太短（「✓ bash」之類）無從分辨，交給前綴狀態就好
         return False
     for ev in card["events"][-3:]:   # 只看最近幾則：更早的同句話是真的又說了一次
         prev = ev.get("text", "")
         if prev.lstrip().startswith(CHAT_MARK) == is_chat:
             continue                 # 前綴狀態一樣＝同一條路來的，那是真的重複發言
-        pb = body_of(prev)
-        n = min(len(body), len(pb))
-        if n and body[:n] == pb[:n]:
+        if sig(prev) == mine:
             return True
     return False
 

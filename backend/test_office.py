@@ -701,6 +701,19 @@ def dup_msg() -> None:
         evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
         assert sum(1 for t in evs if t.startswith("✗ bash")) == 2, "短記號不該被當成重複"
 
+        # 【排版不同】的雙胞胎也要擋：cogito 會針對平台改寫排版，同一段話 chat 那條送
+        # 「**粗體**＋```區塊」、event 那條送「## 標題＋markdown 表格」，實測在第 44 個字就
+        # 分岔。比文字前綴永遠比不出來——「兩邊文字相同」這個假設從頭就是錯的。
+        # 共同開頭要夠長才符合真實形狀：分岔發生在敘述之後的【結構】（表格 vs 程式碼區塊），
+        # 不是開頭第一句。指紋窗口若為了遷就更早的分岔而縮短，就會開始把不同訊息誤判成同一則。
+        lead = "基於目前狀態，接下來可做的 action 大致分四類，按「該不該做／成本」排序給你："
+        chat_fmt = lead + "\n\n**🟢 收尾類（低成本，建議先做）**\n```\nA. 清理\n```"
+        msg_fmt = lead + "\n\n## 🟢 收尾類（低成本，建議先做）\n| Action | 成本 |"
+        post(c, agent="p05", kind="msg", label=msg_fmt)
+        c.post("/office/chat", json={"agent": "office:p05", "text": chat_fmt})
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        assert sum(1 for t in evs if "接下來可做的" in t) == 1, f"排版不同的雙胞胎沒擋住：{evs[-3:]}"
+
         # 【短】訊息也要去重：實測踩到一句 38 字的雙胞胎，用長度當門檻就會漏掉。
         short = "會開完，上板。board.json 每輪會被清（老教訓），先確認再決定重建或增補。"
         post(c, agent="p05", kind="msg", label=short)
