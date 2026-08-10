@@ -139,6 +139,8 @@
   @keyframes evin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   .ev.in { animation: evin .28s ease-out; }
   .ev .at { font-size: 11px; color: var(--dim); }
+  /* 協作模式的發言人名牌：低調到不搶內容，但一眼看得出這段話有主人 */
+  .ev .who { font-size: 11px; color: #9aa4b2; margin: 1px 0 2px; }
   .ev .tx { white-space: pre-wrap; word-break: break-word; }
   .report { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 10px; white-space: pre-wrap; word-break: break-word; }
   /* 程式碼：等寬、可橫向捲動（不換行才看得出縮排），語言標在右上角 */
@@ -1098,6 +1100,12 @@ function evEl(e) {
   const at = document.createElement('div'); at.className = 'at'; at.textContent = e.at;
   const tx = document.createElement('div'); tx.className = 'tx';
   d.append(at, tx);
+  // 協作模式的工作串沒有頭像也沒有名字——一長串文字流出來卻不知道是誰在講，很沒有著落感。
+  // 只標【對話】那幾則（💬）：工具與委派事件已經有自己的記號（▸ ✓ 🤝），再加名牌只是噪音。
+  // 主持人的話就是主持人的話——子 agent 的原話在 meeting.md，那是檔案不是工作串，
+  // 這裡不假裝分得出來（Tier 1 本來就是主持人轉述）。
+  if (agentsData[selected] && agentsData[selected].npc === false && /^💬/.test(e.text || ''))
+    d.insertBefore(el('div', '🎤 主持人', 'who'), tx);
   if (e.subcard) d.appendChild(subEl(e.subcard, false));
   return d;
 }
