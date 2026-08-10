@@ -85,9 +85,12 @@
   section { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
   .head { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
   .head .who { font-size: 16px; }
-  /* 清全部：刻意低調（只有 hover 才亮起來）——這是不可復原的動作，不該長得像常用按鈕 */
-  .head .wipe { float: right; cursor: pointer; opacity: .35; font-size: 14px; }
-  .head .wipe:hover { opacity: 1; }
+  /* 清全部：低調但【找得到】。第一版只有一個 14px、opacity .35 的裸圖示貼在角落，
+     實際回報是「無法直接點擊」——其實點得到，是根本看不見。
+     防誤按靠的是確認對話框，不是讓人找不到控制項；低調≠藏起來。 */
+  .head .wipe { float: right; cursor: pointer; opacity: .6; font-size: 12px; color: var(--dim);
+                border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+  .head .wipe:hover { opacity: 1; color: #e07070; border-color: #5a3a3a; }
   .head .task { color: var(--dim); font-size: 13px; margin-top: 4px; }
   .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #2a2f3a; margin-left: 8px; }
   .badge.working { color: var(--accent); }
@@ -581,7 +584,7 @@ async function board(id) {
   box.innerHTML = `<summary>🗂 任務板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
       ${r.live ? '' : '<span class="idle">⏸ 未在推進</span>'}
       <span class="rl" title="重新載入">↻</span>
-      <span class="rl clr" title="收掉這塊板（封存）">🗑</span></summary>
+      <span class="rl clr" title="收掉這塊板（改名封存在工作區，不會真的刪掉）">🗑 收掉</span></summary>
     <div class="body"><div class="cols"></div></div>`;
   for (const [sel, fn] of [['.rl', () => board(id)], ['.clr', clearBoard]])
     box.querySelector(sel).onclick = e => {
@@ -1410,7 +1413,8 @@ async function feed() {
     // 🗑 清全部：反覆測試後一天一天刪太瑣碎。放在標題列而不是每張卡上——這是「整理」
     // 不是「操作某張卡」，混進卡片動線只會讓人誤按。
     $('head').innerHTML = `<div class="who">${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
-        <span class="wipe" title="清掉這位的全部工作紀錄" onclick="clearAll()">🗑</span></div>
+        <span class="wipe" title="清掉這位的全部工作紀錄（進行中的會保留）"
+              onclick="clearAll()">🗑 清空紀錄</span></div>
       <div class="task">最新任務 · ${r.at}　${esc(r.task)}</div>`;
     const initial = f.dataset.agent !== selected;   // 換人＝整串重建，歷史一次補齊
     if (initial) {
