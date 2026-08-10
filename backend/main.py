@@ -757,6 +757,9 @@ def notify(kind: str, aid: str = "", alert: str = "") -> None:
 CHAT_MARK = "💬"   # /office/chat 那條路會帶這個前綴；/office/event(msg) 不帶
 
 
+TURN_QUIET = 12.0                       # 距上一則事件超過這麼久，那段空白才值得標「思考中」
+last_ev_at: dict[str, float] = {}       # aid -> 最後一則事件的時間（monotonic）
+
 NOTE_MARK = "🧑‍💼 老闆交辦："
 
 
@@ -811,6 +814,7 @@ def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
     if card is None:   # 沒有任何卡可掛（例：全新員工的第一則系統訊息）→ 開一張雜記卡。
         card = report_card(aid, "（雜項）")
         card["status"] = "note"   # 它不是任務，別掛「進行中」——那會永遠轉下去
+    last_ev_at[aid] = time.monotonic()   # 給回合標記判斷「這段空白是不是真的」
     ev: dict = {"at": time.strftime("%H:%M:%S"), "text": text}
     if sub:
         ev["sub"] = sub
@@ -939,11 +943,13 @@ async def office_event(ev: dict):
                 await goto(aid, desk)
             a.remember(f"接到工作任務「{label}」，開始上工")
     elif kind == "turn":
-        # 進【工作串】不進泡泡：泡泡只有 8 字寬、又有 2.2s 節流，多一則就是噪音；
-        # 工作串才是拿來觀察的地方。少了它，兩次工具呼叫之間的長考在時間軸上是一段
-        # 完全沒有訊息的空白，看起來像 agent 掛了（實際回報：「訊息 streaming 跟行為對不上」）。
-        if aid not in chat_mode and last_report.get(aid):
-            log_ev(aid, f"🔄 第 {label} 輪")
+        # 回合標記【只在真的安靜時】才記。它原本的用途是填補長考的空白——兩次工具呼叫之間
+        # 如果什麼都沒有，看起來像 agent 掛了。但每輪都印就變成另一種噪音：使用者看到的是
+        # 一連串「第 N 輪」夾在有內容的事件中間，而「第幾輪」對他毫無意義（實際回報）。
+        # 只有距離上一則事件超過 TURN_QUIET 秒，那段空白才是真的，這行才有資訊。
+        quiet = time.monotonic() - last_ev_at.get(aid, 0.0)
+        if aid not in chat_mode and last_report.get(aid) and quiet > TURN_QUIET:
+            log_ev(aid, f"⋯ 思考中（第 {label} 輪）")
     elif kind == "msg":
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
         if aid not in chat_mode:  # 閒聊的回話不覆蓋任務的報告全文
@@ -1493,13 +1499,29 @@ def soul_doc(aid: str, body: str) -> str:
             f"{head}\n\n{body.strip()}\n")
 
 
+# 子 agent 的工具集是 opt-in 的：具名 agent 沒宣告 tools 就只拿到唯讀探路者子集
+# （read_file + bash，見 cogito 的 defaultSubagentTools）。所以【不宣告＝實作工作永遠派不出去】，
+# 主持人只能自己做——板子上的 owner 全成了裝飾，Unity 也不會有人走動（沒有委派就沒有投影）。
+#
+# 實作型的人給寫入，決策型的維持唯讀：小美收範圍、老徐把關，他們的產出是判斷不是檔案。
+# 寫入照樣過審批 middleware，這裡放行的是「能不能被派這種工作」，不是「能不能繞過稽核」。
+READONLY_TOOLS = ["read_file", "bash"]                             # 決策型：只讀，產出是判斷
+WRITER_TOOLS = ["read_file", "bash", "write_file", "edit_file"]    # 實作型：要動得了檔案
+READONLY_ROLES = {"p01", "p19"}   # 小美（產品經理）、老徐（CTO）
+
+
+def agent_tools(aid: str) -> list[str]:
+    return READONLY_TOOLS if aid in READONLY_ROLES else WRITER_TOOLS
+
+
 def agent_doc(aid: str, body: str) -> str:
     """把人設寫成 cogito 具名 agent 的格式（frontmatter name/description + body 當 system prompt）。
     description 會出現在主持人的工具說明裡——那不是註解，是 prompt：寫得爛，主持人就不知道
     什麼時候該點名這個人。所以取人設的「決策偏好」那句而不是職稱了事。"""
     p = agents[aid].persona
     desc = "；".join(x for x in [p.get("role", ""), p.get("personality", "")] if x)
-    return (f"---\nname: {p.get('name', aid)}\ndescription: {desc}\n---\n"
+    return (f"---\nname: {p.get('name', aid)}\ndescription: {desc}\n"
+            f"tools: [{', '.join(agent_tools(aid))}]\n---\n"
             f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生，刪掉這行即可自行維護。 -->\n\n"
             f"{body.strip()}\n")
 

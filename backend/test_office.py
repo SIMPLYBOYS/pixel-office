@@ -393,20 +393,28 @@ def sub_release_fallback() -> None:
 
 
 def turn_in_stream() -> None:
-    """turn 事件只進【工作串】不冒泡。
+    """回合標記【只在真的安靜時】才進工作串，而且不冒泡。
 
-    少了它，兩次工具呼叫之間的長考在時間軸上是一段全空白，看起來像 agent 掛了
-    （實際回報：「訊息 streaming 跟行為對不上」）。但也不該冒泡——泡泡只有 8 字寬又有節流。"""
+    它的用途是填補長考的空白——兩次工具呼叫之間全空白，看起來像 agent 掛了。
+    但每輪都印就變成另一種噪音：一連串「第 N 輪」夾在有內容的事件中間，而「第幾輪」
+    對使用者毫無意義（實際回報：「不理解所謂的第幾輪是有什麼意義」）。"""
     with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
         ws.send_text(json.dumps({"type": "waypoints", "agents": [], "list": main.waypoint_list or ["chair_1"]}))
         aid = "p17"
         main.chat_mode.discard(aid)
         c.post("/office/event", json={"agent": aid, "kind": "start", "label": "寫規格", "detail": "/w"})
+
+        # 剛剛才有事件 → 這一輪不安靜，不該留下痕跡
         before = len(main.last_report[aid]["events"])
         c.post("/office/event", json={"agent": aid, "kind": "turn", "label": "7", "detail": ""})
+        assert len(main.last_report[aid]["events"]) == before, "有內容的回合不該再插一行「第 N 輪」"
+
+        # 假裝安靜了很久 → 那段空白是真的，要標出來
+        main.last_ev_at[aid] = time.monotonic() - main.TURN_QUIET - 1
+        c.post("/office/event", json={"agent": aid, "kind": "turn", "label": "8", "detail": ""})
         evs = main.last_report[aid]["events"]
-        assert len(evs) == before + 1, "turn 沒寫進工作串"
-        assert "第 7 輪" in evs[-1]["text"], f"回合數沒帶進去：{evs[-1]}"
+        assert len(evs) == before + 1, "長考的空白沒有被標出來"
+        assert "第 8 輪" in evs[-1]["text"] and "思考中" in evs[-1]["text"], f"措辭不對：{evs[-1]}"
 
 
 def clear_day() -> None:
@@ -773,6 +781,14 @@ def kanban() -> None:
         head = one.read_text(encoding="utf-8")
         assert head.startswith("---\nname: "), "缺 frontmatter，cogito 解析不出名字"
         assert "description: " in head.split("---")[1], "缺 description——主持人就不知道何時該點他"
+
+        # tools 必須宣告：cogito 的具名 agent 沒宣告就只拿到唯讀子集（read_file + bash），
+        # 於是【實作類的工作永遠派不出去】——主持人只能自己做，板子上的 owner 全是裝飾，
+        # Unity 也不會有人走動（沒有委派就沒有投影）。實測踩到整場沒有任何子 agent 出現。
+        impl = (d / f'{main.agents["p12"].name}.md').read_text(encoding="utf-8")   # 小葵：前端
+        assert "write_file" in impl and "edit_file" in impl, "實作型的人要動得了檔案"
+        boss = (d / f'{main.agents["p19"].name}.md').read_text(encoding="utf-8")   # 老徐：CTO
+        assert "write_file" not in boss, "決策型維持唯讀——他的產出是判斷不是檔案"
 
         assert main.sync_agents() == 0            # 內容相同不重寫
         mine = "# 我自己寫的\n不要動。\n"           # 沒有標記＝人寫的
