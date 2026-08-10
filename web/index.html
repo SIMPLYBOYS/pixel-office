@@ -124,6 +124,14 @@
   .board .card .who { color: var(--dim); font-size: 11px; }
   .board .card .dep { color: #e8c454; font-size: 11px; }
   .board .empty { color: var(--dim); font-size: 11px; padding: 4px 2px; }
+  /* 會議進度：一排人名 + 回來了沒。刻意不做進度條——真實資料是離散的「誰回了」，
+     畫成百分比反而是把已知的東西換成猜的 */
+  .board .people { display: flex; flex-wrap: wrap; gap: 6px; }
+  .board .people .who { font-size: 12px; padding: 2px 8px; border-radius: 10px;
+                        background: var(--panel2, #1b1e24); color: var(--dim); }
+  .board .people .ok { color: #76c47a; }
+  .board .people .bad { color: #e07070; }
+  .board .people .wait { color: #e8c454; }
   /* 未在推進：整塊板降低存在感，「進行中」那欄的卡不再用亮色暗示有人在做 */
   .board .idle { color: #e8c454; font-size: 11px; }
   .board.stale .cols { opacity: .55; }
@@ -583,6 +591,23 @@ async function board(id) {
   // 預設【展開】——人設/工作區那兩個面板是附屬資訊所以預設收合，看板不是：協作模式下它就是
   // 主角，每次都要手動展開等於沒做。只有使用者自己收起來過（存成 '0'）才維持收合。
   const wasOpen = box.open || localStorage.boardOpen !== '0';
+  // 還沒上板：畫【會議進度】而不是空板子。上板前的會議是最久也最貴的一段，
+  // 那段時間任務板全空，使用者只能看著工作串捲、不知道還要等多久、誰還沒回。
+  if (r.mode === 'meeting') {
+    box.dataset.sig = '';   // 換回真板子時要能重畫
+    box.innerHTML = `<summary>🗂 任務板｜會議進行中　<span class="idle">${r.done}/${r.total} 已回</span>
+        <span class="rl" title="重新載入">↻</span></summary>
+      <div class="body"><div class="people"></div></div>`;
+    box.querySelector('.rl').onclick = e => { e.preventDefault(); e.stopPropagation(); board(id); };
+    box.open = box.open || localStorage.boardOpen !== '0';
+    const p = box.querySelector('.people');
+    for (const x of r.people) {
+      const mark = x.done ? (x.ok ? '✓' : '✗') : '…';
+      p.appendChild(el('span', `${mark} ${x.name}`, 'who ' + (x.done ? (x.ok ? 'ok' : 'bad') : 'wait')));
+    }
+    return;
+  }
+
   // 圖示與名詞都要跟上面那張人設卡分開——兩個「📋 看板」並排，沒人分得出誰是誰。
   // 「未在推進」要講出來：board.json 只有主持人在跑時才更新，它收工後「進行中」那欄會停在
   // 原地，畫面上看起來有人在做、實際沒有。投影寧可顯得樸素，也不能說謊。

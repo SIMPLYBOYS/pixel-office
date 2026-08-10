@@ -1293,15 +1293,46 @@ def board_column(task: dict, done_ids: set[str]) -> str:
     return "blocked" if any(d not in done_ids for d in deps) else "todo"
 
 
+def meeting_progress() -> dict | None:
+    """會議進度：這一輪派了誰、回來幾個。沒有在開會就回 None。
+
+    為什麼要這一段：上板【之前】的會議是整個流程裡最久也最貴的一段，而那段時間任務板
+    是空的——使用者只能看著工作串一直捲，不知道還要等多久、誰還沒回。
+
+    資料全部來自已經存在的委派紀錄（誰被派、子卡收了沒），不是另外編一個進度條——
+    空板子是雜訊，假進度更糟。
+    """
+    card = last_report.get(KANBAN)
+    if not card or card["status"] != "working":
+        return None
+    people = []
+    for e in card["events"]:
+        ref = e.get("sub")
+        if not ref:
+            continue
+        child = find_card(ref["agent"], ref["id"])
+        people.append({
+            "name": agents[ref["agent"]].name if ref["agent"] in agents else ref["agent"],
+            "done": bool(child) and child["status"] != "working",
+            "ok": bool(child) and child["status"] == "ok",
+        })
+    if not people:
+        return None            # 還沒派任何人＝主持人還在讀資料，沒有進度可報
+    return {"ok": True, "mode": "meeting", "task": card["task"], "live": KANBAN in busy,
+            "people": people, "done": sum(1 for p in people if p["done"]), "total": len(people)}
+
+
 @app.get("/office/board")
 def office_board():
-    """看板快照。沒有 board.json 就回 ok=False——協作還沒開始，面板整個不顯示。"""
+    """看板快照。還沒上板時退回【會議進度】；連會都還沒開就整個不顯示。
+
+    ⚠ 會議進度【不需要工作區】——它的資料全來自任務卡。先前這裡在 agent_dir 為 None 時
+    就提早回傳，等於「還沒建過工作區就永遠看不到進度」，順序放錯了。
+    """
     base = agent_dir(KANBAN)
-    if base is None:
-        return {"ok": False, "error": "看板還沒有工作區"}
-    f = base / "board.json"
-    if not f.exists():
-        return {"ok": False, "error": "還沒有進行中的協作任務"}
+    f = base / "board.json" if base else None
+    if not f or not f.exists():
+        return meeting_progress() or {"ok": False, "error": "還沒有進行中的協作任務"}
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:

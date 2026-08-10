@@ -363,6 +363,7 @@ def run() -> None:
     dup_msg()
     sub_by_name()
     kanban()
+    meeting_progress()
     board()
     sub_release_fallback()
     turn_in_stream()
@@ -780,6 +781,7 @@ def board() -> None:
 
             r = c.get("/office/board").json()
             assert r["ok"] and r["task"] == "蓋一間會議室"
+            assert r.get("mode") != "meeting", "有板子時就該畫板子，不是會議進度"
             by = {col["key"]: col["cards"] for col in r["columns"]}
             assert [x["id"] for x in by["done"]] == ["api"]
             assert [x["id"] for x in by["doing"]] == ["ui"]
@@ -797,6 +799,36 @@ def board() -> None:
             assert c.get("/office/board").json()["live"] is True
             main.busy.discard(main.KANBAN)
     main.CHANNELS_DIR = None
+
+
+def meeting_progress() -> None:
+    """還沒上板時，任務板要退回【會議進度】：誰被派了、誰回來了。
+
+    上板前的會議是整個流程裡最久也最貴的一段，那段時間板子全空——使用者只能看著
+    工作串捲，不知道還要等多久、誰還沒回。資料全部來自既有的委派紀錄，不是編一個進度條。"""
+    with TestClient(main.app) as c:
+        main.history.clear(); main.last_report.clear()
+        main.busy.clear(); main.sub_active.clear()
+
+        # 還沒開會：整個面板不顯示（空板子是雜訊）
+        assert c.get("/office/board").json()["ok"] is False
+
+        # 開會中但還沒派人：也沒有進度可報
+        post(c, agent=main.KANBAN, kind="start", label="設計訪客導覽")
+        assert c.get("/office/board").json()["ok"] is False, "還沒派人就不該報進度"
+
+        # 派兩個、回一個
+        for _ in range(2):
+            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
+        post(c, agent=main.KANBAN, kind="result", label="spawn_subagent", detail="我的意見")
+        r = c.get("/office/board").json()
+        assert r["ok"] and r["mode"] == "meeting", r
+        assert (r["done"], r["total"]) == (1, 2), f"進度不對：{r}"
+        assert sum(1 for p in r["people"] if p["done"] and p["ok"]) == 1
+        assert all(p["name"] for p in r["people"]), "要有名字，不然看不出在等誰"
+
+        post(c, agent=main.KANBAN, kind="done", label="ok")
+        assert c.get("/office/board").json()["ok"] is False, "收工後就不該再報會議進度"
 
 
 def kanban() -> None:
