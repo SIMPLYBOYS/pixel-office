@@ -754,6 +754,25 @@ def notify(kind: str, aid: str = "", alert: str = "") -> None:
             q.put_nowait(ev)
 
 
+DUP_HEAD = 60   # 比對前綴長度：兩條路徑的截斷長度不同，只有開頭這段一定相同
+
+
+def dup_of_last(aid: str, text: str) -> bool:
+    """這段文字是不是剛剛才記過（同一則訊息走兩條路送來）。
+    比前綴而不是整段：兩條路徑一個截 300、一個截 200，整段永遠不相等。"""
+    card = last_report.get(aid)
+    if not card or not card.get("events"):
+        return False
+    head = text.strip()[:DUP_HEAD]
+    if not head:
+        return False
+    for ev in card["events"][-3:]:   # 只看最近幾則：更早的同句話是真的又說了一次
+        prev = ev.get("text", "").lstrip("💬 ").strip()
+        if prev[:DUP_HEAD] == head:
+            return True
+    return False
+
+
 def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
     """sub＝{agent, id}：這是一則委派事件，前端在此處內嵌對方的子任務卡。"""
     card = last_report.get(aid)
@@ -1012,7 +1031,11 @@ async def office_chat(ev: dict):
         else:
             await pose(aid, "phone")   # 原地等：沒有走位，就不必等抵達
         await bubble(aid, "⚠ 等待審批")
-    log_ev(aid, f"💬 {text[:300]}")
+    # 同一則助理訊息 cogito 會走【兩條路】送來：/office/event(kind=msg) 與這裡的 /office/chat。
+    # 兩邊都記就會出現「內容一樣但截斷長度不同」的雙胞胎（300 vs 200），讀起來像壞掉。
+    # 後到的那則不再重複記——留先到的即可，兩者內容本來就同源。
+    if not dup_of_last(aid, text):
+        log_ev(aid, f"💬 {text[:300]}")
     return {"ok": True}
 
 

@@ -357,6 +357,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    dup_msg()
     sub_by_name()
     kanban()
     board()
@@ -582,6 +583,29 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def dup_msg() -> None:
+    """同一則助理訊息走兩條路送來（/office/event kind=msg 與 /office/chat），只該記一次。
+    兩條路的截斷長度不同（200 vs 300），所以是「內容像但不完全一樣」的雙胞胎，最難察覺。"""
+    with TestClient(main.app) as c:
+        main.busy.discard("p05")
+        post(c, agent="p05", kind="start", label="寫報告")
+        long = "落地驗證通過。開工前給你看板子。" + "細節" * 200
+        post(c, agent="p05", kind="msg", label=long)
+        c.post("/office/chat", json={"agent": "office:p05", "text": long})
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        bodies = [t.lstrip("💬 ").strip()[:40] for t in evs]
+        assert bodies.count(long[:40]) == 1, f"同一則訊息被記了 {bodies.count(long[:40])} 次：{evs}"
+
+        # 但真的又說一次（隔了幾則）要記得下來——去重不能把重複發言吃掉
+        for i in range(3):
+            post(c, agent="p05", kind="tool", label=f"bash{i}")
+        c.post("/office/chat", json={"agent": "office:p05", "text": long})
+        evs = [e["text"] for e in c.get("/office/report/p05").json()["timeline"]]
+        bodies = [t.lstrip("💬 ").strip()[:40] for t in evs]
+        assert bodies.count(long[:40]) == 2, "隔了幾則之後的同句話是真的又說了一次，不該被吃掉"
+        post(c, agent="p05", kind="done", label="ok")
 
 
 def sub_by_name() -> None:
