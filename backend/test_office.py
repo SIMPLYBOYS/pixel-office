@@ -357,6 +357,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    clear_all()
     note_not_echoed()
     stop_clears_approval()
     dup_msg()
@@ -593,6 +594,38 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def clear_all() -> None:
+    """一次清掉某位的全部工作紀錄（測試跑久了一天一天刪太瑣碎），但進行中的照樣保留。
+    另外板子是【封存】不是刪除——那是一次協作的完整紀錄。"""
+    import tempfile
+    with TestClient(main.app) as c:
+        # 卡要在 TestClient 啟動【之後】才建：startup 會跑 load_state()，把 history 整個換掉
+        main.history.clear(); main.last_report.clear()
+        for day in ("2026-01-01", "2026-02-02", ""):
+            card = main.report_card("p01", f"{day} 的討論", "")
+            card["day"], card["status"] = day, "ok"
+        live = main.report_card("p01", "還在跑的", "")
+        live["day"], live["status"] = "2026-03-03", "working"
+        r = c.request("DELETE", "/office/history/p01", params={"scope": "all"}).json()
+        assert r["ok"] and r["removed"] == 3 and r["skipped"] == 1, r
+        left = [t["task"] for t in main.history["p01"]]
+        assert left == ["還在跑的"], f"進行中的卡被刪了：{left}"
+
+        # 板子：改名封存，原檔不再存在但內容還在
+        with tempfile.TemporaryDirectory() as tmp:
+            main.CHANNELS_DIR = Path(tmp)
+            wd = Path(tmp) / f"office_{main.KANBAN}"
+            wd.mkdir(parents=True)
+            (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
+            r = c.request("DELETE", "/office/board").json()
+            assert r["ok"], r
+            assert not (wd / "board.json").exists(), "原檔應該被改名"
+            arch = list(wd.glob("board.*.json"))
+            assert len(arch) == 1 and "x" in arch[0].read_text(encoding="utf-8"), "封存檔不見了"
+            assert c.request("DELETE", "/office/board").json()["ok"] is False, "沒有板子時要講清楚"
+    main.CHANNELS_DIR = None
 
 
 def note_not_echoed() -> None:

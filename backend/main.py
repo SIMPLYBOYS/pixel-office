@@ -1221,8 +1221,8 @@ def serve_file(base: Path, rel: str, render: int):
 
 
 @app.delete("/office/history/{aid}")
-def office_clear_day(aid: str, day: str = ""):
-    """清掉某一天的任務卡（day=""＝那些沒有日期欄位的舊卡）。
+def office_clear_day(aid: str, day: str = "", scope: str = "day"):
+    """清掉任務卡。scope=day（預設）只清某一天（day=""＝沒有日期欄位的舊卡）；scope=all 清全部。
 
     ⚠ 進行中的卡不刪：那是還在跑的任務，刪了畫面與事件流就對不上（事件還會繼續進來，
     又會被 log_ev 開一張新的雜項卡）。等它收工再清。
@@ -1232,7 +1232,7 @@ def office_clear_day(aid: str, day: str = ""):
         return {"ok": False, "error": "這位員工沒有工作紀錄"}
     keep, removed, skipped = [], 0, 0
     for t in cards:
-        if t.get("day", "") != day:
+        if scope != "all" and t.get("day", "") != day:
             keep.append(t)
         elif t["status"] == "working":
             keep.append(t)
@@ -1240,7 +1240,8 @@ def office_clear_day(aid: str, day: str = ""):
         else:
             removed += 1
     if not removed:
-        return {"ok": False, "error": "那一天沒有可清的卡" + ("（都還在進行中）" if skipped else "")}
+        where = "沒有可清的卡" if scope == "all" else "那一天沒有可清的卡"
+        return {"ok": False, "error": where + ("（都還在進行中）" if skipped else "")}
     history[aid] = deque(keep, maxlen=20)
     # 最新卡指標要跟著移動；整串被清空就連指標一起收掉
     if keep:
@@ -1311,6 +1312,20 @@ def office_board():
     # 板子是不是活的，橋知道，就要講出來。
     return {"ok": True, "task": data.get("task", ""), "live": KANBAN in busy,
             "columns": [{"key": k, "name": n, "cards": cols[k]} for k, n in BOARD_COLUMNS]}
+
+
+@app.delete("/office/board")
+def office_board_clear():
+    """收掉目前這塊板。改名成 board.<時間>.json 而不是刪除——那是一次協作的完整紀錄，
+    主持人也可能還想回頭看；真的不要了再自己去工作區刪。"""
+    base = agent_dir(KANBAN)
+    f = base / "board.json" if base else None
+    if not f or not f.exists():
+        return {"ok": False, "error": "目前沒有板子"}
+    dst = f.with_name(f"board.{time.strftime('%m%d-%H%M%S')}.json")
+    f.rename(dst)
+    notify("agent", KANBAN)
+    return {"ok": True, "archived": dst.name}
 
 
 @app.get("/office/wsfile/{aid}")

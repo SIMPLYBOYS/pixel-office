@@ -85,6 +85,9 @@
   section { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
   .head { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
   .head .who { font-size: 16px; }
+  /* 清全部：刻意低調（只有 hover 才亮起來）——這是不可復原的動作，不該長得像常用按鈕 */
+  .head .wipe { float: right; cursor: pointer; opacity: .35; font-size: 14px; }
+  .head .wipe:hover { opacity: 1; }
   .head .task { color: var(--dim); font-size: 13px; margin-top: 4px; }
   .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #2a2f3a; margin-left: 8px; }
   .badge.working { color: var(--accent); }
@@ -246,9 +249,33 @@
   .appr .btns.hint { color: var(--dim); font-size: 12px; }
   .appr .yes { background: var(--ok); color: #10240f; }
   .appr .no { background: #3a2c2c; color: #e07070; }
+
+/* ═══ 統一異常狀態 (anomaly_ui) — 四種異常同一種視覺語言 ═══
+   顏色=嚴重度(L0灰/L1黃/L2橙/L3紅)，位置=影響範圍(橫幅=全域/角標=單一) */
+.anomaly-banner{position:fixed;top:0;left:0;right:0;z-index:9999;
+  display:flex;align-items:center;gap:10px;padding:10px 16px;
+  font:14px/1.4 system-ui;color:#e6edf3;border-bottom:2px solid;transition:opacity .25s;}
+.anomaly-banner.hidden{display:none;}
+.anomaly-banner .ab-icon{font-size:15px;}
+.anomaly-banner .ab-msg{flex:1;}
+.anomaly-banner .ab-action{padding:4px 12px;border-radius:4px;border:1px solid currentColor;
+  background:transparent;color:inherit;cursor:pointer;font:inherit;}
+.anomaly-banner .ab-action.hidden{display:none;}
+.anomaly-banner[data-level="L0"]{background:#2a2f3a;border-color:#3a4553;color:#8aa0b4;}
+.anomaly-banner[data-level="L1"]{background:#3a3320;border-color:#e0b83a;}
+.anomaly-banner[data-level="L2"]{background:#3a2a1a;border-color:#e08a3a;}
+.anomaly-banner[data-level="L3"]{background:#3a1f1f;border-color:#e05a5a;}
+.npc-badge{position:absolute;top:-4px;right:-4px;width:16px;height:16px;border-radius:50%;
+  font-size:11px;text-align:center;line-height:16px;}
+.npc-badge.L2{background:#e08a3a;color:#1a1200;}
 </style>
 </head>
 <body>
+  <!-- 統一異常橫幅：所有全域異常(L0-L3)都走 showAnomaly() 填這裡，不另畫 UI -->
+  <div id="anomaly-banner" class="anomaly-banner hidden" data-level="">
+    <span class="ab-icon"></span><span class="ab-msg"></span>
+    <button class="ab-action hidden"></button>
+  </div>
   <aside id="rail">
     <h1>員工<small id="count"></small></h1>
     <div id="status" class="status"></div>
@@ -279,6 +306,32 @@
     </div>
   </section>
 <script>
+// ═══ 統一異常狀態模組 (anomaly) — 唯一入口，四種異常同一種語言 ═══
+// 硬約束：零 LLM、只反映真實信號、不給假動作。斷線純自動退避(拍板)。
+const ANOMALY_ICON = { L0:'\u27F3', L1:'\u26A0', L2:'\u25CF', L3:'\u26D4' };
+function showAnomaly(level, msg, actionLabel, onAction){
+  const b = document.getElementById('anomaly-banner');
+  if (!b) return;
+  b.dataset.level = level;
+  b.querySelector('.ab-icon').textContent = ANOMALY_ICON[level] || '';
+  b.querySelector('.ab-msg').textContent = msg;
+  const btn = b.querySelector('.ab-action');
+  if (actionLabel){ btn.textContent = actionLabel; btn.classList.remove('hidden'); btn.onclick = onAction || null; }
+  else { btn.classList.add('hidden'); btn.onclick = null; }
+  b.classList.remove('hidden');
+}
+function clearAnomaly(){ const b=document.getElementById('anomaly-banner'); if(b) b.classList.add('hidden'); }
+
+// 後端健康探測：本前端是輪詢制(非WebSocket)，以輪詢 fetch 成敗判斷斷線。
+// 指數退避概念套用到「連續失敗次數」：連續失敗中=L0(自動重試,無按鈕)，超門檻=L3(無按鈕,拍板不放手動鈕)。
+let healthFails = 0;
+function markBackendOk(){ if (healthFails>0){ healthFails=0; clearAnomaly(); } }
+function markBackendFail(){
+  healthFails++;
+  if (healthFails <= 6) showAnomaly('L0', `\u9023\u7dda\u4e2d\u2026\uff08\u7b2c${healthFails}\u6b21\uff09`); // 連線中…(第N次) 無按鈕
+  else showAnomaly('L3', '\u5f8c\u7aef\u9023\u4e0d\u4e0a\uff0c\u8acb\u7a0d\u5f8c\u91cd\u6574'); // 後端連不上，請稍後重整 無按鈕
+}
+
 const $ = id => document.getElementById(id);
 let selected = null, agentsData = {};
 
@@ -440,6 +493,7 @@ async function roster() {
 async function status() {
   try {
     const s = await (await fetch('/office/status')).json();
+    markBackendOk();  // 輪詢成功 = 後端活著，收掉斷線橫幅
     const canvas = !s.canvas ? '<span class="warn">🔴 畫面未連線</span>'
       : s.stale ? '<span class="warn">🟡 畫面無回應——重整分頁</span>'
       : `🟢 畫面已連線${s.canvas > 1 ? `（${s.canvas} 個）` : ''}`;
@@ -450,7 +504,7 @@ async function status() {
       : blocked ? '瀏覽器擋住音訊——點我解鎖（點 Unity 畫布不算互動）'
       : '提示音開著'}" onclick="toggleMute()">${muted() ? '🔕' : blocked ? '🔇' : '🔔'}</span>`;
     $('status').innerHTML = `${bell}${canvas}<br>${disp}`;
-  } catch { $('status').textContent = ''; }
+  } catch { $('status').textContent = ''; markBackendFail(); }  // 輪詢失敗 = 觸發斷線分級(L0自動重試→L3)
 }
 
 function toggleMute() {
@@ -526,12 +580,14 @@ async function board(id) {
   // 原地，畫面上看起來有人在做、實際沒有。投影寧可顯得樸素，也不能說謊。
   box.innerHTML = `<summary>🗂 任務板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
       ${r.live ? '' : '<span class="idle">⏸ 未在推進</span>'}
-      <span class="rl" title="重新載入">↻</span></summary>
+      <span class="rl" title="重新載入">↻</span>
+      <span class="rl clr" title="收掉這塊板（封存）">🗑</span></summary>
     <div class="body"><div class="cols"></div></div>`;
-  box.querySelector('.rl').onclick = e => {
-    e.preventDefault(); e.stopPropagation();   // 不要順手把面板收起來
-    board(id);
-  };
+  for (const [sel, fn] of [['.rl', () => board(id)], ['.clr', clearBoard]])
+    box.querySelector(sel).onclick = e => {
+      e.preventDefault(); e.stopPropagation();   // 不要順手把面板收起來
+      fn();
+    };
   box.open = wasOpen;
   box.classList.toggle('stale', !r.live);
   // ontoggle 而非 addEventListener：這個函式每收到一則事件就重跑一次，addEventListener 會愈疊愈多
@@ -1087,6 +1143,27 @@ async function clearDay(day, box) {
   feed();
 }
 
+// 清掉這位的【全部】工作紀錄。反覆測試之後一天一天刪太瑣碎——但也因此更危險，
+// 所以確認訊息要把件數講出來，讓人看得到自己要刪掉多少。進行中的照樣保留。
+async function clearAll() {
+  const name = (agentsData[selected] || {}).name || selected;
+  const n = $('feed').querySelectorAll('.tcard').length;
+  if (!confirm(`清掉「${name}」的全部 ${n} 件工作紀錄？\n（進行中的不會被刪，此動作無法復原）`)) return;
+  const r = await (await fetch(`/office/history/${selected}?scope=all`, { method: 'DELETE' })).json();
+  if (!r.ok) { $('hint').textContent = `清不掉：${r.error}`; return; }
+  $('hint').textContent = `已清 ${r.removed} 件` + (r.skipped ? `（${r.skipped} 件進行中保留）` : '');
+  $('feed').dataset.agent = '';
+  feed();
+}
+
+// 收掉目前這塊板（改名封存，不是刪除——那是一次協作的完整紀錄）
+async function clearBoard() {
+  if (!confirm('收掉目前這塊板？\n（會改名封存在工作區，不會真的刪掉）')) return;
+  const r = await (await fetch('/office/board', { method: 'DELETE' })).json();
+  $('hint').textContent = r.ok ? `已封存為 ${r.archived}` : `收不掉：${r.error}`;
+  board(selected);
+}
+
 // 每組標題的計數：幾件、有沒有出事——收起來時也要看得出那天發生過什麼
 function dayCounts(feed) {
   for (const box of feed.querySelectorAll(':scope > .daybox')) {
@@ -1330,7 +1407,10 @@ async function feed() {
       f.dataset.agent = '';
       return;
     }
-    $('head').innerHTML = `<div class="who">${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span></div>
+    // 🗑 清全部：反覆測試後一天一天刪太瑣碎。放在標題列而不是每張卡上——這是「整理」
+    // 不是「操作某張卡」，混進卡片動線只會讓人誤按。
+    $('head').innerHTML = `<div class="who">${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
+        <span class="wipe" title="清掉這位的全部工作紀錄" onclick="clearAll()">🗑</span></div>
       <div class="task">最新任務 · ${r.at}　${esc(r.task)}</div>`;
     const initial = f.dataset.agent !== selected;   // 換人＝整串重建，歷史一次補齊
     if (initial) {
