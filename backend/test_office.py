@@ -357,6 +357,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    stop_clears_approval()
     dup_msg()
     sub_by_name()
     kanban()
@@ -583,6 +584,33 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def stop_clears_approval() -> None:
+    """按中止時若正卡在審批：審批卡要當場收掉，而且要先送駁回。
+    agent 這時阻塞在等審批，中止它讀不到——不先解開就會停在「按了中止卻還要你選」。"""
+    sent = []
+
+    class _Rec(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}).get("text"))
+            return _FakeResp()
+
+    main.COGITO_HTTP = "http://fake"
+    old = main.httpx.AsyncClient
+    main.httpx.AsyncClient = lambda **kw: _Rec()
+    try:
+        with TestClient(main.app) as c:
+            main.pending_approval["p07"] = "⚠️ 高危操作審批請求：rm -rf"
+            main.busy.add("p07")
+            r = c.post("/office/dispatch", json={"agent": "p07", "text": "/stop"}).json()
+            assert r["ok"], r
+            assert sent == ["reject", "/stop"], f"要先駁回再中止，實際送出：{sent}"
+            assert "p07" not in main.pending_approval, "審批卡沒收掉，畫面會一直卡在選擇上"
+    finally:
+        main.httpx.AsyncClient = old
+        main.COGITO_HTTP = ""
+        main.busy.discard("p07")
 
 
 def dup_msg() -> None:

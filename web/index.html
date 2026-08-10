@@ -1031,8 +1031,11 @@ async function renderBody(box, text, animate, foldCode = false) {
     }
     const span = el('span');
     box.appendChild(span);
-    if (animate) await typewrite(span, plainOf(seg.v));   // 打字階段就不帶語法符號
-    markdown(span, seg.v);                                // 打完只是換上樣式，字不會跳
+    if (animate) {
+      await typewrite(span, plainOf(seg.v));   // 打字階段就不帶語法符號
+      span.textContent = '';                   // ⚠ markdown() 是【附加】不是覆蓋——不先清空，
+    }                                          //   打好的純文字會留著，整段字就出現兩次
+    markdown(span, seg.v);                     // 打完換上樣式；plainOf 保證字數一致，畫面不會跳
   }
 }
 

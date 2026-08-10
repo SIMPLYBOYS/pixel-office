@@ -1375,6 +1375,15 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
+            # 中止時若正卡在審批：【先送駁回再送中止】。agent 這時阻塞在等審批，中止指令它根本
+            # 讀不到，要等五分鐘逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
+            # 語意上也對：要停掉整件事，那個高危操作當然不該放行。
+            if verb == "/stop" and aid in pending_approval:
+                await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+                pending_approval.pop(aid, None)
+                approval_src.pop(aid, None)
+                log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
             r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": text},
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
     except httpx.HTTPError as e:
