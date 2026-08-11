@@ -206,11 +206,14 @@ def main():
         跟辦公區的名字會【整批對撞】，sprite 字典與場景物件都會互相蓋掉。"""
         place("d1_" + obj, read_png(f"{D1}/{obj}.png"), cx, cy)
 
-    # 會議室（門【內】）：長桌 x5-6 佔第 2~4 列，兩側各三張椅子朝內
-    place("w_table", table, 5, 4)
+    # 櫃檯（門內左側）：借 Design_1 的辦公桌組，訪客站 x5 那一欄
+    d1("obj_08", 1, 4)
+
+    # 會議室（門內右側，獨立一間）：長桌 x8-9 佔第 2~4 列，兩側各三張椅子朝內
+    place("w_table", table, 8, 4)
     for i, cy in enumerate((2, 3, 4)):
-        place(f"w_chair_a{i+1}", chair_r, 4, cy)
-        place(f"w_chair_b{i+1}", chair_l, 7, cy)
+        place(f"w_chair_a{i+1}", chair_r, 7, cy)
+        place(f"w_chair_b{i+1}", chair_l, 10, cy)
 
     # 門【外】的公共區：靠牆的陳設 + 自助區 + 訪客等候
     d1("obj_09", 2, 8)    # 彩色掛畫
