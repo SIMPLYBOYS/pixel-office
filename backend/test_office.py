@@ -131,9 +131,12 @@ def run() -> None:
             # 委派收工：回報泡 + 釋放
             post(c, agent="p17", kind="result", label="spawn_subagent:code-reviewer",
                  detail="LGTM，無阻塞問題")
-            assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}  # 交接完回位
-            m = recv(ws)
-            assert (m["agent_id"], m["text"]) == ("p01", "✓ 回報完成")
+            # 交接完【兩個人都】回位子。先前只送主 agent 回去，支援者留在被派去的那個點——
+            # 規劃類的人被派到白板前（走道上），就會一直杵在那裡（實際回報：小美常卡在走道）。
+            assert recv(ws, "p17") == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}
+            assert recv(ws, "p01") == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
+            m = recv(ws, "p01")
+            assert m["text"] == "✓ 回報完成", m
             assert "p01" not in main.busy
             assert any("委派" in x for x in main.agents["p01"].memory)
             r = c.get("/office/report/p01").json()  # 委派也有報告卡

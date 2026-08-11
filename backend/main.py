@@ -655,6 +655,12 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False
             if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
                 await goto(parent, desk)
+            # 支援者也要回位子。先前只送主 agent 回去，支援者就留在被派去的那個點——
+            # 規劃類的人被派到白板前（board_1），那本來就是走道上的一個位置，於是他會一直
+            # 杵在走道上（實際回報：小美常卡在走道不動）。生活迴圈雖然之後會把他帶走，
+            # 但那要等下一輪決策，中間這段畫面是錯的：他已經交完件了，看起來卻還在忙。
+            if npc_desk := WORK_DESK.get(npc):
+                await goto(npc, npc_desk)
             busy.discard(npc)
             sub_since.pop(npc, None)
             notify("roster")
