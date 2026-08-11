@@ -212,20 +212,38 @@ def main():
         牆的剖面是 6px 頂面 + 26px 牆面（共 2 格），所以畫要貼在牆的下緣往上一點——
         底邊離牆腳 4px。牆若只有一格（16px），畫（20px）比牆還高，怎麼擺都會浮出去；
         那是【地圖】要改成兩列，不是這裡調偏移量能救的。"""
-        img, _, _ = crop_opaque(read_png(f"{D1}/{obj}.png"))
+        img, _, _ = crop_opaque(d1_sprite(obj))
         name = "d1_" + obj
         WALL_MOUNTED.add(name)
         imgs[name] = img
         items.append({"name": name, "x": cx * CELL, "y": (cy + 1) * CELL - 4 - len(img),
                       "w": len(img[0]), "h": len(img)})
 
+    # 烙在設計圖裡的原畫人物要清掉——畫死的人不會動，跟「每個動作都對應真實狀態」牴觸。
+    # extract_design.py 對 Office_Design_2 做過同一件事（它的 PATCHES），這裡是 Design_1 的版本。
+    # (dest 矩形, 來源往上位移)：拿正上方的等位像素蓋掉，書架本身是縱向重複的圖樣，接得上。
+    D1_PATCHES = {"obj_03": (32, 16, 57, 41, 16)}   # 櫃檯後面那位西裝男
+
+    def d1_sprite(obj):
+        im = read_png(f"{D1}/{obj}.png")
+        if obj in D1_PATCHES:
+            x0, y0, x1, y1, dy = D1_PATCHES[obj]
+            im = [r[:] for r in im]
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    im[y][x] = im[y - dy][x] if 0 <= y - dy < len(im) else (0, 0, 0, 0)
+        return im
+
     def d1(obj, cx, cy):
         """借 Office_Design_1 的元件。改前綴 d1_ 是必要的——那張圖的元件也叫 obj_01..，
         跟辦公區的名字會【整批對撞】，sprite 字典與場景物件都會互相蓋掉。"""
-        place("d1_" + obj, read_png(f"{D1}/{obj}.png"), cx, cy)
+        place("d1_" + obj, d1_sprite(obj), cx, cy)
 
-    # 櫃檯（門內左側）：借 Design_1 的辦公桌組，訪客站 x5 那一欄
-    d1("obj_08", 1, 4)
+    # 櫃檯（門內左側）：借 Design_1 的【櫃檯叢集】obj_03——檯面、背後書架、桌上的紙、
+    # 印表機、椅子全在同一件裡。官方那種「豐富」就是這麼來的：美術師把東西畫在一起，
+    # 連通元件掃描把整叢當一件抽出來，天生就有層次與交疊。
+    # 它 4.5 格高，上緣會壓在北牆上——那是對的，書架本來就靠牆。碰撞只看底邊那一列。
+    d1("obj_03", 1, 4)
 
     # 會議室（門內右側，獨立一間）：長桌 x8-9 佔第 2~4 列，兩側各三張椅子朝內
     place("w_table", table, 8, 4)
