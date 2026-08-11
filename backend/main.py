@@ -351,10 +351,12 @@ WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的
              "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
 BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡（面向老闆桌）
 BOARD = "board_1"     # 白板前：規劃類子 agent 站這裡，不佔工位
-# 站立式會議的站位（白板周圍）。刻意不做長桌會議室——碰撞圖量過，16×17 已經飽和，
-# 沒有空地放得下長桌；硬塞要重排家具＋改碰撞圖，而每次改碰撞圖就可能再犯一次
-# 「出生點落在牆裡」。這個規模的團隊本來就是站在白板前開短會。
-MEET_SPOTS = ["meet_1", "meet_2", "meet_3", "meet_4"]
+# 會議室的六個座位。先前是白板前的四個站位——那時的理由是「16×17 已經飽和，沒有空地
+# 放得下長桌」，而地圖往西擴之後那個前提不成立了，所以改成真的進會議室坐下。
+#
+# 【交錯排】a1,b1,a2,b2,a3,b3：兩人開會時一邊一個、面對面，才像在談事情。
+# 照 a1,a2,a3 順序填的話會變成三個人擠在同一側、對面空著，看起來像在罰站。
+MEET_SPOTS = ["meet_a1", "meet_b1", "meet_a2", "meet_b2", "meet_a3", "meet_b3"]
 COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空轉的投影）
 # 各工位【旁邊】的站位：委派時主 agent 走過去，面向坐著的同事——
 # 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
@@ -655,7 +657,10 @@ async def adjourn(parent: str) -> None:
 
 
 def meet_spot() -> str:
-    """挑一個沒人佔的會議站位；都滿了就退回白板前（擠一點也比不去好）。"""
+    """挑一個沒人佔的會議室座位；都滿了就退回白板前（擠一點也比不去好）。
+
+    六個座位對上六個人設，正常不會滿。退路留著是因為「沒位子就不去開會」在畫面上
+    看不出來——那個人會留在工位打字，跟沒被派到一模一樣。"""
     taken = set(occupied.values())
     return next((s for s in MEET_SPOTS if s not in taken), BOARD)
 
@@ -697,9 +702,9 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             sub_since[npc] = time.monotonic()
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
-            # 開會中就聚到白板前，否則各自回工位。
+            # 開會中就進會議室入座，否則各自回工位。
             # 這一行是「會議室」的全部——投影的差異只有【去哪裡】，因為真實世界的差異也只有這個：
-            # 會議階段大家圍著白板講話，上板之後各自回位子做事。
+            # 會議階段大家在會議室談，上板之後各自回位子做事。
             # 規劃類的活也在白板前做（不佔工位，讓「這是在想、不是在寫」看得出來）。
             spot = (meet_spot() if in_meeting(parent)
                     else BOARD if name in ("planner", "correctness")

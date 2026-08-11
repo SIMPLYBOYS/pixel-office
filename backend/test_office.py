@@ -852,7 +852,7 @@ def board() -> None:
 
 
 def standup_meeting() -> None:
-    """協作模式的【會議階段】把人叫到白板前，上板之後才各自回工位。
+    """協作模式的【會議階段】把人叫進會議室入座，上板之後才各自回工位。
 
     投影的差異只有「去哪裡」，因為真實世界的差異也只有這個。判準必須跟任務板面板一致
     （沒有 board.json＝還在開會）——畫面寫著「會議進行中」、人卻坐回工位，那是兩個投影
@@ -868,17 +868,22 @@ def standup_meeting() -> None:
             main.busy.clear(); main.sub_active.clear(); main.occupied.clear()
             main.history.clear(); main.last_report.clear()
 
-            # 還沒上板＝會議階段：被派的人聚到白板前
+            # 還沒上板＝會議階段：被派的人進會議室入座
             post(c, agent=main.KANBAN, kind="start", label="開會")
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             who = [n for lst in main.sub_active.values() for n in lst][0]
             assert main.occupied[who] in main.MEET_SPOTS, \
-                f"會議階段該去白板前，實際去了 {main.occupied[who]}"
+                f"會議階段該進會議室，實際去了 {main.occupied[who]}"
 
-            # 第二個人要站【不同】的位置，不能疊在一起
+            # 第二個人要坐【不同】的位置，不能疊在一起
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             spots = [main.occupied[n] for lst in main.sub_active.values() for n in lst]
-            assert len(set(spots)) == len(spots), f"兩個人站同一格：{spots}"
+            assert len(set(spots)) == len(spots), f"兩個人坐同一格：{spots}"
+
+            # 而且要【一邊一個】：長桌兩側各三個位子，照 a1,a2,a3 順序填的話兩個人會擠在
+            # 同一側、對面空著，看起來像在罰站而不是在談事情。
+            sides = {s[len("meet_"):][0] for s in spots}
+            assert sides == {"a", "b"}, f"兩個人坐在同一側：{spots}"
 
             # 會議中【交件了也不散會】：一個人講完話不代表會議結束。三個人交件時間本來就
             # 錯開，一交件就各自回位的話，白板前永遠只有一兩個人——看起來不像在開會。
