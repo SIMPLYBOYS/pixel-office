@@ -868,8 +868,18 @@ def standup_meeting() -> None:
             main.busy.clear(); main.sub_active.clear(); main.occupied.clear()
             main.history.clear(); main.last_report.clear()
 
+            # 工作區裡躺著【上一輪】的板子時，這一輪照樣要開會。
+            # 主持人照主題取名（board-<主題>.json），舊板子會一直留在工作區——只看
+            # 「有沒有板子」的話，第二輪起從第一秒就被判成「會議已結束」，沒有人會進會議室。
+            # 實測踩過：board-visitor.json 與 board-westwing-spaces.json 躺在那裡，
+            # 整輪都沒開成會，六個人直接各自做事。所以比的是【時間】不是【有無】。
+            old = wd / "board-上一輪.json"
+            old.write_text('{"task":"舊的","tasks":[]}', encoding="utf-8")
+            os.utime(old, (time.time() - 3600, time.time() - 3600))
+
             # 還沒上板＝會議階段：被派的人進會議室入座
             post(c, agent=main.KANBAN, kind="start", label="開會")
+            assert main.in_meeting(main.KANBAN), "上一輪的舊板子讓這一輪直接跳過會議"
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             who = [n for lst in main.sub_active.values() for n in lst][0]
             assert main.occupied[who] in main.MEET_SPOTS, \

@@ -455,6 +455,9 @@ async def drain_bubbles(aid: str) -> None:
 # ── 失聯保險：done 是 fire-and-forget，claw-cli 被砍/崩潰時不會送達，
 # busy 就永遠不釋放。橋端記最後事件時刻，逾時自動釋放（含名下委派卡）。
 work_last: dict[str, float] = {}  # 上工中的 agent -> 最後事件時刻
+# 上工中的 agent -> 這一輪【開工】的牆鐘時刻。跟 work_last（心跳）不同：那個一直被刷新，
+# 這個從頭到尾不動。in_meeting 要拿它跟板子的 mtime 比，所以必須是牆鐘而非 monotonic。
+task_start: dict[str, float] = {}
 last_work: dict[str, float] = {}  # agent -> 最後一次有任務事件的時刻（久了就趴著睡）
 last_tool: dict[str, float] = {}  # agent -> 最後一次【工具】事件的時刻（只有 think 在跑＝卡住）
 watering: set[str] = set()        # 卡住而去飲水機的人（工具事件一回來就叫他回位）
@@ -464,6 +467,7 @@ sleeping: set[str] = set()        # 已經趴下的人：別每輪重送 move_to
 def release_work(aid: str) -> None:
     """收工/失聯：釋放主 agent 與其名下所有委派卡（沒回報的委派標 lost，不留永久 working）。"""
     work_last.pop(aid, None)
+    task_start.pop(aid, None)
     last_tool.pop(aid, None)
     watering.discard(aid)
     busy.discard(aid)
@@ -630,12 +634,26 @@ def board_file() -> Path | None:
 
 
 def in_meeting(parent: str) -> bool:
-    """這是【協作模式的會議階段】嗎——看板在跑、而且還沒上板。
+    """這是【協作模式的會議階段】嗎——看板在跑、而且【這一輪】還沒上板。
 
-    判準跟任務板面板同一個（沒有 board.json＝還在開會），兩邊必須一致：畫面上寫著
+    判準跟任務板面板同一個（沒有板子＝還在開會），兩邊必須一致：畫面上寫著
     「會議進行中」、人卻各自坐回工位，那是兩個投影說了不同的話。
-    """
-    return parent == KANBAN and board_file() is None
+
+    ⚠「還沒上板」指的是【這一輪】，不是「工作區從來沒有過板子」。主持人照主題取名
+    （board-<主題>.json），所以舊板子會一直留在工作區——只看「有沒有板子」的話，
+    第二輪起從第一秒就被判成「會議已結束」，沒有人會進會議室。
+    實測踩過：工作區裡躺著 board-visitor.json 與 board-westwing-spaces.json，
+    整輪都沒開成會，六個人直接各自做事（回報：「幾乎沒有進到會議室開會就自行做任務」）。
+
+    所以比的是【時間】：板子要比這一輪開工還新才算數。work_last 是上工中 agent 的
+    心跳，它存在就代表這一輪還在跑。"""
+    if parent != KANBAN or KANBAN not in busy:
+        return False
+    f = board_file()
+    if f is None:
+        return True                      # 一塊板子都沒有：確實還在開會
+    started = task_start.get(KANBAN)
+    return started is not None and f.stat().st_mtime < started
 
 
 async def adjourn(parent: str) -> None:
@@ -1005,6 +1023,8 @@ async def office_event(ev: dict):
 
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
         work_last[aid] = time.monotonic()
+    if kind == "start":
+        task_start[aid] = time.time()       # 牆鐘：要跟檔案 mtime 比
     last_work[aid] = time.monotonic()  # 有事件＝這位還在做事，重新計算「閒多久」
     sleeping.discard(aid)              # 睡著的被叫醒（下一輪就恢復正常走動）
     if kind in ("start", "tool", "result", "error"):   # 有實質進展（think/turn 不算）
