@@ -201,6 +201,19 @@ def main():
         imgs[name] = img
         items.append({"name": name, "x": x, "y": y, "w": w, "h": h})
 
+    # 掛牆的陳設（畫、螢幕）：貼在【牆面】上，不是站在地板上。
+    # 先前跟其他家具一樣底邊對齊地板格，畫就變成立在地上——牆是 1 格高，畫要往上推
+    # 大半格才會落在牆面。它們也不佔地板：牆上的畫本來就擋不住人。
+    WALL_MOUNTED = set()
+
+    def wall_art(obj, cx, cy):
+        img, _, _ = crop_opaque(read_png(f"{D1}/{obj}.png"))
+        name = "d1_" + obj
+        WALL_MOUNTED.add(name)
+        imgs[name] = img
+        items.append({"name": name, "x": cx * CELL, "y": cy * CELL - len(img) + 2,
+                      "w": len(img[0]), "h": len(img)})
+
     def d1(obj, cx, cy):
         """借 Office_Design_1 的元件。改前綴 d1_ 是必要的——那張圖的元件也叫 obj_01..，
         跟辦公區的名字會【整批對撞】，sprite 字典與場景物件都會互相蓋掉。"""
@@ -215,19 +228,18 @@ def main():
         place(f"w_chair_a{i+1}", chair_r, 7, cy)
         place(f"w_chair_b{i+1}", chair_l, 10, cy)
 
-    # 門【外】的公共區：靠牆的陳設 + 自助區 + 訪客等候
-    d1("obj_09", 2, 8)    # 彩色掛畫
-    d1("obj_05", 10, 8)   # 書架
-    d1("obj_13", 1, 10)   # 販賣機
-    d1("obj_14", 4, 10)   # 飲水機
-    d1("obj_15", 7, 10)   # 咖啡吧台
-    d1("obj_16", 10, 10)  # 影印機
-    d1("obj_18", 11, 11)  # 盆栽
-    d1("obj_12", 2, 12)   # 兩張圓椅
-    d1("obj_19", 5, 12)   # 藍色候客椅
-    d1("obj_20", 6, 12)   # 藍色候客椅
-    d1("obj_17", 8, 12)   # 盆栽＋藍椅
+    # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
+    wall_art("obj_09", 2, 8)   # 彩色掛畫（掛在公司大門那道牆上）
+    d1("obj_12", 2, 9)    # 兩張圓椅（畫下面）
+    d1("obj_05", 5, 9)    # 書架
+    d1("obj_13", 8, 11)   # 販賣機（自助角只排一排——機器都 2 格高，兩排會疊在一起）
+    d1("obj_14", 10, 11)  # 飲水機
+    d1("obj_16", 11, 11)  # 影印機
+    d1("obj_17", 2, 11)   # 盆栽＋藍椅
+    d1("obj_19", 5, 11)   # 藍色候客椅
+    d1("obj_20", 6, 11)   # 藍色候客椅
     d1("obj_06", 1, 14)   # 盆栽
+    d1("obj_18", 4, 14)   # 盆栽
     d1("obj_11", 11, 14)  # 盆栽
 
     # 家具與碰撞圖是分開維護的，對不上就會出現「畫面上有張桌子、NPC 卻走得過去」——
@@ -238,8 +250,10 @@ def main():
     #   椅子【反過來】驗：人要坐上去，所以它的格子必須【可走】。標成擋路的話 NPC 走不進
     #   座位，會停在門口等到逾時——而畫面上看起來只是「他沒去開會」。
     seats = {n for n in imgs if "chair" in n}
+    # 掛牆的不驗：它掛在牆面上，本來就不該佔地板格
+    items_to_check = [it for it in items if it["name"] not in WALL_MOUNTED]
     bad = []
-    for it in items:
+    for it in items_to_check:
         cy = (it["y"] + it["h"] - 1) // CELL
         for cx in range(it["x"] // CELL, (it["x"] + it["w"] - 1) // CELL + 1):
             ov = min(it["x"] + it["w"], (cx + 1) * CELL) - max(it["x"], cx * CELL)
