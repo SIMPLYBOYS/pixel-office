@@ -600,6 +600,14 @@ def office_bubble(kind: str, label: str) -> str | None:
 SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07",
            "implementer": "p12", "performance": "p05", "correctness": "p17"}
 SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
+# background=true 的 spawn 會【立刻】回一句回執，那不是成果：
+#   「🌀 已在背景啟動子 agent [老徐]（ID: bg-1）。要等它交件就用 subagent_await…」
+# 照收的話卡片當場變「已完成」、報告寫著啟動訊息、人也被放出去自由走動。
+# 實測回報：三張卡在同一秒全變已完成，內容都是那句回執。
+BG_ACK_RE = re.compile(r"^\s*🌀?\s*已在背景啟動子 agent")
+# 真正的收件在 subagent_await 的結果裡，每個子 agent 一行：
+#   「背景子 agent bg-1 [老徐]：✅ 已完成」 / 「⚪ 已結束（失敗：…）」 / 「🟢 執行中，尚無結果。」
+BG_DONE_RE = re.compile(r"^背景子 agent \S+ \[([^\]]*)\]：([✅⚪🟢])", re.M)
 # (主 agent, 子 agent 名) -> 演出的 NPC【清單】。
 # 為什麼是清單而不是單一值：一次會議會並行派六個子 agent，未具名的 name 全部正規化成 ""，
 # 具名的也可能同名並行——鍵一模一樣。原本存單一值，後派的就把先派的覆蓋掉，於是那些 NPC
@@ -710,6 +718,49 @@ def pick_sub_npc(parent: str, name: str) -> str | None:
     return free[0] if free else None
 
 
+async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
+    """收掉一張委派卡：主 agent 回位、支援者解除忙碌、關卡、冒泡、記錄。
+    找不到對應的人就回 False（沒開成卡，交給呼叫端退回主 agent 冒泡）。
+
+    兩條路徑共用：同步 spawn 的 result，以及 background spawn 之後 subagent_await 的收件。
+    先前只有前者，於是背景派工的卡片是靠【啟動回執】關掉的——關錯了時機。
+    """
+    queue = sub_active.get((parent, name)) or []
+    npc = queue.pop(0) if queue else None
+    if not queue:
+        sub_active.pop((parent, name), None)
+    if npc is None:
+        return False
+    if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
+        await goto(parent, desk)
+    # 支援者也要回位子——但【開會中不散會】。
+    #
+    # 前半是為了「別卡在走道」加的（規劃類被派到白板前，交完件沒人叫他走）。
+    # 後半是實測補的：會議中三個人交件時間錯開，一交件就各自回位，白板前永遠只有
+    # 一兩個人，看起來完全不像在開會（回報：「沒有明顯站立開會的感覺」）。
+    # 一個人講完話不代表會議結束了——散會是整場的事，收在 kanban 收工那裡做。
+    #
+    # ⚠ busy 也要一起判斷，不能只判斷「送不送回工位」。生活迴圈是
+    # `while a.id in busy: sleep()`——一被釋放它就接管，在 idle 間隔內隨機發一個
+    # move_to，人就自己從會議室走掉了。實測回報：「有的 agent 會提前自行離開」。
+    # 先前只擋了「回工位」那半，等於留在座位上但沒人管，下一個 tick 照樣被帶走。
+    if not in_meeting(parent):
+        if npc_desk := WORK_DESK.get(npc):
+            await goto(npc, npc_desk)
+        busy.discard(npc)
+        sub_since.pop(npc, None)   # 留著＝watchdog 仍在計時，會議卡死也有兜底
+    notify("roster")
+    close_card(npc, "ok" if ok else "error")
+    card = last_report.get(npc)
+    if card:
+        card["report"] = detail
+    mark = "✔ 回報：" if ok else "✗ 失敗："
+    await bubble(npc, "✓ 回報完成" if ok else "⚠ 回報出錯了")
+    log_ev(npc, f"{mark}{detail[:200]}")
+    agents[npc].remember("完成了委派工作" if ok else "委派的工作失敗了")
+    return True
+
+
 async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
     """子 agent 事件分流；回傳 True＝已投影完畢（主流程不再處理）。"""
     spawn = SPAWN_RE.match(label)
@@ -745,41 +796,23 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
             return True
         if kind in ("result", "error"):  # 委派收工
-            queue = sub_active.get((parent, name)) or []
-            npc = queue.pop(0) if queue else None
-            if not queue:
-                sub_active.pop((parent, name), None)
-            if npc is None:
-                return False
-            if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
-                await goto(parent, desk)
-            # 支援者也要回位子——但【開會中不散會】。
-            #
-            # 前半是為了「別卡在走道」加的（規劃類被派到白板前，交完件沒人叫他走）。
-            # 後半是實測補的：會議中三個人交件時間錯開，一交件就各自回位，白板前永遠只有
-            # 一兩個人，看起來完全不像在開會（回報：「沒有明顯站立開會的感覺」）。
-            # 一個人講完話不代表會議結束了——散會是整場的事，收在 kanban 收工那裡做。
-            #
-            # ⚠ busy 也要一起判斷，不能只判斷「送不送回工位」。生活迴圈是
-            # `while a.id in busy: sleep()`——一被釋放它就接管，在 idle 間隔內隨機發一個
-            # move_to，人就自己從會議室走掉了。實測回報：「有的 agent 會提前自行離開」。
-            # 先前只擋了「回工位」那半，等於留在座位上但沒人管，下一個 tick 照樣被帶走。
-            if not in_meeting(parent):
-                if npc_desk := WORK_DESK.get(npc):
-                    await goto(npc, npc_desk)
-                busy.discard(npc)
-                sub_since.pop(npc, None)   # 留著＝watchdog 仍在計時，會議卡死也有兜底
-            notify("roster")
-            close_card(npc, "ok" if kind == "result" else "error")
-            card = last_report.get(npc)
-            if card:
-                card["report"] = detail
-            mark = "✔ 回報：" if kind == "result" else "✗ 失敗："
-            await bubble(npc, "✓ 回報完成" if kind == "result" else "⚠ 回報出錯了")
-            log_ev(npc, f"{mark}{detail[:200]}")
-            agents[npc].remember("完成了委派工作" if kind == "result" else "委派的工作失敗了")
-            return True
+            # background=true 只是【啟動】成功，不是交件。卡片繼續開著、人繼續忙，
+            # 真正的收件在 subagent_await 的結果那裡（見下面 AWAIT 分支）。
+            if BG_ACK_RE.match(detail or ""):
+                return True
+            return await finish_sub(parent, name, kind == "result", detail)
         return True  # spawn 的其他事件不投影
+
+    # subagent_await 的結果＝背景子 agent 的【真正】交件。一次可能收好幾個人，
+    # 逐行對人設名收；還在跑的（🟢）不收——它只是這次沒等到，卡片要繼續開著。
+    if label.startswith("subagent_await") and kind == "result":
+        done = False
+        for who, mark in BG_DONE_RE.findall(detail or ""):
+            if mark == "🟢":
+                continue
+            if await finish_sub(parent, who, mark == "✅", detail):
+                done = True
+        return done
     sub = SUB_RE.match(label)
     if sub:
         queue = sub_active.get((parent, sub.group(1) or "")) or []

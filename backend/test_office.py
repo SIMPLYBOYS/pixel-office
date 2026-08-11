@@ -890,6 +890,22 @@ def standup_meeting() -> None:
             spots = [main.occupied[n] for lst in main.sub_active.values() for n in lst]
             assert len(set(spots)) == len(spots), f"兩個人坐同一格：{spots}"
 
+            # background=true 的 spawn 會【立刻】回一句啟動回執，那不是成果。
+            # 照收的話卡片當場變「已完成」、報告寫著啟動訊息、人也被放出去自由走動——
+            # 實測回報：三張卡在同一秒全變已完成，內容都是「已在背景啟動子 agent…」。
+            post(c, agent=main.KANBAN, kind="result", label="spawn_subagent",
+                 detail="🌀 已在背景啟動子 agent [老徐]（ID: bg-1）。要等它交件就用 subagent_await")
+            open_now = [n for lst in main.sub_active.values() for n in lst]
+            assert len(open_now) == 2, f"啟動回執把委派卡關掉了：剩 {open_now}"
+
+            # 真正的收件在 subagent_await 的結果裡，逐行對人設名收。
+            # 一個 ✅ 一個 🟢＝只該收掉一張：🟢 是「這次沒等到」，卡片要繼續開著。
+            post(c, agent=main.KANBAN, kind="result", label="subagent_await",
+                 detail="背景子 agent bg-1 []：✅ 已完成\n我的意見\n"
+                        "背景子 agent bg-2 []：🟢 執行中，尚無結果。")
+            left = [n for lst in main.sub_active.values() for n in lst]
+            assert len(left) == 1, f"await 該只收掉 ✅ 那一張，實際剩 {left}"
+
             # 而且要【一邊一個】：長桌兩側各三個位子，照 a1,a2,a3 順序填的話兩個人會擠在
             # 同一側、對面空著，看起來像在罰站而不是在談事情。
             sides = {s[len("meet_"):][0] for s in spots}
