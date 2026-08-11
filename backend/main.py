@@ -620,6 +620,20 @@ def in_meeting(parent: str) -> bool:
     return not (base and (base / "board.json").exists())
 
 
+async def adjourn(parent: str) -> None:
+    """散會：把還站在白板前的人請回自己位子。
+
+    會議中刻意【不】在每個人交件時就送他回位（那樣白板前永遠只有一兩個人，看起來不像
+    在開會）。代價是散場要有人喊——就是這裡。沒有它，開完會的人會一直杵在白板前，
+    直到生活迴圈下一輪才隨機把他帶走，中間那段畫面同樣是錯的。
+    """
+    if parent != KANBAN:
+        return
+    for aid, spot in list(occupied.items()):
+        if spot in MEET_SPOTS and (desk := WORK_DESK.get(aid)):
+            await goto(aid, desk)
+
+
 def meet_spot() -> str:
     """挑一個沒人佔的會議站位；都滿了就退回白板前（擠一點也比不去好）。"""
     taken = set(occupied.values())
@@ -691,12 +705,15 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                 return False
             if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
                 await goto(parent, desk)
-            # 支援者也要回位子。先前只送主 agent 回去，支援者就留在被派去的那個點——
-            # 規劃類的人被派到白板前（board_1），那本來就是走道上的一個位置，於是他會一直
-            # 杵在走道上（實際回報：小美常卡在走道不動）。生活迴圈雖然之後會把他帶走，
-            # 但那要等下一輪決策，中間這段畫面是錯的：他已經交完件了，看起來卻還在忙。
-            if npc_desk := WORK_DESK.get(npc):
-                await goto(npc, npc_desk)
+            # 支援者也要回位子——但【開會中不散會】。
+            #
+            # 前半是為了「別卡在走道」加的（規劃類被派到白板前，交完件沒人叫他走）。
+            # 後半是實測補的：會議中三個人交件時間錯開，一交件就各自回位，白板前永遠只有
+            # 一兩個人，看起來完全不像在開會（回報：「沒有明顯站立開會的感覺」）。
+            # 一個人講完話不代表會議結束了——散會是整場的事，收在 kanban 收工那裡做。
+            if not in_meeting(parent):
+                if npc_desk := WORK_DESK.get(npc):
+                    await goto(npc, npc_desk)
             busy.discard(npc)
             sub_since.pop(npc, None)
             notify("roster")
@@ -1020,6 +1037,7 @@ async def office_event(ev: dict):
                 card["report"] = card["report"] or ev["detail"]
         pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         approval_src.pop(aid, None)
+        await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         release_work(aid)
         if not chatting:
             notify("agent", aid, alert="done" if label == "ok" else "error")

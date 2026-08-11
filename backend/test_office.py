@@ -864,13 +864,26 @@ def standup_meeting() -> None:
             spots = [main.occupied[n] for lst in main.sub_active.values() for n in lst]
             assert len(set(spots)) == len(spots), f"兩個人站同一格：{spots}"
 
+            # 會議中【交件了也不散會】：一個人講完話不代表會議結束。三個人交件時間本來就
+            # 錯開，一交件就各自回位的話，白板前永遠只有一兩個人——看起來不像在開會。
+            post(c, agent=main.KANBAN, kind="result", label="spawn_subagent", detail="我的意見")
+            still = [n for n in main.occupied if main.occupied[n] in main.MEET_SPOTS]
+            assert len(still) >= 1, "交件後不該立刻散會"
+
             # 上板之後＝實作階段：改成各自回工位
             (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             third = [n for lst in main.sub_active.values() for n in lst][-1]
             assert main.occupied[third] == main.WORK_DESK[third], \
                 f"上板後該回工位，實際去了 {main.occupied[third]}"
-        post(c, agent=main.KANBAN, kind="done", label="ok")
+            # 散會要有人喊：收工時把還站在白板前的人請回位子，否則他們會一直杵在那裡
+            # 直到生活迴圈下一輪隨機把人帶走——那段畫面同樣是錯的。
+            (wd / "board.json").unlink()          # 回到會議狀態，讓還有人站在白板前
+            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
+            assert any(s in main.MEET_SPOTS for s in main.occupied.values())
+            post(c, agent=main.KANBAN, kind="done", label="ok")
+            left = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
+            assert not left, f"散會後還有人杵在白板前：{left}"
     main.CHANNELS_DIR = None
 
 
