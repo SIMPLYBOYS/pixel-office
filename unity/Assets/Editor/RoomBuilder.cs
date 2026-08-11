@@ -17,6 +17,10 @@ public static class RoomBuilder
     const string SpriteRoot = "Assets/Sprites";
     const string TileFolder = "Assets/Tiles";
     const string FurnitureJson = "Assets/Sprites/LimeZu/Design/furniture.json";
+
+    // 西側新區的美術（tools/compose_room.py 拼出來的，schema 跟 furniture.json 完全一樣，
+    // 所以下面載入與擺放的程式碼兩區共用一份）。缺檔不算錯——只是西區還沒拼，房間照建。
+    const string WestJson = "Assets/Sprites/LimeZu/Design/west.json";
     const float PPU = 16f;
 
     // 刻意不擺的家具：只有右下角那盆植物。
@@ -40,14 +44,18 @@ public static class RoomBuilder
     // 加一次，json 不動——重抽圖也不必重算。
     public const int OfficeX = 10;   // CharacterBuilder 的出生點也靠它位移
 
-    // 西側新區（10 寬）。'D'=自動門所在格，判定上與 '.' 相同（門不擋路，只是投影「有人進出」）。
+    // 西側新區（10 寬）。三種字元：
+    //   '.'  可走
+    //   'D'  自動門所在格——判定上同 '.'（門不擋路，只是投影「有人進出」）
+    //   'T'  家具擋路——判定上同 '#'，但【美術上是地板】。分開是因為 compose_room.py 照這張圖
+    //        畫底圖，把桌子畫成牆的話，桌子底下會出現一道有白色頂面和陰影的牆。
     //
     //     0123456789
     //  2  #....#...#    玄關 x1-4 ｜ 走道 x6-8
     //  5  #.........    ← 東西主走道，一路通到辦公區（(9,5) 與 OfficeX 的西牆同時開口）
     //  6  D....#...#    ← 自動門（西牆，2 格寬 × 3 格高、8 幀）
-    // 11  #.##.#...#    ← 會議室長桌 x2-3；座位在 x1 與 x4，各三個
-    // 12  #.##.....#    ← 會議室門
+    // 11  #.TT.#...#    ← 會議室長桌 x2-3；座位在 x1 與 x4，各三個
+    // 12  #.TT.....#    ← 會議室門
     static readonly string[] West =
     {
         "##########",
@@ -61,9 +69,9 @@ public static class RoomBuilder
         "######...#",   // 玄關南牆：玄關與會議室之間隔開，只能走走道
         "######...#",
         "#....#...#",
-        "#.##.#...#",   // 長桌北端
-        "#.##.....#",   // 會議室門(5,12)
-        "#.##.#...#",   // 長桌南端
+        "#.TT.#...#",   // 長桌北端
+        "#.TT.....#",   // 會議室門(5,12)
+        "#.TT.#...#",   // 長桌南端
         "#....#...#",
         "#....#...#",
         "##########",
@@ -97,7 +105,7 @@ public static class RoomBuilder
     // 實際使用的地圖＝西側新區 ⊕ 辦公區。'D' 在這裡就併成 '.'——尋路與驗證都只認 '#'/'.'，
     // 門的視覺與觸發是另一層的事，不該讓走位演算法認得第三種字元。
     static readonly string[] Collision =
-        West.Zip(OfficeRows, (w, o) => w.Replace('D', '.') + o).ToArray();
+        West.Zip(OfficeRows, (w, o) => w.Replace('D', '.').Replace('T', '#') + o).ToArray();
 
     // (名稱, cell x, cell y)，cell 以設計圖左上為 (0,0)
     // 「@動作」後綴：NPC 到點後執行（sit_up=背對鏡頭入座、sit_left/right=側面坐姿）
@@ -182,8 +190,18 @@ public static class RoomBuilder
         // 為什麼：下面第一件事是 DestroyImmediate 舊房間，而 ForceUpdate 的遞迴重匯入若還沒跑完
         // （剛加進 180 張新角色圖那次就是），FindAssets 會查無資產 → 房間被砍掉、新物件的 sprite
         // 全是 null ＝ 整間辦公室變透明。先驗後拆，最壞只是「這次沒建成」。
+        var westAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(WestJson);
+        var westData = westAsset == null ? null : JsonUtility.FromJson<FurnitureData>(westAsset.text);
+        if (westData == null)
+            Debug.LogWarning("RoomBuilder: 沒有 west.json——西側玄關/會議室不會有美術（跑 tools/compose_room.py 產）。走位與碰撞不受影響。");
+
         var need = new List<string> { "bg_base", "lz_wall" };
         need.AddRange(data.items.Where(it => !Hidden.Contains(it.name)).Select(it => it.name));
+        if (westData != null)
+        {
+            need.Add("west_bg");
+            need.AddRange(westData.items.Select(it => it.name));
+        }
         var sprites = new Dictionary<string, Sprite>();
         foreach (var n in need.Distinct())
         {
@@ -219,16 +237,34 @@ public static class RoomBuilder
         // 家具（每件獨立物件，位置直接來自 json）
         var props = new GameObject("Props");
         props.transform.SetParent(room.transform, false);
-        foreach (var it in data.items)
+
+        // 兩區的 json 是同一個 schema，差別只有「要不要位移」——所以擺放只寫一份。
+        void PlaceProps(Item[] list, float offsetX)
         {
-            if (Hidden.Contains(it.name)) continue;
-            var go = new GameObject(it.name);
-            go.transform.SetParent(props.transform, false);
-            go.transform.localPosition = new Vector3(OfficeX + it.x / PPU, -(it.y + it.h) / PPU, 0);
-            var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = sprites[it.name];
-            sr.sortingOrder = 0;
-            sr.spriteSortPoint = SpriteSortPoint.Pivot; // pivot=左下 → 以底邊 Y-sort
+            foreach (var it in list)
+            {
+                if (Hidden.Contains(it.name)) continue;
+                var go = new GameObject(it.name);
+                go.transform.SetParent(props.transform, false);
+                go.transform.localPosition = new Vector3(offsetX + it.x / PPU, -(it.y + it.h) / PPU, 0);
+                var sr = go.AddComponent<SpriteRenderer>();
+                sr.sprite = sprites[it.name];
+                sr.sortingOrder = 0;
+                sr.spriteSortPoint = SpriteSortPoint.Pivot; // pivot=左下 → 以底邊 Y-sort
+            }
+        }
+        PlaceProps(data.items, OfficeX);
+
+        if (westData != null)
+        {
+            // 西區底圖：貼在世界原點（它的座標系就是地圖座標系，不必位移）
+            var wbg = new GameObject("WestBackground");
+            wbg.transform.SetParent(room.transform, false);
+            wbg.transform.localPosition = new Vector3(0, -westData.artH / PPU, 0);
+            var wsr = wbg.AddComponent<SpriteRenderer>();
+            wsr.sprite = sprites["west_bg"];
+            wsr.sortingOrder = -20;
+            PlaceProps(westData.items, 0);
         }
 
         // 碰撞（無 renderer 的 tilemap）
