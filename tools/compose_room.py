@@ -187,9 +187,19 @@ def main():
 
     # 長桌：官方沒有直式會議桌，用桌面往下拉長再蓋桌腳。重複段要插在桌面【下緣線之前】，
     # 否則桌面自己的暗線會留在中間變成假接縫。
+    def widen(img, cells):
+        """把桌面橫向拉寬到 cells 格：左右兩端保留原本的邊，中間那一格重複填。
+        直接把整張圖並排會出現兩條桌腳／兩道邊，看起來像兩張桌子拼起來。"""
+        L, R = CELL // 2, len(img[0]) - CELL // 2
+        band = [row[L:L + 1] for row in img]
+        need = cells * CELL - len(img[0])
+        return [img[j][:L] + band[j] * need + img[j][L:] for j in range(len(img))]
+
     mid = [tabletop[10][:]] * CELL
-    table = [r[:] for r in tabletop[:12]] + mid + [r[:] for r in tabletop[12:]] \
-        + [r[:] for r in tablelegs]
+    top3, legs3 = widen(tabletop, 3), widen(tablelegs, 3)
+    mid3 = [top3[10][:]] * CELL
+    table = [r[:] for r in top3[:12]] + mid3 + [r[:] for r in top3[12:]] \
+        + [r[:] for r in legs3]
 
     items, imgs = [], {}
 
@@ -249,7 +259,7 @@ def main():
     place("w_table", table, 8, 4)
     for i, cy in enumerate((2, 3, 4)):
         place(f"w_chair_a{i+1}", chair_r, 7, cy)
-        place(f"w_chair_b{i+1}", chair_l, 10, cy)
+        place(f"w_chair_b{i+1}", chair_l, 11, cy)
 
     # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
     wall_art("obj_09", 2, 8)   # 彩色掛畫：掛在公司南牆（第 7-8 列）的牆面上
@@ -299,6 +309,20 @@ def main():
     # 直接裝進 Unity 的素材夾。extract_design 那支是「輸出到 _extracted，人再自己複製」，
     # 這支省掉那一步——手動複製漏一個檔的下場是 RoomBuilder 整批放棄建房（它先驗後拆），
     # 錯誤訊息會指向 sprite 名稱，但真正的原因是「你忘了複製」，很難連起來。
+    # 先清掉【上一輪產的、這輪不再需要】的檔案。只寫不刪的話，改過佈局之後素材夾裡會同時
+    # 存在新舊兩代 sprite，而 Unity 場景裡留著的舊物件看起來一樣正常——「我改了但畫面沒變」
+    # 的其中一種來源就是這個。踩過：場景裡還是 w_sofa/w_reception 那一代，而檔案都還在。
+    keep = {f"{it['name']}.png" for it in items} | {"west_bg.png", "west.json"}
+    for d in (OUT, INSTALL):
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            base = fn[:-5] if fn.endswith(".meta") else fn
+            if (base.startswith("w_") or base.startswith("d1_") or base.startswith("west")) \
+                    and base not in keep:
+                os.remove(f"{d}/{fn}")
+                print(f"  清掉舊產物 {d.split('/')[-1]}/{fn}")
+
     installed = 0
     for fn in os.listdir(OUT):
         if fn.endswith(".meta"):
