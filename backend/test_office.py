@@ -870,8 +870,14 @@ def standup_meeting() -> None:
             still = [n for n in main.occupied if main.occupied[n] in main.MEET_SPOTS]
             assert len(still) >= 1, "交件後不該立刻散會"
 
-            # 上板之後＝實作階段：改成各自回工位
+            # 【板子一寫好就散會】——會議結束的時刻是「結論定案」，不是整個任務做完。
+            # 先前綁在收工，畫面上會變成「板子都出來了、人還圍在白板前」，兩個投影各說各話。
             (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
+            post(c, agent=main.KANBAN, kind="think", label="")   # 隨便一則事件觸發檢查
+            still = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
+            assert not still, f"板子出來了還有人圍在白板前：{still}"
+
+            # 上板之後＝實作階段：新派的人改成各自回工位
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             third = [n for lst in main.sub_active.values() for n in lst][-1]
             assert main.occupied[third] == main.WORK_DESK[third], \

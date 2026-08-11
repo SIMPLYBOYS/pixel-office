@@ -624,8 +624,12 @@ async def adjourn(parent: str) -> None:
     """散會：把還站在白板前的人請回自己位子。
 
     會議中刻意【不】在每個人交件時就送他回位（那樣白板前永遠只有一兩個人，看起來不像
-    在開會）。代價是散場要有人喊——就是這裡。沒有它，開完會的人會一直杵在白板前，
-    直到生活迴圈下一輪才隨機把他帶走，中間那段畫面同樣是錯的。
+    在開會）。代價是散場要有人喊——就是這裡。
+
+    ⚠ 何時喊：【板子一寫好就散】，不是等整個任務做完。會議結束的時刻是「結論定案」，
+    定案之後大家就回位子開工——真實的節奏是這樣，而 in_meeting() 用的也是同一條判準
+    （有沒有 board.json）。先前綁在收工，等於畫面上「板子都出來了、人還圍在白板前」，
+    兩個投影各說各話。收工時再喊一次是兜底：有些任務只開會、不上板。
     """
     if parent != KANBAN:
         return
@@ -960,6 +964,13 @@ async def office_event(ev: dict):
     if aid is None:  # Unity 不在線也照收：時間軸/報告卡是資料面，投影指令會自動 no-op
         return {"ok": False, "error": "沒有可指派的 NPC"}
     a = agents[aid]
+
+    # 板子一寫好就散會——會議結束的時刻是「結論定案」，不是整個任務做完。
+    # 沒有「board.json 被建立」這種事件可以掛，所以每則看板事件順手檢查一次：
+    # 還有人站在白板前、但板子已經出來了＝該散了。判斷便宜（一次 exists），而且是自癒的
+    # ——漏掉一次，下一則事件會補上。
+    if aid == KANBAN and not in_meeting(KANBAN):
+        await adjourn(KANBAN)
 
     if aid in work_last or kind == "start":  # 上工中任何事件（含 think/turn）都算心跳
         work_last[aid] = time.monotonic()
