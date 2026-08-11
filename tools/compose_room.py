@@ -145,6 +145,12 @@ def main():
     #   y32-38 地板陰影 7px      ← 畫在牆【下面那格】的地板上
     # 先前把它當成單一 16×16 平色貼滿，看起來像色塊不像牆——這一段就是為了修那個。
     floor = sub(bg, 4 * CELL, 6 * CELL, CELL, CELL)
+    # 門外那半用【另一種地板】——它在公司外面（大樓公共區），跟室內同色的話「哪裡是門內、
+    # 哪裡是門外」就讀不出來，而那正是這個佈局要表達的事。取自 Office_Design_1 的入口廳。
+    # 用辦公區【左下房】那種較亮的地磚（平均 189 vs 主辦公區 178，格線也不同）——
+    # Design_1 大廳的地板量出來跟主辦公區同色，差別只在格線間距，換過去看不出門內門外。
+    outer = sub(bg, 8 * CELL, 14 * CELL, CELL, CELL)
+    DOOR_ROW = next(r for r, row in enumerate(west) if "D" in row)
     wall_cap = sub(bg, 4 * CELL, 0, CELL, 6)           # 外框 + 白頂 + 外框
     wall_body = sub(bg, 4 * CELL, 6, CELL, CELL)       # 牆身（可重複）
     wall_foot = sub(bg, 4 * CELL, 31, CELL, 1)         # 牆的下緣深藍線
@@ -153,7 +159,7 @@ def main():
     canvas = [[(0, 0, 0, 0)] * W for _ in range(H)]
     for r in range(CH):
         for c in range(CW + UNDERLAP):
-            blit(canvas, floor, c * CELL, r * CELL)
+            blit(canvas, outer if r > DOOR_ROW else floor, c * CELL, r * CELL)
 
     # 墊底欄沿用西區最東欄的牆況：那一欄是走道東牆，續一格才不會有半截牆浮在接縫上
     west = [row + row[-1] * UNDERLAP for row in west]
@@ -200,26 +206,26 @@ def main():
         跟辦公區的名字會【整批對撞】，sprite 字典與場景物件都會互相蓋掉。"""
         place("d1_" + obj, read_png(f"{D1}/{obj}.png"), cx, cy)
 
-    # 玄關（照 Office_Design_1 入口廳的動線：北牆一排陳設、中央等候、南側自助區）
-    d1("obj_01", 1, 2)    # 冷氣
-    d1("obj_09", 4, 2)    # 彩色掛畫
-    d1("obj_02", 8, 2)    # 圖表螢幕
-    d1("obj_05", 10, 2)   # 書架
-    d1("obj_12", 4, 3)    # 兩張圓椅（等候）
-    d1("obj_06", 1, 4)    # 盆栽
-    d1("obj_11", 11, 4)   # 盆栽
-    d1("obj_16", 1, 8)    # 影印機
-    d1("obj_19", 2, 8)    # 藍色候客椅（沿南牆排，擺在走道上會把後面那排格子關死）
-    d1("obj_20", 3, 8)    # 藍色候客椅
-    d1("obj_14", 5, 8)    # 飲水機
-    d1("obj_13", 7, 8)    # 販賣機
-    d1("obj_18", 11, 8)   # 盆栽
-
-    # 會議室：長桌 x5-6 佔第 11~13 列，兩側各三張椅子朝內
-    place("w_table", table, 5, 13)
-    for i, cy in enumerate((11, 12, 13)):
+    # 會議室（門【內】）：長桌 x5-6 佔第 2~4 列，兩側各三張椅子朝內
+    place("w_table", table, 5, 4)
+    for i, cy in enumerate((2, 3, 4)):
         place(f"w_chair_a{i+1}", chair_r, 4, cy)
         place(f"w_chair_b{i+1}", chair_l, 7, cy)
+
+    # 門【外】的公共區：靠牆的陳設 + 自助區 + 訪客等候
+    d1("obj_09", 2, 8)    # 彩色掛畫
+    d1("obj_05", 10, 8)   # 書架
+    d1("obj_13", 1, 10)   # 販賣機
+    d1("obj_14", 4, 10)   # 飲水機
+    d1("obj_15", 7, 10)   # 咖啡吧台
+    d1("obj_16", 10, 10)  # 影印機
+    d1("obj_18", 11, 11)  # 盆栽
+    d1("obj_12", 2, 12)   # 兩張圓椅
+    d1("obj_19", 5, 12)   # 藍色候客椅
+    d1("obj_20", 6, 12)   # 藍色候客椅
+    d1("obj_17", 8, 12)   # 盆栽＋藍椅
+    d1("obj_06", 1, 14)   # 盆栽
+    d1("obj_11", 11, 14)  # 盆栽
 
     # 家具與碰撞圖是分開維護的，對不上就會出現「畫面上有張桌子、NPC 卻走得過去」——
     # 那正是投影不誠實。所以這裡雙向檢查，兩個方向的錯都要吵：
