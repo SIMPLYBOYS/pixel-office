@@ -891,12 +891,24 @@ def standup_meeting() -> None:
             still = [n for n in main.occupied if main.occupied[n] in main.MEET_SPOTS]
             assert len(still) >= 1, "交件後不該立刻散會"
 
+            # 而且交過件的人要【維持 busy】。生活迴圈是 `while id in busy: sleep()`——
+            # 一被釋放它就接管，在 idle 間隔內隨機發一個 move_to，人就自己從會議室走掉。
+            # 實測回報過：「有的 agent 會提前自行離開」。只驗「還在座位上」抓不到這個，
+            # 因為釋放的當下他確實還在座位上，是【下一個 tick】才被帶走的。
+            done_yet = [n for n in still if n in main.busy]
+            assert len(done_yet) == len(still), \
+                f"會議中交過件的人被放出 busy，生活迴圈會把他帶走：{set(still) - main.busy}"
+
             # 【板子一寫好就散會】——會議結束的時刻是「結論定案」，不是整個任務做完。
             # 先前綁在收工，畫面上會變成「板子都出來了、人還圍在白板前」，兩個投影各說各話。
             (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
             post(c, agent=main.KANBAN, kind="think", label="")   # 隨便一則事件觸發檢查
             still = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
-            assert not still, f"板子出來了還有人圍在白板前：{still}"
+            assert not still, f"板子出來了還有人圍在會議室：{still}"
+
+            # 散會也要【解除 busy】。會議期間刻意把人留在 busy，解除的責任就落在散會這裡；
+            # 漏掉的話他回到工位後再也不會被生活迴圈碰到、也不會被挑去支援——變成一尊雕像。
+            assert not (main.busy - {main.KANBAN}), f"散會後還有人卡在 busy：{main.busy}"
 
             # 上板之後＝實作階段：新派的人改成各自回工位
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")

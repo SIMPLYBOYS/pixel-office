@@ -654,6 +654,11 @@ async def adjourn(parent: str) -> None:
     for aid, spot in list(occupied.items()):
         if spot in MEET_SPOTS and (desk := WORK_DESK.get(aid)):
             await goto(aid, desk)
+            # 散會＝解除忙碌。交過件的人在會議期間是刻意留在 busy 的（否則生活迴圈會
+            # 把他從座位上帶走），所以【解除的責任在這裡】——漏掉的話他回到工位後就
+            # 再也不會被生活迴圈碰到，也不會被挑去支援，等於變成一尊雕像。
+            busy.discard(aid)
+            sub_since.pop(aid, None)
 
 
 def meet_spot() -> str:
@@ -736,11 +741,16 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             # 後半是實測補的：會議中三個人交件時間錯開，一交件就各自回位，白板前永遠只有
             # 一兩個人，看起來完全不像在開會（回報：「沒有明顯站立開會的感覺」）。
             # 一個人講完話不代表會議結束了——散會是整場的事，收在 kanban 收工那裡做。
+            #
+            # ⚠ busy 也要一起判斷，不能只判斷「送不送回工位」。生活迴圈是
+            # `while a.id in busy: sleep()`——一被釋放它就接管，在 idle 間隔內隨機發一個
+            # move_to，人就自己從會議室走掉了。實測回報：「有的 agent 會提前自行離開」。
+            # 先前只擋了「回工位」那半，等於留在座位上但沒人管，下一個 tick 照樣被帶走。
             if not in_meeting(parent):
                 if npc_desk := WORK_DESK.get(npc):
                     await goto(npc, npc_desk)
-            busy.discard(npc)
-            sub_since.pop(npc, None)
+                busy.discard(npc)
+                sub_since.pop(npc, None)   # 留著＝watchdog 仍在計時，會議卡死也有兜底
             notify("roster")
             close_card(npc, "ok" if kind == "result" else "error")
             card = last_report.get(npc)
