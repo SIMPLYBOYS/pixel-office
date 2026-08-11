@@ -608,16 +608,32 @@ def npc_by_name(name: str) -> str | None:
     return next((aid for aid, a in npcs().items() if a.name == name), None)
 
 
+def board_file() -> Path | None:
+    """目前這塊板。找不到就是還沒上板。
+
+    接受兩種檔名：`board.json`（守則要求的）與 `board-<主題>.json`（主持人實際的習慣——
+    它照主題取名，跟 meeting-*.md / spec-*.md 同一套，而且一個主題一塊板其實更合理）。
+    跟模型爭檔名是打不贏的仗，而且爭贏了也沒比較好，所以這裡讓步：多的挑最新那個。
+
+    ⚠ 刻意【不】收 `board.<時間戳>.json`——那是「🗑 收掉」封存的舊板，用點號分隔正好區分。
+    收進來的話會變成「封存了還一直顯示」。
+    """
+    base = agent_dir(KANBAN)
+    if base is None:
+        return None
+    if (f := base / "board.json").exists():
+        return f
+    live = sorted(base.glob("board-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return live[0] if live else None
+
+
 def in_meeting(parent: str) -> bool:
     """這是【協作模式的會議階段】嗎——看板在跑、而且還沒上板。
 
     判準跟任務板面板同一個（沒有 board.json＝還在開會），兩邊必須一致：畫面上寫著
     「會議進行中」、人卻各自坐回工位，那是兩個投影說了不同的話。
     """
-    if parent != KANBAN:
-        return False
-    base = agent_dir(KANBAN)
-    return not (base and (base / "board.json").exists())
+    return parent == KANBAN and board_file() is None
 
 
 async def adjourn(parent: str) -> None:
@@ -1400,14 +1416,13 @@ def office_board():
     ⚠ 會議進度【不需要工作區】——它的資料全來自任務卡。先前這裡在 agent_dir 為 None 時
     就提早回傳，等於「還沒建過工作區就永遠看不到進度」，順序放錯了。
     """
-    base = agent_dir(KANBAN)
-    f = base / "board.json" if base else None
-    if not f or not f.exists():
+    f = board_file()
+    if f is None:
         return meeting_progress() or {"ok": False, "error": "還沒有進行中的協作任務"}
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        return {"ok": False, "error": f"board.json 讀不動：{type(e).__name__}"}
+        return {"ok": False, "error": f"{f.name} 讀不動：{type(e).__name__}"}
     tasks = data.get("tasks") or []
     done_ids = {t.get("id") for t in tasks if t.get("status") == "done"}
     cols = {k: [] for k, _ in BOARD_COLUMNS}
@@ -1436,10 +1451,11 @@ def office_board():
 def office_board_clear():
     """收掉目前這塊板。改名成 board.<時間>.json 而不是刪除——那是一次協作的完整紀錄，
     主持人也可能還想回頭看；真的不要了再自己去工作區刪。"""
-    base = agent_dir(KANBAN)
-    f = base / "board.json" if base else None
-    if not f or not f.exists():
+    f = board_file()
+    if f is None:
         return {"ok": False, "error": "目前沒有板子"}
+    # 封存名一律用點號分隔（board.<時間>.json）——board_file() 靠這個把封存檔排除在外，
+    # 不然收掉之後它又會被當成「目前這塊板」撿回來。
     dst = f.with_name(f"board.{time.strftime('%m%d-%H%M%S')}.json")
     f.rename(dst)
     notify("agent", KANBAN)

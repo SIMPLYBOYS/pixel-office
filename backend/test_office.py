@@ -803,6 +803,7 @@ def board() -> None:
             r = c.get("/office/board").json()
             assert r["ok"] and r["task"] == "蓋一間會議室"
             assert r.get("mode") != "meeting", "有板子時就該畫板子，不是會議進度"
+
             by = {col["key"]: col["cards"] for col in r["columns"]}
             assert [x["id"] for x in by["done"]] == ["api"]
             assert [x["id"] for x in by["doing"]] == ["ui"]
@@ -832,6 +833,21 @@ def board() -> None:
             main.busy.add(main.KANBAN)
             assert c.get("/office/board").json()["live"] is True
             main.busy.discard(main.KANBAN)
+
+            # 主持人實際上照【主題】取名（board-multitenant.json），不是守則寫的 board.json。
+            # 跟模型爭檔名是打不贏的仗，而且一個主題一塊板其實更合理——所以橋這邊讓步。
+            # 不吃這種命名的後果很嚴重：整輪都被當成「還在開會」，人永遠不散會、板子也不顯示。
+            (wd / "board.json").unlink()
+            (wd / "board-multitenant.json").write_text(json.dumps(
+                {"task": "多租戶", "tasks": [{"id": "iso", "title": "資料隔離", "deps": [],
+                                          "status": "doing", "owner": "阿哲"}]},
+                ensure_ascii=False), encoding="utf-8")
+            assert c.get("/office/board").json()["task"] == "多租戶", "主題命名的板子沒被認出來"
+            assert main.in_meeting(main.KANBAN) is False, "有板子就不該還算在開會"
+
+            # 封存檔（點號分隔）不該被撿回來當「目前這塊板」
+            (wd / "board-multitenant.json").rename(wd / "board.0811-130722.json")
+            assert main.board_file() is None, "封存的舊板被當成現行板了"
     main.CHANNELS_DIR = None
 
 
