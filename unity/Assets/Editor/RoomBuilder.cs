@@ -164,6 +164,10 @@ public static class RoomBuilder
     [MenuItem("Tools/Build Room")]
     public static void Build()
     {
+        // 先 Refresh 再 ImportAsset：兩者不一樣。ImportAsset 只重匯【資料庫已經知道】的資產，
+        // 而 tools/compose_room.py 是從 Unity 外面寫檔進來的——Unity 沒被聚焦時根本不知道那些
+        // 檔案存在，ImportAsset 掃不到，接著 FindSprite 查無、Build 整批放棄、畫面毫無變化。
+        AssetDatabase.Refresh();
         AssetDatabase.ImportAsset(SpriteRoot,
             ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
 

@@ -30,6 +30,8 @@ public static class CharacterBuilder
     [MenuItem("Tools/Build Characters")]
     public static void Build()
     {
+        // 同 RoomBuilder：Refresh 讓資料庫先看到 Unity 外面寫進來的新檔，ImportAsset 才掃得到。
+        AssetDatabase.Refresh();
         AssetDatabase.ImportAsset(CharRoot,
             ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
         // 先驗出生點再生人：生在牆裡的角色永遠走不到任何地方，而且畫面上看起來只是
