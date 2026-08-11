@@ -8,15 +8,23 @@ public static class CharacterBuilder
     const string CharRoot = "Assets/Sprites/LimeZu/Characters";
 
     // 與 backend/personas/*.yaml 一一對應（多一個 persona 就在這加一行再 Build Characters）。
-    // spawn 必須落在 RoomBuilder.Collision 的 '.' 格：第 5、6 兩列是中央走道，整排可走。
+    //
+    // 出生點 = 那個人【自己的工位】。這樣選有兩個好處：位置本來就被 ValidateWaypoints 驗過
+    // 可走，而且開場畫面是「大家在自己位子上」而不是散在走道中央。
+    //
+    // ⚠ 舊座標把三個人生在第 6 列（y=-6.5），註解還寫著「第 5、6 兩列是中央走道」——那句
+    // 後來就不成立了：碰撞圖校正時把上排隔間補封，第 6 列變成牆，出生點卻沒跟著校。
+    // 結果小美、老王、小葵【從第一秒就站在牆裡】，走位指令每次都逾時，一次都沒抵達過
+    // （實測 /agents 的 memory 全是「剛剛走去某處超時沒走到」）。
+    // 現在 Build 會驗證，落在牆裡直接報錯，不再靜默生出走不動的人。
     static readonly (string prefix, Vector3 spawn)[] Personas =
     {
-        ("p17", new Vector3(8.5f, -5.5f, 0)),
-        ("p01", new Vector3(4.5f, -6.5f, 0)),
-        ("p07", new Vector3(11.5f, -6.5f, 0)),
-        ("p05", new Vector3(2.5f, -5.5f, 0)),
-        ("p12", new Vector3(6.5f, -6.5f, 0)),
-        ("p19", new Vector3(13.5f, -5.5f, 0)),
+        ("p17", new Vector3(4.5f, -5.5f, 0)),    // chair_1
+        ("p01", new Vector3(7.5f, -5.5f, 0)),    // chair_2
+        ("p07", new Vector3(10.5f, -5.5f, 0)),   // chair_3
+        ("p05", new Vector3(3.5f, -9.5f, 0)),    // chair_4
+        ("p12", new Vector3(6.5f, -9.5f, 0)),    // chair_5
+        ("p19", new Vector3(13.5f, -14.5f, 0)),  // boss_seat
     };
 
     [MenuItem("Tools/Build Characters")]
@@ -24,6 +32,12 @@ public static class CharacterBuilder
     {
         AssetDatabase.ImportAsset(CharRoot,
             ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
+        // 先驗出生點再生人：生在牆裡的角色永遠走不到任何地方，而且畫面上看起來只是
+        // 「站著不動」——跟閒置一模一樣，所以沒有人會發現。寧可 Build 直接紅字停下來。
+        foreach (var (prefix, spawn) in Personas)
+            if (!RoomBuilder.Walkable(spawn))
+                Debug.LogError($"CharacterBuilder: {prefix} 的出生點 {spawn} 落在牆裡——" +
+                               "他會卡在原地、所有走位都逾時。請改到可走格（建議用他自己的工位）。");
         foreach (var (prefix, spawn) in Personas) BuildOne(prefix, spawn);
         if (GameObject.Find("BrainGateway") == null)
             new GameObject("BrainGateway").AddComponent<BrainGateway>();

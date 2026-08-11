@@ -218,6 +218,15 @@ public static class RoomBuilder
                 Debug.LogError($"RoomBuilder: waypoint {name} ({cx},{cy}) 不可達或在牆裡！");
     }
 
+    /// 世界座標落在可走格嗎。開放給 CharacterBuilder 驗出生點——碰撞圖校正過後，
+    /// 出生點沒有跟著校，三個人被生在牆裡卻沒有任何東西報錯（實測：他們的走位指令
+    /// 每一次都逾時，一次都沒抵達過）。驗 waypoint 卻不驗出生點，是這道防線的缺口。
+    public static bool Walkable(Vector3 world)
+    {
+        int cx = Mathf.FloorToInt(world.x), cy = Mathf.FloorToInt(-world.y);
+        return cy >= 0 && cy < Collision.Length && cx >= 0 && cx < 16 && Collision[cy][cx] == '.';
+    }
+
     // URP 2D 的 Y-sort 在 Renderer2DData 上
     static void SetYSort()
     {
