@@ -869,7 +869,11 @@ def kanban() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         main.CHANNELS_DIR = Path(tmp)
         assert main.sync_agents() >= 1
-        d = Path(tmp) / f"office_{main.KANBAN}" / ".claw" / "agents"
+        # 【共享根】的 .claw/agents/，不是頻道目錄——cogito 的 AgentLoader 用的是
+        # SkillsBaseDir=rootDir。寫錯地方的話檔案存在卻永遠載不到（實際踩到：主持人
+        # 明明被守則要求用人名，卻只能退回 implementer，因為人名檔它根本看不見）。
+        d = main.agents_dir()
+        assert d == Path(tmp).parent / ".claw" / "agents", f"寫到了錯的目錄：{d}"
         names = {p.stem for p in d.glob("*.md")}
         assert main.agents["p19"].name in names, f"老徐沒被寫成具名 agent：{names}"
         assert main.agents[main.KANBAN].name not in names, "看板不該把自己也列成可點名的成員"

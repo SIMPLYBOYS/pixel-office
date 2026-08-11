@@ -1560,6 +1560,22 @@ CHANNELS_DIR = Path(os.environ["COGITO_CHANNELS"]).expanduser() if os.environ.ge
 SOUL_MARK = "<!-- office-persona:"   # 我們產生的檔案的第一行；手寫的 AGENTS.md 沒有它
 
 
+def agents_dir() -> Path | None:
+    """具名 agent 要寫去哪。
+
+    ⚠ 這【不是】各頻道的工作目錄。cogito 的 spawn_subagent 是用 SkillsBaseDir=rootDir 建
+    AgentLoader 的（cmd/claw/main.go 的 WireSubagent），也就是【共享根】的 .claw/agents/。
+    先前寫進 channels/office_kanban/.claw/agents/，那個目錄從來沒被讀過——於是主持人明明
+    被守則要求用人名，卻怎麼點都點不到，只能退回真正存在的 implementer/planner。
+    它不是不聽話，是我把檔案放在它看不到的地方。
+
+    COGITO_AGENTS_DIR 可覆蓋；預設由 COGITO_CHANNELS 往上一層推（channels 就在 workspace 底下）。
+    """
+    if env := os.environ.get("COGITO_AGENTS_DIR"):
+        return Path(env).expanduser()
+    return CHANNELS_DIR.parent / ".claw" / "agents" if CHANNELS_DIR else None
+
+
 def soul_doc(aid: str, body: str) -> str:
     p = agents[aid].persona
     head = "\n".join(x for x in [
@@ -1600,16 +1616,17 @@ def agent_doc(aid: str, body: str) -> str:
 
 
 def sync_agents() -> int:
-    """把六個人設另外投影成 kanban 頻道的【具名 agent】（.claw/agents/<名字>.md），
+    """把六個人設投影成 cogito 的【具名 agent】（.claw/agents/<名字>.md），
     讓主持人能用 spawn_subagent 點名真正的人設，而不是在 task_prompt 裡臨時捏一個。
 
-    只寫進 kanban 頻道：基本模式下每位 agent 就是他自己，不需要具名子 agent；只有協作模式的
-    主持人需要點名。這個分界不是刻意設計的，是「誰需要誰」自己落出來的。
+    寫進【共享根】而不是 kanban 頻道——見 agents_dir() 的說明。原本想「只有協作模式需要
+    點名，所以只給 kanban」，但 cogito 的 AgentLoader 是共享的，那個分界在它那邊不存在；
+    硬要分的結果就是檔案放在沒人讀的地方。這裡讓步給既有架構，不是設計取捨。
     沿用 SOUL_MARK 保護：沒有標記的檔案是人寫的，不覆蓋。"""
-    if CHANNELS_DIR is None:
+    dst_dir = agents_dir()
+    if dst_dir is None:
         return 0
     persona_dir = Path(__file__).parent / "personas"
-    dst_dir = CHANNELS_DIR / f"office_{KANBAN}" / ".claw" / "agents"
     wrote = 0
     for aid, a in npcs().items():
         src = persona_dir / f"{aid}.md"
