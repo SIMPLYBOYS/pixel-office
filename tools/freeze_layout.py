@@ -72,9 +72,20 @@ def main():
             changed[name] = (layout[name], [px, py])
             new[name] = [px, py]
 
-    if missing:
-        print(f"⚠ 場景裡找不到：{', '.join(missing)}（還沒跑過 Build Room？）")
-    if not changed:
+    # 場景裡找不到 = 在 Unity 裡被【刪掉】了，那是「這件不要了」的意思。
+    # 但也可能只是還沒 Build Room——那時會【全部】都找不到。用比例區分：
+    # 找得到的過半才敢當成刪除，否則只是提醒。
+    found = len([k for k in layout if not k.startswith("_")]) - len(missing)
+    dropped = []
+    if missing and found > len(missing):
+        dropped = missing
+        for n in missing:
+            new.pop(n, None)
+        print(f"在 Unity 裡刪掉的（會從 west_layout.json 移除）：{', '.join(dropped)}")
+    elif missing:
+        print(f"⚠ 場景裡找不到：{', '.join(missing)}（還沒跑過 Build Room？沒有當成刪除）")
+
+    if not changed and not dropped:
         print("佈局與 west_layout.json 一致，沒有要凍結的東西。")
         return
 
@@ -98,11 +109,14 @@ def main():
     diff = 0
     for cy in sorted(want):
         row = west[cy]
+        # 只管【本來可走】的格子。落在 '#' 上的家具（例如貼著牆的盆栽）本來就擋著了，
+        # 硬要改成 'T' 沒有任何作用，只會讓人以為漏改了什麼。
+        need = {x for x in want[cy] if row[x] != "#"}
         cur = {x for x, c in enumerate(row) if c == "T"}
-        if cur == want[cy]:
+        if cur == need:
             continue
         diff += 1
-        new_row = "".join("T" if x in want[cy] else ("." if row[x] == "T" else row[x])
+        new_row = "".join("T" if x in need else ("." if row[x] == "T" else row[x])
                           for x in range(len(row)))
         print(f'  第 {cy:>2} 列  "{row}" → "{new_row}"')
     if not diff:
