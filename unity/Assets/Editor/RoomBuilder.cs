@@ -258,6 +258,7 @@ public static class RoomBuilder
             foreach (var it in list)
             {
                 if (Hidden.Contains(it.name)) continue;
+                if (it.name.StartsWith("door_")) continue;   // 門是一物件多幀，下面另外組
                 var go = new GameObject(it.name);
                 go.transform.SetParent(props.transform, false);
                 go.transform.localPosition = new Vector3(offsetX + it.x / PPU, -(it.y + it.h) / PPU, 0);
@@ -281,6 +282,24 @@ public static class RoomBuilder
             // 西緣那段沒畫的透明區。兩張都用 -20 的話誰蓋誰是不定的，接縫會時好時壞。
             wsr.sortingOrder = -21;
             PlaceProps(westData.items, 0);
+
+            // 自動門：west.json 裡的 door_0..door_N 是【同一扇門的 N 張幀】，不是 N 件家具。
+            // 收成一個掛 AutoDoor 的物件；照名字排序＝關→開，AutoDoor 依有沒有人靠近前後播。
+            var frames = westData.items.Where(it => it.name.StartsWith("door_"))
+                                       .OrderBy(it => it.name).ToArray();
+            if (frames.Length > 1)
+            {
+                var d0 = frames[0];
+                var door = new GameObject("AutoDoor");
+                door.transform.SetParent(props.transform, false);
+                door.transform.localPosition = new Vector3(d0.x / PPU, -(d0.y + d0.h) / PPU, 0);
+                var dsr = door.AddComponent<SpriteRenderer>();
+                dsr.sprite = sprites[d0.name];
+                dsr.sortingOrder = 0;
+                dsr.spriteSortPoint = SpriteSortPoint.Pivot;
+                door.AddComponent<AutoDoor>().frames =
+                    frames.Select(f => sprites[f.name]).ToArray();
+            }
         }
 
         // 碰撞（無 renderer 的 tilemap）

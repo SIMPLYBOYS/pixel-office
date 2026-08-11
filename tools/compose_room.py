@@ -29,6 +29,8 @@ OFFICE_SHEET = f"{ROOT}/limezu/Modern_Office_Revamped_v1.2/Modern_Office_16x16.p
 # 玄關家具直接借 LimeZu 官方 Office_Design_1 拆出來的元件（那張圖的入口廳就是我們要的樣子）。
 # 自己從 tilesheet 拼一遍沒有比較好——官方元件已經帶好陰影與細節，而且是同一位作者的手筆。
 D1 = f"{ROOT}/limezu/_extracted/Office_Design_1"
+DOOR_SHEET = (f"{ROOT}/limezu/Modern_Interiors_v41.4/3_Animated_objects/16x16/"
+              "spritesheets/animated_door_sliding_glass.png")
 OUT = f"{ROOT}/limezu/_extracted/West"
 INSTALL = f"{ROOT}/unity/Assets/Sprites/LimeZu/Design"
 CELL = 16
@@ -214,7 +216,7 @@ def main():
     # 掛牆的陳設（畫、螢幕）：貼在【牆面】上，不是站在地板上。
     # 先前跟其他家具一樣底邊對齊地板格，畫就變成立在地上——牆是 1 格高，畫要往上推
     # 大半格才會落在牆面。它們也不佔地板：牆上的畫本來就擋不住人。
-    WALL_MOUNTED = set()
+    NO_BLOCK = set()   # 不佔地板格的（掛牆的陳設、自動門）
 
     def wall_art(obj, cx, cy):
         """掛在牆面上。cy = 那道牆的【最下面】一列。
@@ -224,7 +226,7 @@ def main():
         那是【地圖】要改成兩列，不是這裡調偏移量能救的。"""
         img, _, _ = crop_opaque(d1_sprite(obj))
         name = "d1_" + obj
-        WALL_MOUNTED.add(name)
+        NO_BLOCK.add(name)
         imgs[name] = img
         items.append({"name": name, "x": cx * CELL, "y": (cy + 1) * CELL - 4 - len(img),
                       "w": len(img[0]), "h": len(img)})
@@ -288,6 +290,24 @@ def main():
     d1_px("obj_17", 135, 218)   # 盆栽＋藍椅
     d1_px("obj_06", 177, 212)   # 盆栽
 
+    # 自動門：切成獨立的幀，RoomBuilder 收成一個掛 AutoDoor 的物件逐幀播。
+    # 只取【前半】——量過幀序是 0=關 →7=全開 →13 又關回去，後半是前半的鏡像，
+    # 倒著播就是關門，存 14 張是白存。
+    # ⚠ 幀【不裁切】透明邊：每幀的透明區大小不同，各自裁切會讓每張的 pivot 對不齊，
+    #   播起來門會左右抖。這也是它不能走 place() 的原因（place 會 crop_opaque）。
+    door = read_png(DOOR_SHEET)
+    DW = 32
+    dcells = [(x, y) for y, row in enumerate(west) for x, c in enumerate(row) if c == "D"]
+    if dcells:
+        dx, dy = min(c[0] for c in dcells), min(c[1] for c in dcells)
+        # +1：14 幀是 0=關 →【7=全開】→13 關回去，取一半只到 6，會少掉全開那張
+        for f in range(len(door[0]) // DW // 2 + 1):
+            name = f"door_{f}"
+            NO_BLOCK.add(name)
+            imgs[name] = [row[f * DW:(f + 1) * DW] for row in door]
+            items.append({"name": name, "x": dx * CELL, "y": dy * CELL,
+                          "w": DW, "h": len(door)})
+
     # 家具與碰撞圖是分開維護的，對不上就會出現「畫面上有張桌子、NPC 卻走得過去」——
     # 那正是投影不誠實。所以這裡雙向檢查，兩個方向的錯都要吵：
     #
@@ -297,7 +317,7 @@ def main():
     #   座位，會停在門口等到逾時——而畫面上看起來只是「他沒去開會」。
     seats = {n for n in imgs if "chair" in n}
     # 掛牆的不驗：它掛在牆面上，本來就不該佔地板格
-    items_to_check = [it for it in items if it["name"] not in WALL_MOUNTED]
+    items_to_check = [it for it in items if it["name"] not in NO_BLOCK]
     bad = []
     for it in items_to_check:
         cy = (it["y"] + it["h"] - 1) // CELL
