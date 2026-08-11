@@ -122,6 +122,10 @@
   .board .col.done .card { border-left-color: #76c47a; }
   .board .col.blocked .card { border-left-color: #e8c454; }
   .board .card .who { color: var(--dim); font-size: 11px; }
+  /* 可跳轉的 owner：底線虛線提示「這是連結」，但不要做成按鈕——板子是唯讀的，
+     這裡唯一的互動就是換人看 */
+  .board .card .who.jump { cursor: pointer; border-bottom: 1px dashed var(--line); display: inline-block; }
+  .board .card .who.jump:hover { color: var(--text); border-bottom-color: currentColor; }
   .board .card .dep { color: #e8c454; font-size: 11px; }
   .board .empty { color: var(--dim); font-size: 11px; padding: 4px 2px; }
   /* 會議進度：一排人名 + 回來了沒。刻意不做進度條——真實資料是離散的「誰回了」，
@@ -638,7 +642,18 @@ async function board(id) {
       const d = el('div', '');
       d.className = 'card';
       d.appendChild(el('div', card.title));
-      if (card.owner) d.appendChild(Object.assign(el('div', '👤 ' + card.owner), { className: 'who' }));
+      if (card.owner) {
+        const w = Object.assign(el('div', '👤 ' + card.owner), { className: 'who' });
+        // 有對到人就讓它可以跳過去：板子回答「誰在做什麼」，工作串回答「他到底做了什麼」，
+        // 兩者之間本來就該一步到位。對不到人的（owner 是自由文字）維持純文字，
+        // 不要做出一個點了沒反應的東西。
+        if (card.owner_id) {
+          w.classList.add('jump');
+          w.title = `看 ${card.owner} 的工作串`;
+          w.onclick = () => pick(card.owner_id);
+        }
+        d.appendChild(w);
+      }
       // 等待相依時把「在等誰」寫出來——只標「等待中」等於沒說，看板的價值就在這條邊
       if (c.key === 'blocked' && card.deps.length)
         d.appendChild(Object.assign(el('div', '⏳ 等 ' + card.deps.join('、')), { className: 'dep' }));

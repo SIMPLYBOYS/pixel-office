@@ -810,6 +810,19 @@ def board() -> None:
             assert [x["id"] for x in by["blocked"]] == ["test"], "相依沒完成的要進等待欄"
             assert by["blocked"][0]["deps"] == ["api", "ui"], "要說明在等誰，只標『等待中』等於沒說"
             assert by["doing"][0]["owner"] == main.agents["p12"].name, "owner 要換成看得懂的名字"
+            # owner_id 是「點卡片跳到那個人的工作串」的依據。名字給人看、id 給程式用，
+            # 兩個都要回——只回名字的話前端還得自己反查一次名冊，同一張對照表寫兩份。
+            assert by["doing"][0]["owner_id"] == "p12", "缺 owner_id，卡片就跳不過去"
+            assert by["todo"][0]["owner_id"] is None, "沒有 owner 的卡不該有 owner_id"
+
+            # 守則要求主持人把 owner 寫成【人名】，那才是實際會走的路徑（上面那筆是舊格式的
+            # persona id）。兩種都要吃得下，不然規範一改板子就跳不動。
+            (wd / "board.json").write_text(json.dumps({
+                "task": "x", "tasks": [{"id": "ui", "title": "面板", "deps": [],
+                                        "status": "doing", "owner": "小葵"}]},
+                ensure_ascii=False), encoding="utf-8")
+            card = c.get("/office/board").json()["columns"][2]["cards"][0]
+            assert (card["owner"], card["owner_id"]) == ("小葵", "p12"), card
 
             # live：主持人沒在跑的時候，板子上的「進行中」是舊資料——畫面要講出來，不能
             # 讓人以為現在有人在做。這是投影誠實，不是裝飾。

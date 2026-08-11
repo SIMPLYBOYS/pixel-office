@@ -1357,12 +1357,16 @@ def office_board():
     cols = {k: [] for k, _ in BOARD_COLUMNS}
     for t in tasks:
         col = board_column(t, done_ids)
-        # owner 是 persona id 的話換成名字——板子上要看得懂是誰，不是 p07
+        # owner 兩種寫法都吃：守則要求寫【人名】，但早期的板子存的是 persona id。
+        # 一律回「看得懂的名字」＋「可跳轉的 id」——前端要靠 owner_id 才點得進那個人的工作串，
+        # 只有名字的話還得在前端反查一次名冊，那是把同一個對照表寫兩份。
         owner = t.get("owner")
+        owner_id = owner if owner in agents else npc_by_name(owner) if owner else None
         cols[col].append({
             "id": t.get("id", ""), "title": t.get("title") or t.get("id", ""),
             "deps": t.get("deps") or [],
-            "owner": agents[owner].name if owner in agents else owner,
+            "owner": agents[owner_id].name if owner_id else owner,
+            "owner_id": owner_id,
             "out": t.get("out"),
         })
     # live＝主持人現在真的在推進這塊板。board.json 只有主持人在跑時才會更新，它一收工
