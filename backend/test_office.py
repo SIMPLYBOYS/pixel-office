@@ -367,6 +367,7 @@ def run() -> None:
     dup_msg()
     sub_by_name()
     kanban()
+    standup_meeting()
     meeting_progress()
     board()
     sub_release_fallback()
@@ -831,6 +832,45 @@ def board() -> None:
             main.busy.add(main.KANBAN)
             assert c.get("/office/board").json()["live"] is True
             main.busy.discard(main.KANBAN)
+    main.CHANNELS_DIR = None
+
+
+def standup_meeting() -> None:
+    """協作模式的【會議階段】把人叫到白板前，上板之後才各自回工位。
+
+    投影的差異只有「去哪裡」，因為真實世界的差異也只有這個。判準必須跟任務板面板一致
+    （沒有 board.json＝還在開會）——畫面寫著「會議進行中」、人卻坐回工位，那是兩個投影
+    在說不同的話。"""
+    import tempfile
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [],
+                                 "list": main.MEET_SPOTS + ["chair_2"]}))
+        with tempfile.TemporaryDirectory() as tmp:
+            main.CHANNELS_DIR = Path(tmp)
+            wd = Path(tmp) / f"office_{main.KANBAN}"
+            wd.mkdir(parents=True)
+            main.busy.clear(); main.sub_active.clear(); main.occupied.clear()
+            main.history.clear(); main.last_report.clear()
+
+            # 還沒上板＝會議階段：被派的人聚到白板前
+            post(c, agent=main.KANBAN, kind="start", label="開會")
+            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
+            who = [n for lst in main.sub_active.values() for n in lst][0]
+            assert main.occupied[who] in main.MEET_SPOTS, \
+                f"會議階段該去白板前，實際去了 {main.occupied[who]}"
+
+            # 第二個人要站【不同】的位置，不能疊在一起
+            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
+            spots = [main.occupied[n] for lst in main.sub_active.values() for n in lst]
+            assert len(set(spots)) == len(spots), f"兩個人站同一格：{spots}"
+
+            # 上板之後＝實作階段：改成各自回工位
+            (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
+            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
+            third = [n for lst in main.sub_active.values() for n in lst][-1]
+            assert main.occupied[third] == main.WORK_DESK[third], \
+                f"上板後該回工位，實際去了 {main.occupied[third]}"
+        post(c, agent=main.KANBAN, kind="done", label="ok")
     main.CHANNELS_DIR = None
 
 

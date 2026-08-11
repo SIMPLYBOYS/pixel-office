@@ -351,6 +351,10 @@ WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的
              "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
 BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡（面向老闆桌）
 BOARD = "board_1"     # 白板前：規劃類子 agent 站這裡，不佔工位
+# 站立式會議的站位（白板周圍）。刻意不做長桌會議室——碰撞圖量過，16×17 已經飽和，
+# 沒有空地放得下長桌；硬塞要重排家具＋改碰撞圖，而每次改碰撞圖就可能再犯一次
+# 「出生點落在牆裡」。這個規模的團隊本來就是站在白板前開短會。
+MEET_SPOTS = ["meet_1", "meet_2", "meet_3", "meet_4"]
 COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空轉的投影）
 # 各工位【旁邊】的站位：委派時主 agent 走過去，面向坐著的同事——
 # 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
@@ -604,6 +608,24 @@ def npc_by_name(name: str) -> str | None:
     return next((aid for aid, a in npcs().items() if a.name == name), None)
 
 
+def in_meeting(parent: str) -> bool:
+    """這是【協作模式的會議階段】嗎——看板在跑、而且還沒上板。
+
+    判準跟任務板面板同一個（沒有 board.json＝還在開會），兩邊必須一致：畫面上寫著
+    「會議進行中」、人卻各自坐回工位，那是兩個投影說了不同的話。
+    """
+    if parent != KANBAN:
+        return False
+    base = agent_dir(KANBAN)
+    return not (base and (base / "board.json").exists())
+
+
+def meet_spot() -> str:
+    """挑一個沒人佔的會議站位；都滿了就退回白板前（擠一點也比不去好）。"""
+    taken = set(occupied.values())
+    return next((s for s in MEET_SPOTS if s not in taken), BOARD)
+
+
 def pick_sub_npc(parent: str, name: str) -> str | None:
     free = [x for x in npcs() if x != parent and x not in busy]   # 看板沒有身體，不能被派去支援
     # 先用人名對名冊，再退回角色表。
@@ -641,8 +663,13 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             sub_since[npc] = time.monotonic()
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
-            # 規劃類的活在白板前做（不佔工位，也讓「這是在想、不是在寫」看得出來）
-            spot = BOARD if name in ("planner", "correctness") else WORK_DESK.get(npc)
+            # 開會中就聚到白板前，否則各自回工位。
+            # 這一行是「會議室」的全部——投影的差異只有【去哪裡】，因為真實世界的差異也只有這個：
+            # 會議階段大家圍著白板講話，上板之後各自回位子做事。
+            # 規劃類的活也在白板前做（不佔工位，讓「這是在想、不是在寫」看得出來）。
+            spot = (meet_spot() if in_meeting(parent)
+                    else BOARD if name in ("planner", "correctness")
+                    else WORK_DESK.get(npc))
             if spot:
                 await goto(npc, spot)
             if side := DESK_SIDE.get(npc):   # 主 agent 走到對方桌邊站著看
