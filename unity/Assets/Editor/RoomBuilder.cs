@@ -308,7 +308,12 @@ public static class RoomBuilder
 
         UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(
             UnityEngine.SceneManagement.SceneManager.GetActiveScene());
-        Debug.Log($"RoomBuilder: 設計圖房間完成——{data.items.Length} 件家具、{AllWaypoints().Count()} 個 waypoint");
+        // 訊息要把【西區有沒有進來】講出來。先前只報辦公區的家具數，於是「西區整塊沒載入」
+        // 跟「一切正常」印出來一模一樣——看 Console 也判斷不了，只能猜。
+        Debug.Log($"RoomBuilder: 房間完成——地圖 {Collision[0].Length}×{Collision.Length}、"
+                  + $"辦公區 {data.items.Length} 件家具（x+{OfficeX}）、"
+                  + (westData == null ? "西區【無美術】" : $"西區 {westData.items.Length} 件家具 + 底圖 {westData.canvasW}×{westData.artH}px")
+                  + $"、{AllWaypoints().Count()} 個 waypoint");
     }
 
     // 每次 Build 驗證：所有 waypoint 都落在可走格，且從出生點 BFS 可達（孤島直接報錯）
