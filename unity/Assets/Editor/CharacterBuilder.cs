@@ -19,12 +19,12 @@ public static class CharacterBuilder
     // 現在 Build 會驗證，落在牆裡直接報錯，不再靜默生出走不動的人。
     static readonly (string prefix, Vector3 spawn)[] Personas =
     {
-        ("p17", new Vector3(4.5f, -5.5f, 0)),    // chair_1
-        ("p01", new Vector3(7.5f, -5.5f, 0)),    // chair_2
-        ("p07", new Vector3(10.5f, -5.5f, 0)),   // chair_3
-        ("p05", new Vector3(3.5f, -9.5f, 0)),    // chair_4
-        ("p12", new Vector3(6.5f, -9.5f, 0)),    // chair_5
-        ("p19", new Vector3(13.5f, -14.5f, 0)),  // boss_seat
+        ("p17", new Vector3(RoomBuilder.OfficeX + 4.5f, -5.5f, 0)),    // chair_1
+        ("p01", new Vector3(RoomBuilder.OfficeX + 7.5f, -5.5f, 0)),    // chair_2
+        ("p07", new Vector3(RoomBuilder.OfficeX + 10.5f, -5.5f, 0)),   // chair_3
+        ("p05", new Vector3(RoomBuilder.OfficeX + 3.5f, -9.5f, 0)),    // chair_4
+        ("p12", new Vector3(RoomBuilder.OfficeX + 6.5f, -9.5f, 0)),    // chair_5
+        ("p19", new Vector3(RoomBuilder.OfficeX + 13.5f, -14.5f, 0)),  // boss_seat
     };
 
     [MenuItem("Tools/Build Characters")]
