@@ -26,6 +26,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOM_CS = f"{ROOT}/unity/Assets/Editor/RoomBuilder.cs"
 BG_BASE = f"{ROOT}/limezu/_extracted/Office_Design_2/bg_base.png"
 OFFICE_SHEET = f"{ROOT}/limezu/Modern_Office_Revamped_v1.2/Modern_Office_16x16.png"
+# 玄關家具直接借 LimeZu 官方 Office_Design_1 拆出來的元件（那張圖的入口廳就是我們要的樣子）。
+# 自己從 tilesheet 拼一遍沒有比較好——官方元件已經帶好陰影與細節，而且是同一位作者的手筆。
+D1 = f"{ROOT}/limezu/_extracted/Office_Design_1"
 OUT = f"{ROOT}/limezu/_extracted/West"
 INSTALL = f"{ROOT}/unity/Assets/Sprites/LimeZu/Design"
 CELL = 16
@@ -169,22 +172,16 @@ def main():
                 blit(canvas, shadow, x, y + CELL)
     write_png(f"{OUT}/west_bg.png", canvas)
 
-    # ── 家具 ──────────────────────────────────────────────────────────────
-    # (sheet 上的來源格, 尺寸)。行列號是目視點名出來的（tools 裡的 crop 腳本放大看格線）。
-    tabletop = sub(sheet, 6 * CELL, 18 * CELL, 2 * CELL, CELL)          # 米色桌面 2×1
-    tablelegs = sub(sheet, 6 * CELL, 19 * CELL, 2 * CELL, CELL)         # 桌腳
-    # ⚠ 這兩張很容易接反，判準是【椅背在哪一側】：人的背靠著椅背，所以椅背在左＝面向右。
-    #   col 5 椅背在左 → 坐的人面東（sit_right），放桌子【西】側
-    #   col 4 椅背在右 → 坐的人面西（sit_left），放桌子【東】側
-    chair_r = sub(sheet, 5 * CELL, 8 * CELL, CELL, 2 * CELL)            # 給 sit_right 的人
-    chair_l = sub(sheet, 4 * CELL, 8 * CELL, CELL, 2 * CELL)            # 給 sit_left 的人
-    sofa = sub(sheet, 0 * CELL, 17 * CELL, 2 * CELL, 2 * CELL)          # 雙人沙發
-    plant = sub(sheet, 6 * CELL, 8 * CELL, CELL, 2 * CELL)              # 盆栽
+    # ── 家具 ────────────────────────────────────────────────────────────
+    tabletop = sub(sheet, 6 * CELL, 18 * CELL, 2 * CELL, CELL)
+    tablelegs = sub(sheet, 6 * CELL, 19 * CELL, 2 * CELL, CELL)
+    # ⚠ 這兩張很容易接反，判準是【椅背在哪一側】：椅背在左＝坐的人面右。
+    chair_r = sub(sheet, 5 * CELL, 8 * CELL, CELL, 2 * CELL)   # 給 sit_right 的人（放桌子西側）
+    chair_l = sub(sheet, 4 * CELL, 8 * CELL, CELL, 2 * CELL)   # 給 sit_left 的人（放桌子東側）
 
-    # 長桌：官方沒有 2×3 的直式會議桌，用桌面往下拉長再蓋桌腳。
-    # ⚠ 重複的那一段要插在桌面的【下緣線之前】。先前接在整格桌面後面，等於把桌面自己的
-    #   下緣暗線留在中間——畫面上就是桌子中央橫過一條假接縫。
-    mid = [tabletop[10][:]] * CELL                       # 第 10 列是桌面最平的一段
+    # 長桌：官方沒有直式會議桌，用桌面往下拉長再蓋桌腳。重複段要插在桌面【下緣線之前】，
+    # 否則桌面自己的暗線會留在中間變成假接縫。
+    mid = [tabletop[10][:]] * CELL
     table = [r[:] for r in tabletop[:12]] + mid + [r[:] for r in tabletop[12:]] \
         + [r[:] for r in tablelegs]
 
@@ -198,16 +195,54 @@ def main():
         imgs[name] = img
         items.append({"name": name, "x": x, "y": y, "w": w, "h": h})
 
-    # 會議室：長桌 x2-3 佔第 11~13 列；座位在 x1(面東) 與 x4(面西)，一邊三個
-    place("w_table", table, 2, 13)
+    def d1(obj, cx, cy):
+        """借 Office_Design_1 的元件。改前綴 d1_ 是必要的——那張圖的元件也叫 obj_01..，
+        跟辦公區的名字會【整批對撞】，sprite 字典與場景物件都會互相蓋掉。"""
+        place("d1_" + obj, read_png(f"{D1}/{obj}.png"), cx, cy)
+
+    # 玄關（照 Office_Design_1 入口廳的動線：北牆一排陳設、中央等候、南側自助區）
+    d1("obj_01", 1, 2)    # 冷氣
+    d1("obj_09", 4, 2)    # 彩色掛畫
+    d1("obj_02", 8, 2)    # 圖表螢幕
+    d1("obj_05", 10, 2)   # 書架
+    d1("obj_12", 4, 3)    # 兩張圓椅（等候）
+    d1("obj_06", 1, 4)    # 盆栽
+    d1("obj_11", 11, 4)   # 盆栽
+    d1("obj_16", 1, 8)    # 影印機
+    d1("obj_19", 2, 8)    # 藍色候客椅（沿南牆排，擺在走道上會把後面那排格子關死）
+    d1("obj_20", 3, 8)    # 藍色候客椅
+    d1("obj_14", 5, 8)    # 飲水機
+    d1("obj_13", 7, 8)    # 販賣機
+    d1("obj_18", 11, 8)   # 盆栽
+
+    # 會議室：長桌 x5-6 佔第 11~13 列，兩側各三張椅子朝內
+    place("w_table", table, 5, 13)
     for i, cy in enumerate((11, 12, 13)):
-        place(f"w_chair_a{i+1}", chair_r, 1, cy)
-        place(f"w_chair_b{i+1}", chair_l, 4, cy)
-    # 玄關：接待櫃檯正對自動門、沙發靠北牆、兩盆植物擺角落
-    place("w_reception", [r[:] for r in tabletop] + [r[:] for r in tablelegs], 2, 6)
-    place("w_sofa", sofa, 2, 3)
-    place("w_plant_1", plant, 1, 4)
-    place("w_plant_2", plant, 4, 7)
+        place(f"w_chair_a{i+1}", chair_r, 4, cy)
+        place(f"w_chair_b{i+1}", chair_l, 7, cy)
+
+    # 家具與碰撞圖是分開維護的，對不上就會出現「畫面上有張桌子、NPC 卻走得過去」——
+    # 那正是投影不誠實。所以這裡雙向檢查，兩個方向的錯都要吵：
+    #
+    #   只看【底邊那一列】：俯視角下一件物品佔的是它「站著的那格」。盆栽的葉子、椅背
+    #   往上蓋到隔壁格是正常的，那不代表上面那格走不過去。
+    #   椅子【反過來】驗：人要坐上去，所以它的格子必須【可走】。標成擋路的話 NPC 走不進
+    #   座位，會停在門口等到逾時——而畫面上看起來只是「他沒去開會」。
+    seats = {n for n in imgs if "chair" in n}
+    bad = []
+    for it in items:
+        cy = (it["y"] + it["h"] - 1) // CELL
+        for cx in range(it["x"] // CELL, (it["x"] + it["w"] - 1) // CELL + 1):
+            ov = min(it["x"] + it["w"], (cx + 1) * CELL) - max(it["x"], cx * CELL)
+            if ov <= CELL * 0.45 or not (0 <= cy < CH and 0 <= cx < CW - UNDERLAP):
+                continue
+            blocked = west[cy][cx] in "#T"
+            if it["name"] in seats and blocked:
+                bad.append(f"{it['name']} 的座位 ({cx},{cy}) 被標成擋路，人坐不進去")
+            elif it["name"] not in seats and not blocked:
+                bad.append(f"{it['name']} 站在 ({cx},{cy})，但那格沒標擋路（'{west[cy][cx]}'）")
+    if bad:
+        raise SystemExit("compose_room: 家具與 RoomBuilder.cs 的 West 對不上：\n  " + "\n  ".join(bad))
 
     for name, img in imgs.items():
         write_png(f"{OUT}/{name}.png", img)
