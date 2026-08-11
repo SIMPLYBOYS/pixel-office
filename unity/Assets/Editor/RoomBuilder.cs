@@ -333,8 +333,11 @@ public static class RoomBuilder
             foreach (var (dc, dr) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
             {
                 var n = (c + dc, r + dr);
-                if (!seen.Contains(n) && n.Item2 >= 0 && n.Item2 < Collision.Length
-                    && n.Item1 >= 0 && n.Item1 < 16 && Collision[n.Item2][n.Item1] == '.')
+                // 邊界一律問 InBounds，不要在這裡自己寫一份。先前這行是 n.Item1 < 16——
+                // 地圖加寬後起點 (18,5) 自己就在界外，BFS 一步都擴不出去，於是【全部】30 個
+                // waypoint 都被報成不可達。同一個寬度判斷散在三處，改了兩處漏一處就是這下場。
+                if (!seen.Contains(n) && InBounds(n.Item1, n.Item2)
+                    && Collision[n.Item2][n.Item1] == '.')
                 {
                     seen.Add(n);
                     q.Enqueue(n);
@@ -342,9 +345,15 @@ public static class RoomBuilder
             }
         }
         foreach (var (name, cx, cy) in AllWaypoints())
-            if (Collision[cy][cx] != '.' || !seen.Contains((cx, cy)))
+            if (!InBounds(cx, cy) || Collision[cy][cx] != '.' || !seen.Contains((cx, cy)))
                 Debug.LogError($"RoomBuilder: waypoint {name} ({cx},{cy}) 不可達或在牆裡！");
     }
+
+    /// 格座標在地圖範圍內嗎。【入口平權】：地圖寬度的判斷只有這一處，BFS、Walkable、
+    /// waypoint 驗證都問它。先前寬度散在三個地方各寫一份 16，加寬地圖時改了兩處漏一處，
+    /// 結果是 BFS 的起點自己就在界外、30 個 waypoint 全被判成不可達。
+    static bool InBounds(int cx, int cy) =>
+        cy >= 0 && cy < Collision.Length && cx >= 0 && cx < Collision[cy].Length;
 
     /// 世界座標落在可走格嗎。開放給 CharacterBuilder 驗出生點——碰撞圖校正過後，
     /// 出生點沒有跟著校，三個人被生在牆裡卻沒有任何東西報錯（實測：他們的走位指令
@@ -352,7 +361,7 @@ public static class RoomBuilder
     public static bool Walkable(Vector3 world)
     {
         int cx = Mathf.FloorToInt(world.x), cy = Mathf.FloorToInt(-world.y);
-        return cy >= 0 && cy < Collision.Length && cx >= 0 && cx < Collision[cy].Length && Collision[cy][cx] == '.';
+        return InBounds(cx, cy) && Collision[cy][cx] == '.';
     }
 
     // URP 2D 的 Y-sort 在 Renderer2DData 上
