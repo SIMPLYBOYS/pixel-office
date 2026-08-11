@@ -31,6 +31,7 @@ OFFICE_SHEET = f"{ROOT}/limezu/Modern_Office_Revamped_v1.2/Modern_Office_16x16.p
 D1 = f"{ROOT}/limezu/_extracted/Office_Design_1"
 DOOR_SHEET = (f"{ROOT}/limezu/Modern_Interiors_v41.4/3_Animated_objects/16x16/"
               "spritesheets/animated_door_sliding_glass.png")
+LAYOUT = f"{ROOT}/tools/west_layout.json"
 OUT = f"{ROOT}/limezu/_extracted/West"
 INSTALL = f"{ROOT}/unity/Assets/Sprites/LimeZu/Design"
 CELL = 16
@@ -275,20 +276,17 @@ def main():
 
     # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
     wall_art("obj_09", 2, 8)   # 彩色掛畫：掛在公司南牆（第 7-8 列）的牆面上
-    # 以下座標是在 Unity 裡手調之後【回寫】的（像素，非格線對齊）。
-    # 為什麼要回寫：Build Room 會 DestroyImmediate 整個 Room 重建，手調的位置下一次
-    # 就沒了。腳本才是唯一真相——場景是產物，不是來源。
-    d1_px("obj_19", 21, 160)    # 藍色候客椅
-    d1_px("obj_20", 40, 160)    # 藍色候客椅
-    d1_px("obj_18", 14, 186)    # 盆栽
-    d1_px("obj_05", 134, 126)   # 書架
-    d1_px("obj_13", 170, 124)   # 販賣機
-    d1_px("obj_12", 142, 188)   # 兩張圓椅
-    d1_px("obj_11", 16, 220)    # 盆栽
-    d1_px("obj_14", 34, 210)    # 飲水機
-    d1_px("obj_16", 54, 218)    # 影印機
-    d1_px("obj_17", 135, 218)   # 盆栽＋藍椅
-    d1_px("obj_06", 177, 212)   # 盆栽
+    # 門外的擺設位置來自 tools/west_layout.json——那是在 Unity 裡手調好之後用
+    # tools/freeze_layout.py 抽回來的。為什麼不寫死在這裡：Build Room 會 DestroyImmediate
+    # 整個 Room 重建，手調的位置下一次就沒了；腳本才是唯一真相，場景是產物。
+    # 缺 key 就【當場報錯】，不要靜靜用舊值——「我改了但畫面沒變」大多是這樣來的。
+    layout = json.load(open(LAYOUT))
+    for name, xy in layout.items():
+        if name.startswith("_"):
+            continue
+        if not name.startswith("d1_"):
+            raise SystemExit(f"compose_room: west_layout.json 的 {name} 不是 d1_ 開頭，不知道去哪拿圖")
+        d1_px(name[3:], xy[0], xy[1])
 
     # 自動門：切成獨立的幀，RoomBuilder 收成一個掛 AutoDoor 的物件逐幀播。
     # 只取【前半】——量過幀序是 0=關 →7=全開 →13 又關回去，後半是前半的鏡像，
