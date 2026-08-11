@@ -611,7 +611,16 @@ def pick_sub_npc(parent: str, name: str) -> str | None:
     # （planner、implementer…）。只查角色表的話「派給小美」會落到隨便一個閒著的人身上——
     # 於是板子寫「👤 小美」、畫面上走過去的是阿海，兩邊各說各話。
     # 本人正忙就仍然退回別人代打：演出可以換角，但不能停演。
-    cand = npc_by_name(name) or SUB_NPC.get(name)
+    by_name = npc_by_name(name)
+    cand = by_name or SUB_NPC.get(name)
+    # 兩套命名空間錯位是這個 bug 藏最久的原因：SUB_NPC 收的是【角色名】（implementer…），
+    # 但 cogito 的具名 agent 是【人名】的檔案。主持人拿角色名當 agent_type 時，橋這邊照樣
+    # 對得到一個 NPC（畫面完全正常），cogito 那邊卻載不到人設——於是「派給專員」變成
+    # 「派給沒有人設的探路者」，而且完全看不出來。實測：指名小美與阿哲，實際跑的是小美與小葵。
+    # 判準是【有沒有人設】而不是【橋認不認得】。
+    if name and by_name is None:
+        print(f"⚠ 委派用的 agent_type「{name}」不是員工姓名——cogito 那邊載不到人設，"
+              f"實際跑的是沒有人設的探路者（守則要求用人名，如「小美」）")
     if cand in free:
         return cand
     return free[0] if free else None

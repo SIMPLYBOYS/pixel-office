@@ -760,6 +760,22 @@ def sub_by_name() -> None:
     # 派給自己不會挑到自己（那會變成一個人同時是主也是支援）
     assert main.pick_sub_npc(mei, "小美") != mei
 
+    # 用【角色名】當 agent_type：橋這邊對得到 NPC（畫面正常），但 cogito 載不到人設。
+    # 這個錯配正是那個 bug 藏最久的原因，所以要留下痕跡——判準是「有沒有人設」，
+    # 不是「橋認不認得」（implementer 在 SUB_NPC 裡，橋認得，但它不是任何人的名字）。
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        who = main.pick_sub_npc("p19", "implementer")
+    assert who is not None, "認不得名字也要有人代打，演出不能停"
+    assert "載不到人設" in buf.getvalue(), f"角色名當 agent_type 沒留下痕跡：{buf.getvalue()!r}"
+
+    # 正牌人名不該有警告
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        main.pick_sub_npc("p19", "小美")
+    assert buf2.getvalue() == "", f"用人名不該警告：{buf2.getvalue()!r}"
+
 
 def board() -> None:
     """看板投影：四欄，而「等待相依」是【算出來的】不是 agent 自己標的。
