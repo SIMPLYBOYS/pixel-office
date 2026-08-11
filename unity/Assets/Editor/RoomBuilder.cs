@@ -267,7 +267,9 @@ public static class RoomBuilder
             wbg.transform.localPosition = new Vector3(0, -westData.artH / PPU, 0);
             var wsr = wbg.AddComponent<SpriteRenderer>();
             wsr.sprite = sprites["west_bg"];
-            wsr.sortingOrder = -20;
+            // -21（比辦公區底圖再低一層）：西區底圖刻意往東多畫一格墊在辦公區下面，補它
+            // 西緣那段沒畫的透明區。兩張都用 -20 的話誰蓋誰是不定的，接縫會時好時壞。
+            wsr.sortingOrder = -21;
             PlaceProps(westData.items, 0);
         }
 

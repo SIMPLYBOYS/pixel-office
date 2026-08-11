@@ -121,7 +121,11 @@ def read_west_map():
 def main():
     west = read_west_map()
     CW, CH = len(west[0]), len(west)
-    W, H = CW * CELL, CH * CELL
+    # 底圖往東多畫一格墊在辦公區底下。辦公區底圖在它自己的 x=0 欄第 6~9 列是【全透明】的
+    # （原設計圖那裡是建築物外緣，本來就沒畫），以前在畫面邊緣看不出來，西區貼上去之後
+    # 那段會變成兩區之間的一條破洞。多畫的這一格由辦公區蓋在上面，只有破洞處會露出來。
+    UNDERLAP = 1
+    W, H = (CW + UNDERLAP) * CELL, CH * CELL
     os.makedirs(OUT, exist_ok=True)
 
     bg = read_png(BG_BASE)
@@ -145,9 +149,12 @@ def main():
 
     canvas = [[(0, 0, 0, 0)] * W for _ in range(H)]
     for r in range(CH):
-        for c in range(CW):
+        for c in range(CW + UNDERLAP):
             blit(canvas, floor, c * CELL, r * CELL)
 
+    # 墊底欄沿用西區最東欄的牆況：那一欄是走道東牆，續一格才不會有半截牆浮在接縫上
+    west = [row + row[-1] * UNDERLAP for row in west]
+    CW += UNDERLAP
     at = lambda r, c: west[r][c] if 0 <= r < CH and 0 <= c < CW else "."
     for r in range(CH):
         for c in range(CW):
