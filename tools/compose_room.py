@@ -186,19 +186,20 @@ def main():
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
 
-    # 牆（'='）＝一條【線】，不是一塊填滿的帶子。這是照辦公區底圖 bg_base 自己的畫法量的：
-    #   橫牆 N+WWWW+N  = 6px  （它的 y=160–165 那道）
-    #   直牆 N+WWWWW+N = 7px  （它的 x=57–63 那道）
-    # 跟 LimeZu 官方 Gym_2 完全一致。線以外就是地板，兩側房間的地板直接接到線上——
-    # 兩區用同一種畫法，牆才會是同一種東西，而不是「西邊那半的牆長得不一樣」。
+    # 牆（'='）照辦公區 bg_base 自己的配方畫，哪種剖面由【幾何】決定（量它的下排房間）：
     #
-    # 一格是 16px，線只有 6–7px，所以線畫在格子的哪個位置要決定：
-    #   一側是房間   → 貼著房間那一側，另一側整片清掉（那是建築物外面，不該有地板）
-    #   兩側都是房間 → 置中（室內隔間，兩邊都要看得到它）
+    #   房間在牆的【南】側的橫牆 → 立面：頂面 NWWWWN 6px + 牆身 ~25px + 腳線 + 陰影。
+    #     這個視角看得到牆的正面（bg_base 列10 那道：NWWWWN + 30px 牆身 + N）。
+    #   房間只在【北】側的橫牆   → 只有頂面那條 6px 線（bg_base 南外牆：y=257 一條 NWWWWN）。
+    #     牆的正面朝外，從室內只看得到上表面。
+    #   直牆                     → N+WWWWW+N 7px 的線（bg_base 兩房之間：x=192 那條）。
     #
-    # ⚠ 位置要【整段】一致，不能逐格決定。大門立面是兩列厚的，逐格算的話上下各畫一條、
-    #   中間空掉，變成一個空心的帶子。所以先把同方向且相連的格子收成一段（flood fill），
-    #   再決定這一段的線畫在哪。
+    # 線畫在格子的哪個位置：一側是房間就貼著房間（另一側清成透明——建築物外面），
+    # 兩側都是房間就置中。
+    #
+    # ⚠ 位置與剖面都要【整段】一致，不能逐格決定。大門立面是兩列厚的，逐格算的話上下
+    #   各畫一條、中間空掉，變成一個空心的帶子。所以先把同方向且相連的格子收成一段
+    #   （flood fill），再決定這一段怎麼畫。
     # ⚠ 分段要用【真正的地圖】算，墊底那一欄要排除在外。它只是貼在辦公區底下的複製品，
     #   但它在最東欄右邊也是牆——照單全收的話，東外牆會因為「右邊有牆」被判成橫牆，
     #   於是整片黏成一段（實測：列0–4 與列7–16 各黏成一大塊，線就畫到不該去的地方）。
@@ -225,15 +226,40 @@ def main():
                 if nb not in seen and same(*nb, h):
                     seen.add(nb); stack.append(nb)
 
+        cset = set(comp)
         d = (1, 0) if h else (0, 1)                    # 厚度方向
-        proj = lambda rc: rc[0] * d[0] + rc[1] * d[1]
-        p0 = min(map(proj, comp)) * CELL
-        T = (max(map(proj, comp)) - min(map(proj, comp)) + 1) * CELL
-        thick = 6 if h else 7
         neg = any(room(r - d[0], c - d[1]) for r, c in comp)
         pos = any(room(r + d[0], c + d[1]) for r, c in comp)
         if not neg and not pos:
             continue                                   # 整段在建築物外面，什麼都不畫
+
+        # 貼著建築物外面的端點要裁齊：立面／線都只該從直牆的外緣（x=9）起，
+        # 不裁的話會比下面的直牆多突出 9px，建築物的西緣就不是一條直線。
+        def clip_west(r, c, rows_):
+            for j in rows_:
+                for i in range(CELL - 7):
+                    canvas[r * CELL + j][c * CELL + i] = (0, 0, 0, 0)
+                canvas[r * CELL + j][c * CELL + CELL - 7] = wall_edge
+
+        if h and pos:
+            # 房間在牆的南側 → 立面。跟 '#' 同一套素材：頂面、牆身、腳線、陰影。
+            for r, c in comp:
+                x, y = c * CELL, r * CELL
+                blit(canvas, wall_body, x, y)
+                if (r - 1, c) not in cset:
+                    blit(canvas, wall_cap, x, y)
+                if (r + 1, c) not in cset:
+                    blit(canvas, wall_foot, x, y + CELL - 1)
+                    blit(canvas, shadow, x, y + CELL)
+                if (r, c - 1) not in cset and not room(r, c - 1) and atw(r, c - 1) != "=":
+                    clip_west(r, c, range(CELL))
+            continue
+
+        # 其餘只看得到頂面：一條 6px（橫）／7px（直）的線
+        proj = lambda rc: rc[0] * d[0] + rc[1] * d[1]
+        p0 = min(map(proj, comp)) * CELL
+        T = (max(map(proj, comp)) - min(map(proj, comp)) + 1) * CELL
+        thick = 6 if h else 7
         off = (T - thick) // 2 if neg and pos else (0 if neg else T - thick)
 
         for r, c in comp:
@@ -245,6 +271,25 @@ def main():
                         canvas[y + j][x + i] = wall_edge if k in (0, thick - 1) else wall_top
                     elif not (neg if k < 0 else pos):
                         canvas[y + j][x + i] = (0, 0, 0, 0)   # 線外面沒有房間＝建築物外面
+            # 端點：接到房間就用深藍封口（不封的話白色開口對著地板），接到建築物外面就裁齊
+            if h:
+                for s, xi in ((-1, x), (1, x + CELL - 1)):
+                    nb = (r, c + s)
+                    if nb in cset or atw(*nb) == "=":
+                        continue
+                    if room(*nb):
+                        for j in range(thick):
+                            canvas[p0 + off + j][xi] = wall_edge
+                    elif s < 0:
+                        j0, j1 = max(0, p0 + off - y), min(CELL, p0 + off + thick - y)
+                        if j1 > j0:
+                            clip_west(r, c, range(j0, j1))
+            else:
+                for s, yj in ((-1, y), (1, y + CELL - 1)):
+                    nb = (r + s, c)
+                    if nb not in cset and atw(*nb) != "=" and room(*nb):
+                        for i in range(thick):
+                            canvas[yj][p0 + off + i] = wall_edge
 
     # 墊底欄：把最東欄整欄複製過去。橫牆沿著 x 是均勻的，複製就等於把線延長到接縫底下，
     # 剛好補上辦公區底圖在那裡的破洞；它由辦公區蓋在上面，只有破洞處會露出來。
