@@ -805,12 +805,23 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
 
     # subagent_await 的結果＝背景子 agent 的【真正】交件。一次可能收好幾個人，
     # 逐行對人設名收；還在跑的（🟢）不收——它只是這次沒等到，卡片要繼續開著。
+    #
+    # ⚠ 每張卡只放【自己那一段】。整包塞進去的話，三個人的卡片會寫著一模一樣的內容，
+    # 而且開頭是「背景子 agent bg-1 [老徐]：✅ 已完成」這種收件格式——那是給主持人看的
+    # 訊息標頭，不是那個人的意見。實測踩過：老徐的卡片上是三人份的原始輸出。
     if label.startswith("subagent_await") and kind == "result":
         done = False
-        for who, mark in BG_DONE_RE.findall(detail or ""):
-            if mark == "🟢":
+        hits = list(BG_DONE_RE.finditer(detail or ""))
+        for i, m in enumerate(hits):
+            if m.group(2) == "🟢":
                 continue
-            if await finish_sub(parent, who, mark == "✅", detail):
+            # 這一段＝從本行結尾到下一個標頭（或全文結尾）
+            end = hits[i + 1].start() if i + 1 < len(hits) else len(detail)
+            # 標頭行是「…：✅ 已完成」，成果從【下一行】才開始。失敗那種
+            # （「⚪ 已結束（失敗：…）」）整句都在同一行、沒有換行，就整句留著。
+            seg = detail[m.end():end]
+            own = (seg.split("\n", 1)[1] if "\n" in seg else seg).strip() or m.group(0)
+            if await finish_sub(parent, m.group(1), m.group(2) == "✅", own):
                 done = True
         return done
     sub = SUB_RE.match(label)

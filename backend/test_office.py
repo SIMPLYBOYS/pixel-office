@@ -906,6 +906,13 @@ def standup_meeting() -> None:
             left = [n for lst in main.sub_active.values() for n in lst]
             assert len(left) == 1, f"await 該只收掉 ✅ 那一張，實際剩 {left}"
 
+            # 每張卡只放【自己那一段】。整包塞進去的話三個人的卡片會一模一樣，而且開頭是
+            # 「背景子 agent bg-1 […]：✅ 已完成」這種收件標頭——那是給主持人看的格式，
+            # 不是那個人的意見。實測踩過：老徐的卡片上是三人份的原始輸出。
+            closed = next(n for n in open_now if n not in left)
+            rep = main.last_report[closed]["report"]
+            assert rep == "我的意見", f"卡片該只放自己那段，實際是 {rep!r}"
+
             # 而且要【一邊一個】：長桌兩側各三個位子，照 a1,a2,a3 順序填的話兩個人會擠在
             # 同一側、對面空著，看起來像在罰站而不是在談事情。
             sides = {s[len("meet_"):][0] for s in spots}
