@@ -1195,8 +1195,7 @@ async def office_event(ev: dict):
             card = last_report.get(aid)
             if card and label != "ok" and ev.get("detail"):
                 card["report"] = card["report"] or ev["detail"]
-        pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
-        approval_src.pop(aid, None)
+        clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
             reading.discard(aid)
@@ -1230,8 +1229,14 @@ def office_report(aid: str):
     if not card:
         return {"ok": False, "error": "這位員工還沒有工作紀錄"}
     name = agents[aid].name if aid in agents else aid
+    left = None
+    if aid in approval_at:   # 剩餘秒數在橋算：瀏覽器的時鐘跟橋不一定同步，倒數基準只能有一份
+        total = approval_meta.get(aid, {}).get("timeout_s", 300)
+        left = max(0, int(total - (time.time() - approval_at[aid])))
     return {"ok": True, "agent": aid, "name": name, **card,
             "approval": pending_approval.get(aid, ""),
+            "approval_meta": approval_meta.get(aid),
+            "approval_left": left,
             "approval_from": approval_from(aid),  # 非空＝要回該平台核准，外殼不給按鈕
             "timeline": card["events"],  # Unity ReportViewer 相容：最新卡的事件串
             "history": [with_subcards(t) for t in history.get(aid, [])]}
@@ -1263,6 +1268,30 @@ APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot
 RESUME_NUDGE_PREFIX = "[系統] 先前因暫時性錯誤"            # core.go resumeNudge：斷點續跑的系統提示
 PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
 pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell 顯示核准/駁回按鈕）
+# 審批卡是 approval.go 的固定樣板——收卡時就解析成結構化欄位，外殼直接排版面（工具一顆
+# chip、參數整段折行、任務 ID 降級成小字、逾時做成倒數），不用靠 markdown 碰運氣。
+# 解析不了（樣板改版、舊狀態檔復原的卡）就退回原文渲染——結構化是加分，不是門檻。
+APPROVAL_RE = re.compile(r"• 工具: `([^`]+)`\n• 參數: `?(.*?)`?\n任務 ID: `([^`]+)`", re.S)
+APPROVAL_TIMEOUT_RE = re.compile(r"(\d+)\s*分鐘內無響應")
+approval_meta: dict[str, dict] = {}   # npc id -> {tool, params, task_id, timeout_s}
+approval_at: dict[str, float] = {}    # npc id -> 收卡的牆鐘時間（倒數的起點）
+
+
+def parse_approval(text: str) -> dict | None:
+    m = APPROVAL_RE.search(text)
+    if not m:
+        return None
+    t = APPROVAL_TIMEOUT_RE.search(text)
+    return {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
+            "timeout_s": int(t.group(1)) * 60 if t else 300}
+
+
+def clear_approval(aid: str) -> None:
+    """收審批卡（四份狀態一起收——漏一份就是下一個「卡收了倒數還在跑」的 bug）。"""
+    pending_approval.pop(aid, None)
+    approval_src.pop(aid, None)
+    approval_meta.pop(aid, None)
+    approval_at.pop(aid, None)
 pending_note: dict[str, str] = {}     # npc id -> 等下一張任務卡開出來才掛上去的「老闆交辦」
 # npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
 # cogito 的審批是 ResolveByChannel 按頻道解析的，而這裡的 approve 一律送往 office:pXX，
@@ -1308,6 +1337,9 @@ async def office_chat(ev: dict):
     if text.startswith(APPROVAL_PREFIX):
         pending_approval[aid] = text
         approval_src[aid] = ev.get("agent", "")
+        if meta := parse_approval(text):
+            approval_meta[aid] = meta
+        approval_at[aid] = time.time()
         # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
         busy.add(aid)
         work_last[aid] = time.monotonic()
@@ -1721,8 +1753,7 @@ async def office_dispatch(d: dict):
             if verb == "/stop" and aid in pending_approval:
                 await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
-                pending_approval.pop(aid, None)
-                approval_src.pop(aid, None)
+                clear_approval(aid)
                 log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
             r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": text},
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
@@ -1736,8 +1767,7 @@ async def office_dispatch(d: dict):
         log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
         await bubble(aid, "⚠ 中斷")
     elif verb in ("approve", "reject"):
-        pending_approval.pop(aid, None)  # cogito 確認收到才收卡
-        approval_src.pop(aid, None)
+        clear_approval(aid)  # cogito 確認收到才收卡
         notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
         await bubble(aid, "✓ 放行" if verb == "approve" else "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")
@@ -1911,7 +1941,8 @@ def save_state() -> None:
     _dirty = False
     data = {"history": {a: list(cards) for a, cards in history.items()},
             "conv_npc": conv_npc, "pending_approval": pending_approval,
-            "approval_src": approval_src}
+            "approval_src": approval_src,
+            "approval_meta": approval_meta, "approval_at": approval_at}
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -1939,6 +1970,8 @@ def load_state() -> None:
     conv_npc.update(data.get("conv_npc", {}))
     pending_approval.update(data.get("pending_approval", {}))
     approval_src.update(data.get("approval_src", {}))
+    approval_meta.update(data.get("approval_meta", {}))
+    approval_at.update(data.get("approval_at", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。

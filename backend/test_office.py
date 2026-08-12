@@ -273,7 +273,9 @@ def run() -> None:
             # /office/chat：進度類濾掉、審批卡設 pending + 泡泡、一般訊息進時間軸
             assert c.post("/office/chat", json={"agent": "office:p07",
                           "text": "🛠️ *正在執行工具*：`bash`"}).json()["ok"]
-            appr = "⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `bash`\n任務 ID: `T1`"
+            appr = ("⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `bash`\n"
+                    "• 參數: `{\"command\":\"rm -rf /tmp/x\"}`\n任務 ID: `T1`\n"
+                    "👉 直接回復 `approve` / `reject` 即可。5 分鐘內無響應將自動拒絕。")
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
             # 「門口有人」的判斷要看【現在誰在等審批】，不是查 occupied——那張表從不釋放，
             # 只要有人曾經走到門口再也沒移動過，後面的人就永遠被幽靈擋住（實際踩到）。
@@ -293,6 +295,13 @@ def run() -> None:
             assert "p07" in main.busy  # 等審批＝工作中，生活迴圈不得插隊蓋掉罰站走位
             r = c.get("/office/report/p07").json()
             assert r["approval"].startswith("⚠️ *高危操作審批請求*")
+            # 結構化欄位：收卡時就拆好（工具/參數/任務 ID/逾時），外殼直接排版面不靠 markdown
+            m = r["approval_meta"]
+            assert m and (m["tool"], m["task_id"], m["timeout_s"]) == ("bash", "T1", 300), m
+            assert m["params"] == '{"command":"rm -rf /tmp/x"}', m
+            assert r["approval_left"] is not None and 0 < r["approval_left"] <= 300
+            # 樣板對不上（改版、舊狀態檔）→ 解析器回 None，外殼退回原文渲染——結構化是加分不是門檻
+            assert main.parse_approval("⚠️ *高危操作審批請求*\n• 工具: `bash`\n任務 ID: `T0`") is None
             # 名冊要看得出「誰在等你決定」（提示音之外的視覺線索）
             assert c.get("/agents").json()["p07"]["approval"] is True
             tl = [e["text"] for e in r["timeline"]]

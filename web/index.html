@@ -276,6 +276,17 @@
   .empty { color: var(--dim); padding: 40px 16px; text-align: center; }
   .appr { background: #2b2417; border: 1px solid #6d5a2a; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
   .appr .tx { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  /* 結構化審批卡：標題列（警示＋工具 chip＋倒數）→ 參數 → 任務 ID → 按鈕。
+     每一欄各司其職，要簽名的人掃一眼就知道「誰、要做什麼、還剩多久」——
+     不再是一坨 markdown 原文靠運氣排版。 */
+  .appr .ahead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .appr .ahead b { font-size: 13px; }
+  .appr .tool { font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: #201a10;
+                color: #e8c454; border: 1px solid #6d5a2a; border-radius: 5px; padding: 2px 8px; }
+  .appr .left { margin-left: auto; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .appr .left.urgent { color: #e07070; font-weight: 600; }
+  .appr pre.code { margin: 0; }
+  .appr .tid { font-size: 11px; color: var(--dim); margin-top: 6px; word-break: break-all; }
   .appr .btns { margin-top: 8px; display: flex; gap: 8px; }
   .appr button { border: 0; border-radius: 6px; padding: 5px 16px; font: inherit; cursor: pointer; }
   .appr .btns.hint { color: var(--dim); font-size: 12px; }
@@ -1584,18 +1595,56 @@ async function feed() {
     if (r.approval) {
       card.style.display = 'block';
       card.className = 'appr';
-      card.innerHTML = `<div class="tx"></div>` + (r.approval_from
+      const btns = r.approval_from
         // 來自 Slack/TG 的審批只能回原平台按——這裡按了 cogito 也解不開（審批按頻道解析）
         ? `<div class="btns hint">↩︎ 這張審批來自 ${esc(r.approval_from)}，請回 ${esc(r.approval_from)} 回覆 approve / reject</div>`
         : `<div class="btns"><button class="yes" onclick="dispatch('approve')">核准</button>
-        <button class="no" onclick="dispatch('reject')">駁回</button></div>`);
-      renderBody(card.querySelector('.tx'), r.approval, false);
-    } else { card.style.display = 'none'; }
+        <button class="no" onclick="dispatch('reject')">駁回</button></div>`;
+      const m = r.approval_meta;
+      if (m) {
+        // 結構化版面：橋已把 approval.go 的樣板拆好欄位，這裡只負責排，不再靠 markdown
+        card.innerHTML = `<div class="ahead"><b>⚠️ 高危操作審批</b><span class="tool">${esc(m.tool)}</span>`
+          + `<span class="left" id="apprLeft"></span></div>`
+          + `<pre class="code wrap"><code>${esc(apprParams(m.params))}</code></pre>`
+          + `<div class="tid">任務 ID：${esc(m.task_id)}</div>` + btns;
+        apprDeadline = r.approval_left == null ? null : Date.now() + r.approval_left * 1000;
+        tickAppr();
+      } else {
+        // 解析不了（樣板改版、舊狀態復原）：退回原文渲染——看得到永遠優先於排得漂亮
+        card.innerHTML = `<div class="tx"></div>` + btns;
+        renderBody(card.querySelector('.tx'), r.approval, false);
+        apprDeadline = null;
+      }
+    } else { card.style.display = 'none'; apprDeadline = null; }
     keepBottom();   // 必須在審批卡渲染【之後】：它會把 feed 擠短，先貼底等於沒貼
   } catch { /* 後端暫時斷線：下輪再試 */ }
 }
 
 const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// 審批卡的參數：多半是 {"command":"…"} 這種單鍵 JSON——直接給指令本體，包一層 JSON
+// 對簽名的人只是雜訊。其他形狀就縮排排開；連 JSON 都不是（被截斷等）就原樣顯示。
+function apprParams(p) {
+  try {
+    const o = JSON.parse(p);
+    if (o && typeof o === 'object' && typeof o.command === 'string' && Object.keys(o).length === 1)
+      return '$ ' + o.command;
+    return JSON.stringify(o, null, 2);
+  } catch { return p; }
+}
+
+// 倒數：基準秒數由橋算（兩邊時鐘不同步，基準只能有一份），瀏覽器只負責往下數。
+// 數到 0 不收卡——收卡的訊號是 cogito 的自動拒絕訊息，倒數只是給人看的預告。
+let apprDeadline = null;
+function tickAppr() {
+  const el = document.getElementById('apprLeft');
+  if (!el || apprDeadline == null) return;
+  const s = Math.max(0, Math.round((apprDeadline - Date.now()) / 1000));
+  el.textContent = s > 0 ? `⏳ ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} 後自動拒絕`
+                         : '⏳ 已逾時，等待自動拒絕';
+  el.classList.toggle('urgent', s > 0 && s < 60);
+}
+setInterval(tickAppr, 1000);
 
 // 畫布聯動：WebGL 內點 NPC → 右欄切到該員工（同源 iframe，來源與格式都驗過才收）
 window.addEventListener('message', e => {
