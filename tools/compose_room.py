@@ -35,9 +35,6 @@ LAYOUT = f"{ROOT}/tools/west_layout.json"
 OUT = f"{ROOT}/limezu/_extracted/West"
 INSTALL = f"{ROOT}/unity/Assets/Sprites/LimeZu/Design"
 CELL = 16
-# 立體牆面內部那幾條深藍線的間距（px）。8＝16px 的直牆分成兩條 7px 的白帶，剛好是 LimeZu
-# 官方 Gym_2 直牆剖面 N+WWWWW+N 的寬度。調小線會變密（5 看起來像影線），調大會回到色塊。
-WALL_PITCH = 8
 
 
 # ── PNG ────────────────────────────────────────────────────────────────────
@@ -189,61 +186,71 @@ def main():
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
 
-    # 立體牆面（'='）：牆的【厚度方向】每 WALL_PITCH 個像素一條深藍，中間留白——就是把
-    # LimeZu 的頂面條 N+W…W+N 一直疊下去（相鄰兩條共用中間那條深藍，所以週期＝一條線
-    # 加上一段白，不含另一端的線）。
-    # 只在頭尾收兩條線的話，牆是一大片白，讀不出厚度；有了內部的線才看得出「這是一道牆」。
+    # 牆（'='）＝一條【線】，不是一塊填滿的帶子。這是照辦公區底圖 bg_base 自己的畫法量的：
+    #   橫牆 N+WWWW+N  = 6px  （它的 y=160–165 那道）
+    #   直牆 N+WWWWW+N = 7px  （它的 x=57–63 那道）
+    # 跟 LimeZu 官方 Gym_2 完全一致。線以外就是地板，兩側房間的地板直接接到線上——
+    # 兩區用同一種畫法，牆才會是同一種東西，而不是「西邊那半的牆長得不一樣」。
     #
-    # 線要跟牆【平行】：橫牆的線是橫的（往厚度方向疊），直牆的線是直的。所以先判斷每一格
-    # 屬於橫牆還是直牆——左右有牆＝橫牆，否則直牆。轉角那格算橫牆，橫向那段本來就跨到底，
-    # 直牆從它下面接上。
+    # 一格是 16px，線只有 6–7px，所以線畫在格子的哪個位置要決定：
+    #   一側是房間   → 貼著房間那一側，另一側整片清掉（那是建築物外面，不該有地板）
+    #   兩側都是房間 → 置中（室內隔間，兩邊都要看得到它）
     #
-    # ⚠ 相位用【整段的起點】算，不是格子的起點。每格各自從 0 起算的話，兩格厚的牆在接縫
-    #   那裡會錯開半條線。span() 就是為了找那個起點。
-    horiz = lambda r, c: at(r, c - 1) == "=" or at(r, c + 1) == "="
-    same = lambda r, c, h: at(r, c) == "=" and horiz(r, c) == h
+    # ⚠ 位置要【整段】一致，不能逐格決定。大門立面是兩列厚的，逐格算的話上下各畫一條、
+    #   中間空掉，變成一個空心的帶子。所以先把同方向且相連的格子收成一段（flood fill），
+    #   再決定這一段的線畫在哪。
+    # ⚠ 分段要用【真正的地圖】算，墊底那一欄要排除在外。它只是貼在辦公區底下的複製品，
+    #   但它在最東欄右邊也是牆——照單全收的話，東外牆會因為「右邊有牆」被判成橫牆，
+    #   於是整片黏成一段（實測：列0–4 與列7–16 各黏成一大塊，線就畫到不該去的地方）。
+    CW0 = CW - UNDERLAP
+    atw = lambda r, c: west[r][c] if 0 <= r < CH and 0 <= c < CW0 else "."
+    horiz = lambda r, c: atw(r, c - 1) == "=" or atw(r, c + 1) == "="
+    same = lambda r, c, h: atw(r, c) == "=" and horiz(r, c) == h
+    # 東緣【不是】建築物的邊——辦公區就接在那一欄外面。所以往東多算一格是房間，否則東外牆
+    # 會朝著辦公區把自己那一側清成透明，接縫上就多一條黑縫。其餘三邊才是真的建築物外緣。
+    room = lambda r, c: 0 <= r < CH and 0 <= c <= CW0 and atw(r, c) not in "#="
 
-    def span(r, c, dr, dc, h):
-        """這格所屬的牆在 (dr,dc) 方向上：往回幾格、整段共幾格"""
-        a = b = 0
-        while same(r - (a + 1) * dr, c - (a + 1) * dc, h): a += 1
-        while same(r + (b + 1) * dr, c + (b + 1) * dc, h): b += 1
-        return a, a + b + 1
+    walls = [(r, c) for r in range(CH) for c in range(CW0) if west[r][c] == "="]
+    seen = set()
+    for start in walls:
+        if start in seen:
+            continue
+        h = horiz(*start)                              # 橫牆的線是橫的，直牆的線是直的
+        comp, stack = [], [start]
+        seen.add(start)
+        while stack:
+            r, c = stack.pop()
+            comp.append((r, c))
+            for nb in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if nb not in seen and same(*nb, h):
+                    seen.add(nb); stack.append(nb)
 
-    def striped(p, p0, T):
-        """p 這條線是深藍還是白。末端強制收深藍，但太靠近就不再多畫一條（免得兩條黏在一起）"""
-        return (wall_edge if ((p - p0) % WALL_PITCH == 0 and p0 + T - 1 - p >= 2) or p == p0 + T - 1
-                else wall_top)
+        d = (1, 0) if h else (0, 1)                    # 厚度方向
+        proj = lambda rc: rc[0] * d[0] + rc[1] * d[1]
+        p0 = min(map(proj, comp)) * CELL
+        T = (max(map(proj, comp)) - min(map(proj, comp)) + 1) * CELL
+        thick = 6 if h else 7
+        neg = any(room(r - d[0], c - d[1]) for r, c in comp)
+        pos = any(room(r + d[0], c + d[1]) for r, c in comp)
+        if not neg and not pos:
+            continue                                   # 整段在建築物外面，什麼都不畫
+        off = (T - thick) // 2 if neg and pos else (0 if neg else T - thick)
 
-    walls = [(r, c) for r in range(CH) for c in range(CW) if west[r][c] == "="]
-    for r, c in walls:
-        x, y = c * CELL, r * CELL
-        if horiz(r, c):
-            a, n = span(r, c, 1, 0, True)
-            y0, T = (r - a) * CELL, n * CELL
+        for r, c in comp:
+            x, y = c * CELL, r * CELL
             for j in range(CELL):
-                col = striped(y + j, y0, T)
                 for i in range(CELL):
-                    canvas[y + j][x + i] = col
-        else:
-            a, n = span(r, c, 0, 1, False)
-            x0, T = (c - a) * CELL, n * CELL
-            for i in range(CELL):
-                col = striped(x + i, x0, T)
-                for j in range(CELL):
-                    canvas[y + j][x + i] = col
-    # 收邊：牆與非牆的交界一律一條深藍。橫牆的上下緣、直牆的左右緣上面已經收過（冪等），
-    # 這一趟真正補的是【段的兩端】——例如大門立面被門切開的那兩個斷面。
-    for r, c in walls:
-        x, y = c * CELL, r * CELL
-        if at(r - 1, c) != "=":
-            for i in range(CELL): canvas[y][x + i] = wall_edge
-        if at(r + 1, c) != "=":
-            for i in range(CELL): canvas[y + CELL - 1][x + i] = wall_edge
-        if at(r, c - 1) != "=":
-            for j in range(CELL): canvas[y + j][x] = wall_edge
-        if at(r, c + 1) != "=":
-            for j in range(CELL): canvas[y + j][x + CELL - 1] = wall_edge
+                    k = (y + j if h else x + i) - p0 - off
+                    if 0 <= k < thick:
+                        canvas[y + j][x + i] = wall_edge if k in (0, thick - 1) else wall_top
+                    elif not (neg if k < 0 else pos):
+                        canvas[y + j][x + i] = (0, 0, 0, 0)   # 線外面沒有房間＝建築物外面
+
+    # 墊底欄：把最東欄整欄複製過去。橫牆沿著 x 是均勻的，複製就等於把線延長到接縫底下，
+    # 剛好補上辦公區底圖在那裡的破洞；它由辦公區蓋在上面，只有破洞處會露出來。
+    for y in range(H):
+        for i in range(UNDERLAP):
+            canvas[y][(CW0 + i) * CELL:(CW0 + i + 1) * CELL] = canvas[y][(CW0 - 1) * CELL:CW0 * CELL]
     write_png(f"{OUT}/west_bg.png", canvas)
 
     # ── 辦公區底圖：切掉它西緣那截被裁斷的牆 ──────────────────────────────
