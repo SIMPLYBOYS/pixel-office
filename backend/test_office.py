@@ -20,13 +20,16 @@ def recv(ws, aid: str | None = None) -> dict:
     先前每則都嚴格比對「下一則訊息」，測試一慢就撞上去，變成間歇性失敗（實際踩到：掏手機
     那段改成等抵達之後才擺，多了往返，五次會紅兩次）。間歇性失敗比穩定失敗更糟：它會訓練
     人忽略紅燈。"""
-    if aid is None:
-        return json.loads(ws.receive_text())
-    for _ in range(40):
+    for _ in range(60):
         cmd = json.loads(ws.receive_text())
-        if cmd.get("agent_id") == aid:
+        # 鏡頭指令（focus）不是對某個 NPC 的投影，是對【相機】下的——一律跳過。
+        # 它會插在任何位置（出錯時鏡頭先過去、再冒泡），拿它去比對「下一則」必然錯。
+        if cmd.get("action") == "focus":
+            continue
+        if aid is None or cmd.get("agent_id") == aid:
             return cmd
-    raise AssertionError(f"等不到 {aid} 的指令（都是別人的）")
+        # 帶 aid 時才會走到這裡：跳過別人的指令再繼續等
+    raise AssertionError(f"等不到{'指令' if aid is None else aid + ' 的指令'}（都是別人的或鏡頭指令）")
 
 
 def post(c, **ev) -> dict:
@@ -370,6 +373,7 @@ def run() -> None:
     standup_meeting()
     meeting_progress()
     board()
+    camera()
     sub_release_fallback()
     turn_in_stream()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
@@ -849,6 +853,50 @@ def board() -> None:
             (wd / "board-multitenant.json").rename(wd / "board.0811-130722.json")
             assert main.board_file() is None, "封存的舊板被當成現行板了"
     main.CHANNELS_DIR = None
+
+
+def camera() -> None:
+    """鏡頭跟事件走：每一級都要對得上【真實事件源】，不為了讓相機有事做而降門檻。
+
+    規格出自團隊自己開的那場會（meeting-camera-follow.md）：地圖 29 格寬之後，
+    A（縮小看全景）vs B（跟事件走）選 B——細節是投影誠實的載體，縮四成的全景會糊掉細節。
+
+    ⚠ 這支【攔 send_cmd】而不是從 WS 收：收不到訊息時 receive_text 會永遠等下去，
+    測試就從紅字變成掛住——那比失敗更糟，CI 上看起來像當機。
+    """
+    shots, real = [], main.send_cmd
+
+    async def spy(cmd):
+        if cmd.get("action") == "focus":
+            shots.append(cmd)
+        return await real(cmd)
+
+    main.send_cmd = spy
+    try:
+        with TestClient(main.app) as c:
+            main.busy.clear(); main.occupied.clear(); main.pending_approval.clear()
+
+            # ② 需老闆決策：球在他手上，這是最高的非手動級
+            c.post("/office/chat", json={"agent": "p17",
+                                         "text": main.APPROVAL_PREFIX + "\n要不要刪這個目錄"})
+            assert shots and shots[-1]["level"] == main.CAM_DECISION \
+                and shots[-1]["agents"] == ["p17"], shots[-1:]
+
+            # ④ 失敗異常
+            shots.clear()
+            c.post("/office/event", json={"agent": "p17", "kind": "error",
+                                          "label": "bash", "detail": "炸了"})
+            assert shots and shots[-1]["level"] == main.CAM_FAILURE \
+                and shots[-1]["agents"] == ["p17"], shots[-1:]
+
+            # 看板沒有身體，框不到它——送過去 Unity 查不到 agent_id，整包落空
+            shots.clear()
+            asyncio.run(main.focus([main.KANBAN, "p17"], main.CAM_MEETING))
+            assert shots[-1]["agents"] == ["p17"], f"看板被當成可以框住的人：{shots[-1]}"
+    finally:
+        main.send_cmd = real
+        main.pending_approval.clear()
+        main.busy.clear()
 
 
 def standup_meeting() -> None:

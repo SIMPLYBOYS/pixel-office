@@ -369,6 +369,21 @@ def say(aid: str, text: str) -> dict:
     return {"agent_id": aid, "action": "say", "channel": "public", "text": text}
 
 
+# 相機優先級階梯（對齊 Unity 的 CameraDirector）。每一級都對得上真實事件源——
+# 刻意不為了「讓相機有事做」而降門檻：一般工具呼叫、學到記憶【不觸發移動】。
+CAM_DECISION, CAM_MEETING, CAM_FAILURE, CAM_DISPATCH = 2, 3, 4, 5
+
+
+async def focus(who: list[str], level: int) -> None:
+    """請鏡頭推近這幾個人。空清單＝回基態全景。
+
+    這裡只【提議】，接不接受是 Unity 那邊的紀律（冷卻窗、鎖定中不搶鏡）——
+    橋不該去追鏡頭現在在哪，那會變成兩份互相要同步的狀態。
+    """
+    live = [a for a in who if a in agents and a != KANBAN]   # 看板沒有身體，框不到
+    await send_cmd({"action": "focus", "agents": live, "level": level})
+
+
 async def pose(aid: str, action: str) -> None:
     """讓 NPC 擺一個姿勢（move_to 會自動清掉，不必手動還原）。
     只投影「站著不動看不出來」的狀態——等外部回應、長時間沒事做。"""
@@ -685,6 +700,7 @@ async def adjourn(parent: str) -> None:
             # 再也不會被生活迴圈碰到，也不會被挑去支援，等於變成一尊雕像。
             busy.discard(aid)
             sub_since.pop(aid, None)
+    await focus([], CAM_MEETING)   # 散會＝這段沒事了，鏡頭回基態全景
 
 
 def meet_spot() -> str:
@@ -785,6 +801,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
                     else WORK_DESK.get(npc))
             if spot:
                 await goto(npc, spot)
+            if spot in MEET_SPOTS:   # 開會＝多人聚集，鏡頭帶過去（同級裡多人贏單點）
+                await focus([a for a, sp in occupied.items() if sp in MEET_SPOTS], CAM_MEETING)
+            elif spot:
+                await focus([npc], CAM_DISPATCH)   # 剛派工
             if side := DESK_SIDE.get(npc):   # 主 agent 走到對方桌邊站著看
                 await goto(parent, side)
             await bubble(parent, "→ 交辦")
@@ -1078,6 +1098,9 @@ async def office_event(ev: dict):
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
 
+    if kind == "error":
+        await focus([aid], CAM_FAILURE)   # 出事了，鏡頭過去
+
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
 
@@ -1239,6 +1262,7 @@ async def office_chat(ev: dict):
         busy.add(aid)
         work_last[aid] = time.monotonic()
         notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
+        await focus([aid], CAM_DECISION)          # 也是鏡頭的最高非手動級：球在老闆手上
         # 走到老闆房門口站著等（門口真的有人在等就原地等，不擠）。
         # 球在別人手上：講電話，不是站著發呆——但姿勢必須【走到之後】才擺，否則被走路動畫蓋掉。
         #

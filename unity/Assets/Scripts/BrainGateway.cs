@@ -65,7 +65,18 @@ public class BrainGateway : MonoBehaviour
     void Dispatch(string json)
     {
         var cmd = JsonUtility.FromJson<AgentCommand>(json);
-        if (cmd == null || string.IsNullOrEmpty(cmd.agent_id)) return;
+        if (cmd == null) return;
+        // focus 是對【鏡頭】下的指令，沒有 agent_id——要在下面那個檢查之前接掉。
+        if (cmd.action == "focus")
+        {
+            var dir = Camera.main != null ? Camera.main.GetComponent<CameraDirector>() : null;
+            if (dir == null) return;   // 還沒 Build Room（相機上沒掛導演）就當沒這回事
+            var who = (cmd.agents ?? new string[0])
+                .Where(agents.ContainsKey).Select(k => agents[k].transform).ToArray();
+            dir.Focus(who, cmd.level > 0 ? cmd.level : CameraDirector.LvDispatch);
+            return;
+        }
+        if (string.IsNullOrEmpty(cmd.agent_id)) return;
         if (!agents.TryGetValue(cmd.agent_id, out var npc))
         {
             Debug.LogWarning($"BrainGateway: 未知 agent_id '{cmd.agent_id}'");

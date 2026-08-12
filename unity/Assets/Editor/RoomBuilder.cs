@@ -332,11 +332,18 @@ public static class RoomBuilder
 
         ValidateWaypoints();
 
-        // 相機對準房間中心
+        // 相機交給 CameraDirector：基態＝框住整張地圖，有夠份量的事件才推近。
+        // 【不要】在這裡擺到中心再設一個固定倍率——那正是「兩邊都只看得到一半」的病灶，
+        // 而且地圖一改寬度就得回來改一次。這裡只負責告訴導演地圖多大。
         var cam = Camera.main;
-        // 對準【整張】地圖中心（含西側新區），不是辦公區中心——先前寫死 8f 是原本 16 格寬的一半。
         if (cam != null)
-            cam.transform.position = new Vector3(Collision[0].Length / 2f, -Collision.Length / 2f, -10f);
+        {
+            var dir = cam.GetComponent<CameraDirector>() ?? cam.gameObject.AddComponent<CameraDirector>();
+            dir.mapMin = new Vector2(0f, -Collision.Length);
+            dir.mapMax = new Vector2(Collision[0].Length, 0f);
+            cam.transform.position = new Vector3((dir.mapMin.x + dir.mapMax.x) / 2f,
+                                                 (dir.mapMin.y + dir.mapMax.y) / 2f, -10f);
+        }
 
         UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(
             UnityEngine.SceneManagement.SceneManager.GetActiveScene());

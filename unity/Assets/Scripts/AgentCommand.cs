@@ -4,8 +4,12 @@
 public class AgentCommand
 {
     public string agent_id;
-    public string action;  // move_to / use / say（post_task 之後接任務板再加）
+    public string action;  // move_to / use / say / focus
     public string target;
     public string channel;
     public string text;
+    // focus 專用：要框住的人（空＝回基態全景）與這件事的優先級。
+    // 沒有 agent_id——它不是對某個 NPC 下的指令，是對【鏡頭】下的。
+    public string[] agents;
+    public int level;
 }
