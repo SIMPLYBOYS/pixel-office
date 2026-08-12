@@ -371,7 +371,7 @@ def say(aid: str, text: str) -> dict:
 
 # 相機優先級階梯（對齊 Unity 的 CameraDirector）。每一級都對得上真實事件源——
 # 刻意不為了「讓相機有事做」而降門檻：一般工具呼叫、學到記憶【不觸發移動】。
-CAM_DECISION, CAM_MEETING, CAM_FAILURE, CAM_DISPATCH = 2, 3, 4, 5
+CAM_MANUAL, CAM_DECISION, CAM_MEETING, CAM_FAILURE, CAM_DISPATCH = 1, 2, 3, 4, 5
 
 
 async def focus(who: list[str], level: int) -> None:
@@ -1244,6 +1244,22 @@ def approval_from(aid: str) -> str:
     """回傳審批來源平台的顯示名；空字串＝office 本地，可以直接按核准。"""
     plat = approval_src.get(aid, "office").split(":", 1)[0]
     return PLATFORM_NAME.get(plat, plat)
+
+
+@app.post("/office/focus")
+async def office_focus(ev: dict):
+    """老闆手動聚焦：點誰就把鏡頭鎖在誰身上，空的＝解鎖回基態。
+
+    這是優先級階梯的最高級，而且【只有他能解】——正在讀某個人的工作串時，
+    鏡頭被別的事件搶走比不動更煩，那叫打斷。鎖與解鎖的紀律在 Unity 的 CameraDirector，
+    橋只負責把「老闆現在在看誰」這件事送過去。
+    """
+    # 看板【是】一個 agent，但沒有身體——focus 會把它濾掉。所以這裡要一起判斷，
+    # 否則會回報 locked=true 而鏡頭其實框不到任何人，兩邊說法不一致。
+    aid = resolve_npc(ev.get("agent", "") or "")
+    who = [aid] if aid and aid != KANBAN else []
+    await focus(who, CAM_MANUAL)
+    return {"ok": True, "locked": bool(who)}
 
 
 @app.post("/office/chat")

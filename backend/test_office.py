@@ -893,6 +893,16 @@ def camera() -> None:
             shots.clear()
             asyncio.run(main.focus([main.KANBAN, "p17"], main.CAM_MEETING))
             assert shots[-1]["agents"] == ["p17"], f"看板被當成可以框住的人：{shots[-1]}"
+
+            # ① 手動聚焦：點誰就鎖誰，這是最高級。點看板（沒有身體）＝解鎖回基態。
+            shots.clear()
+            assert c.post("/office/focus", json={"agent": "p17"}).json()["locked"] is True
+            assert shots[-1] == {"action": "focus", "agents": ["p17"],
+                                 "level": main.CAM_MANUAL}, shots[-1]
+            shots.clear()
+            assert c.post("/office/focus", json={"agent": "kanban"}).json()["locked"] is False
+            assert shots[-1]["agents"] == [] and shots[-1]["level"] == main.CAM_MANUAL, \
+                f"解鎖也要用手動級送，否則鎖定中的鏡頭不接受：{shots[-1]}"
     finally:
         main.send_cmd = real
         main.pending_approval.clear()

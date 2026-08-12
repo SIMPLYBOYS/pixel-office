@@ -562,6 +562,13 @@ function updateComposer() {
 
 function pick(id) {
   selected = id;
+  // 手動聚焦：點誰就把鏡頭鎖在誰身上。這是優先級最高的一級，而且只有這裡能解——
+  // 你正在讀某個人的工作串時，鏡頭被別的事件搶走比不動更煩，那叫打斷。
+  // 看板沒有身體（框不到），點它就等於解鎖回基態全景。
+  fetch('/office/focus', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: id }),
+  }).catch(() => {});   // 鏡頭是錦上添花，連不上不該影響選人
   roster();
   updateComposer();
   // 順序有意義：上方三塊面板【先】定位，工作串最後畫。
