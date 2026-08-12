@@ -599,7 +599,13 @@ async function board(id) {
   // 那段時間任務板全空，使用者只能看著工作串捲、不知道還要等多久、誰還沒回。
   if (r.mode === 'meeting') {
     box.dataset.sig = '';   // 換回真板子時要能重畫
-    box.innerHTML = `<summary>🗂 任務板｜會議進行中　<span class="idle">${r.done}/${r.total} 已回</span>
+    // 全員交件、板子還沒出現＝主持人在寫逐字稿與規格。那段時間畫面上六個人坐在會議室
+    // 不動、卡片全是已完成，看起來像散會了沒走。狀態本身是真的，講出來就不會被誤讀。
+    // （3D 那邊表達不了：NPCSprite 的 action 只有一個插槽，送 phone 會蓋掉坐姿，人會站起來。）
+    const wrap = r.done === r.total
+      ? `<span class="idle">${r.done}/${r.total} 都交件了，主持人整理中</span>`
+      : `<span class="idle">${r.done}/${r.total} 已回</span>`;
+    box.innerHTML = `<summary>🗂 任務板｜會議進行中　${wrap}
         <span class="rl" title="重新載入">↻</span></summary>
       <div class="body"><div class="people"></div></div>`;
     box.querySelector('.rl').onclick = e => { e.preventDefault(); e.stopPropagation(); board(id); };
