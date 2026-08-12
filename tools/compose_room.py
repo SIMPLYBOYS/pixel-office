@@ -189,17 +189,22 @@ def main():
     # 改 LimeZu 素材本身會讓「腳本是唯一真相」破功（那份檔案不進 git，改了沒人知道），
     # 所以在這裡產一份補過的副本，跟著其他產物一起裝進 Design/。來源讀的是
     # _extracted/Office_Design_2，寫的是 OUT/，不會自己吃自己。
+    # 兩件事一起裁：往西橫出去的那截（x0–8），以及【往上戳出來的那一列】。辦公區的西牆
+    # 原本從列 6 起（它自己的設計在列 5 有開口），比西區的公司南牆高一列，白色牆面就有
+    # 一截孤零零戳在走廊上方——那正是看起來多餘的白邊。裁到列 7 就跟南牆同高，白色頂面
+    # 從西邊一路過來、在這裡轉南，接成一個 L 而不是斷成兩截。
     ob = [r[:] for r in read_png(BG_BASE)]
-    CUT_X, CUT_Y0, CUT_Y1, WALL_X = 9, 96, 102, 9   # 牆的左框在 x=9，往西全是多的
-    got = "".join("W" if min(ob[CUT_Y0 + 1][x][:3]) > 235 else "?" for x in range(CUT_X))
-    if got != "W" * CUT_X:
+    WALL_X, CUT_Y0, TOP_Y = 9, 96, 112               # 牆佔 x9–15；列6.00 裁到列7.00
+    got = "".join("W" if min(ob[CUT_Y0 + 1][x][:3]) > 235 else "?" for x in range(WALL_X))
+    if got != "W" * WALL_X:
         raise SystemExit(f"compose_room: bg_base 西緣不是預期的白頂（{got}）"
                          "——素材換版了，這段裁切的座標要重新量")
-    navy = ob[CUT_Y1][WALL_X]                        # 取牆自己的深藍，不寫死顏色
-    for y in range(CUT_Y0, CUT_Y1):
-        for x in range(CUT_X):
+    navy = ob[TOP_Y + 1][WALL_X]                     # 取牆自己的深藍，不寫死顏色
+    for y in range(CUT_Y0, TOP_Y):
+        for x in range(WALL_X + 7):                  # 只掃這道牆的寬度，別碰同一列右邊的隔間
             ob[y][x] = (0, 0, 0, 0)
-        ob[y][WALL_X] = navy                         # 補回左框，頂面才收得住
+    for x in range(WALL_X, WALL_X + 7):
+        ob[TOP_Y][x] = navy                          # 牆的上邊框移到列 7，頂面才收得住
     write_png(f"{OUT}/bg_base.png", ob)
 
     # ── 家具 ────────────────────────────────────────────────────────────
