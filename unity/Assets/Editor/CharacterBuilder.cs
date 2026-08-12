@@ -142,6 +142,11 @@ public static class CharacterBuilder
         anim.sitLeft = Load("sit_left");
         anim.phone = Load("phone");
         anim.sleep = Load("sleep");
+        anim.book = Load("book");
+        anim.giftUp = Load("gift_up");
+        anim.giftDown = Load("gift_down");
+        anim.giftRight = Load("gift_right");
+        anim.giftLeft = Load("gift_left");
 
         // 頭上泡泡
         var bubbleGo = new GameObject("Bubble");

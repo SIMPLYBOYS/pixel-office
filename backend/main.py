@@ -362,6 +362,15 @@ COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空�
 # 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
 DESK_SIDE = {"p17": "side_1", "p01": "side_2", "p07": "side_3",
              "p05": "side_4", "p12": "side_5", "p19": BOSS_DOOR}
+# 閱讀投影：連續讀檔/查資料 → 低頭看書。cogito 的工具名開頭就分得出讀寫，不必列舉全名。
+READ_RE = re.compile(r"^(read|grep|glob|list|search|cat|head|tail|find|fetch|browse|web|get_)", re.I)
+reading: set[str] = set()   # 正在「看書」的人——同狀態不重發指令（工具事件很密）
+SIT_AT = {"p19": "sit_left"}   # 放下書要坐回去的姿勢；其餘工位都是 sit_up（背對鏡頭入座）
+# 遞交投影：委派收件成功時，支援者【當場】面向站在自己桌邊的主 agent 把成果遞出去
+# （委派起手式就是主 agent 走到支援者桌邊的 DESK_SIDE，人本來就站在那）。方向＝
+# 從支援者工位看向那個站位：chair_1-3 的站位在東、chair_4/5 在西、老闆房門在西。
+GIFT_TOWARD = {"p05": "gift_left", "p12": "gift_left", "p19": "gift_left"}   # 其餘 gift_right
+GIFT_HOLD = 1.3   # 遞交停留秒數（10 幀 8fps 一輪 1.25s，演一輪整）；測試設 0
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
@@ -429,6 +438,7 @@ async def goto(aid: str, target: str) -> bool:
     global projection_offline
     if aid == KANBAN:   # 沒有身體的東西不會走路
         return False
+    reading.discard(aid)   # 走位＝放下書（Unity 端 move_to 也會清姿勢，兩邊狀態要一致）
     occupied[aid] = target
     ok = await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
     if not ok and not projection_offline:
@@ -747,6 +757,13 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
         sub_active.pop((parent, name), None)
     if npc is None:
         return False
+    # 交付戲：收件【成功】時，支援者面向站在自己桌邊的主 agent 把成果遞出去——
+    # 要在主 agent 動身回位【之前】演，先走人再遞是對著空氣遞。不用走位、不等抵達回報：
+    # 人本來就在對的位置上（委派起手式：主 agent 走到 DESK_SIDE、支援者坐自己工位）。
+    # 失敗不遞（沒有東西可交）；主持人（kanban）沒有身體，遞給空氣也免了。
+    if ok and parent != KANBAN and not in_meeting(parent):
+        await pose(npc, GIFT_TOWARD.get(npc, "gift_right"))
+        await asyncio.sleep(GIFT_HOLD)
     if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
         await goto(parent, desk)
     # 支援者也要回位子——但【開會中不散會】。
@@ -1109,6 +1126,20 @@ async def office_event(ev: dict):
         if desk := WORK_DESK.get(aid):
             await goto(aid, desk)
 
+    # 閱讀投影：讀類工具 → 低頭看書；換到非讀類工具（或出錯）→ 放下書坐回去。
+    # 只認主 agent 自己的事件（[Subagent:…] 前綴是別人的手，project_sub 沒接走的才會到這）。
+    if kind == "tool" and aid in busy and not SUB_RE.match(label):
+        if READ_RE.match(label):
+            if aid not in reading:
+                reading.add(aid)
+                await pose(aid, "book")
+        elif aid in reading:
+            reading.discard(aid)
+            await pose(aid, SIT_AT.get(aid, "sit_up"))
+    elif kind == "error" and aid in reading:
+        reading.discard(aid)
+        await pose(aid, SIT_AT.get(aid, "sit_up"))
+
     chatting = aid in chat_mode  # 這一輪是閒聊：不開卡、不走位、不冒任務泡
     if kind == "start":
         busy.add(aid)
@@ -1167,6 +1198,9 @@ async def office_event(ev: dict):
         pending_approval.pop(aid, None)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         approval_src.pop(aid, None)
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
+        if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
+            reading.discard(aid)
+            await pose(aid, SIT_AT.get(aid, "sit_up"))
         release_work(aid)
         if not chatting:
             notify("agent", aid, alert="done" if label == "ok" else "error")

@@ -67,6 +67,7 @@ def run() -> None:
     main.STATE_FILE = Path(main.__file__).parent / "office_state_test.json"
     main.STATE_FILE.unlink(missing_ok=True)
     main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
+    main.GIFT_HOLD = 0         # 遞交停留是演出節奏，合約只驗指令有沒有出
     main.WATCH_TICK = 0.2      # watchdog 巡快一點
     main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
     with TestClient(main.app) as c:
@@ -117,6 +118,18 @@ def run() -> None:
             post(c, agent="p17", kind="msg", label="TODO 共 3 處，已列清單")
             assert recv(ws)["text"] == "→ 回報"
 
+            # 閱讀投影：讀類工具 → 低頭看書；連續讀不重發；換非讀類 → 放下書坐回去
+            post(c, agent="p17", kind="tool", label="read_file", detail="a.md")
+            m = recv(ws)
+            assert (m["agent_id"], m["action"], m["target"]) == ("p17", "use", "book"), m
+            assert recv(ws)["text"] == "● read_file"
+            post(c, agent="p17", kind="tool", label="read_file", detail="b.md")
+            assert recv(ws)["text"] == "● read_file"   # 第二次讀：只有泡泡，沒有重複的姿勢指令
+            post(c, agent="p17", kind="tool", label="bash", detail="make test")
+            m = recv(ws)
+            assert (m["action"], m["target"]) == ("use", "sit_up"), m
+            assert recv(ws)["text"] == "● bash"
+
             # 委派上工：spawn code-reviewer → 小美（p01）起身入座 + 雙泡 + 掛起
             post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
                  detail='{"agent_type":"code-reviewer"}')
@@ -132,9 +145,13 @@ def run() -> None:
             m = recv(ws)
             assert (m["agent_id"], m["text"]) == ("p01", "● read_file")
 
-            # 委派收工：回報泡 + 釋放
+            # 委派收工：交付戲 → 回報泡 + 釋放。
+            # 收件【成功】的第一個指令是支援者的遞交姿勢——主 agent 從委派起就站在她
+            # 桌邊（side_2 在 chair_2 東側），她面東把成果遞出去，演完兩人才各自回位。
             post(c, agent="p17", kind="result", label="spawn_subagent:code-reviewer",
                  detail="LGTM，無阻塞問題")
+            m = recv(ws, "p01")
+            assert (m["action"], m["target"]) == ("use", "gift_right"), m
             # 交接完【兩個人都】回位子。先前只送主 agent 回去，支援者留在被派去的那個點——
             # 規劃類的人被派到白板前（走道上），就會一直杵在那裡（實際回報：小美常卡在走道）。
             assert recv(ws, "p17") == {"agent_id": "p17", "action": "move_to", "target": "chair_1"}

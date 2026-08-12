@@ -28,8 +28,14 @@ DIRS = [("right", 0), ("up", 6), ("left", 12), ("down", 18)]
 # 於是 sit_left 與 sit_right 變成同一個朝向，NPC 坐下必定背對桌子）。
 SITS = [("sit_right", 128, 0), ("sit_left", 128, 6)]
 # 其餘辦公室用得到的動作（列號同樣是量出來的；官方 GUIDE 標了 phone 的循環段是 4-9）：
-#   phone＝拿著手機低頭看（等外部回應）、sleep＝趴著（長時間沒事做）
-ACTIONS = [("phone", 192, 4), ("sleep", 96, 0)]
+#   phone＝拿著手機低頭看（等外部回應）、sleep＝趴著（長時間沒事做）、
+#   book＝低頭看書（連續讀檔/查資料的投影；y=224 列只有正面單向，GUIDE 標 1-6 循環）
+ACTIONS = [("phone", 192, 4), ("sleep", 96, 0), ("book", 224, 1)]
+# gift（遞交，y=320 列）：42 幀＝4 向 × 10 幀 + 2 幀禮盒 prop。方向順序【量出來的】——
+# 對每組首幀算臉像素的數量與左右偏移、跟 idle 四向的簽名比對：right(0)/up(10)/left(20)/down(30)，
+# 跟 idle/walk 的欄序一致。10 幀是完整的「遞出去」弧線，抽 6 幀會斷在一半。
+GIFTS = [("gift_right", 320, 0), ("gift_up", 320, 10),
+         ("gift_left", 320, 20), ("gift_down", 320, 30)]
 FW, FH, N = 16, 32, 6
 
 
@@ -52,6 +58,11 @@ def main():
                 count += 1
     for anim, y, col in SITS + ACTIONS:
         for i in range(N):
+            frame = crop(px, (col + i) * FW, y, FW, FH)
+            write_png(f"{out}/{prefix}_{anim}_{i}.png", frame)
+            count += 1
+    for anim, y, col in GIFTS:
+        for i in range(10):
             frame = crop(px, (col + i) * FW, y, FW, FH)
             write_png(f"{out}/{prefix}_{anim}_{i}.png", frame)
             count += 1

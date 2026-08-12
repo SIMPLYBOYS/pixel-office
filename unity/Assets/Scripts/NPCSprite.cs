@@ -7,6 +7,8 @@ public class NPCSprite : MonoBehaviour
     public Sprite[] walkDown, walkUp, walkRight, walkLeft;
     public Sprite[] sitRight, sitLeft;
     public Sprite[] phone, sleep;   // 等外部回應／長時間沒事做——都是「站著不動」看不出來的狀態
+    public Sprite[] book;           // 低頭看書：連續讀檔/查資料（素材只有正面單向）
+    public Sprite[] giftUp, giftDown, giftRight, giftLeft;  // 遞交成果（委派收件成功的交付戲）
     public float fps = 8f;
 
     SpriteRenderer sr;
@@ -41,6 +43,11 @@ public class NPCSprite : MonoBehaviour
                 "sit_right" => sitRight,
                 "phone" => phone,
                 "sleep" => sleep,
+                "book" => book,
+                "gift_up" => giftUp,
+                "gift_down" => giftDown,
+                "gift_right" => giftRight,
+                "gift_left" => giftLeft,
                 // 轉向：站著不動、只換朝向（走到同事桌邊要面對人，站白板前要面對板子）
                 "face_left" => idleLeft,
                 "face_right" => idleRight,
