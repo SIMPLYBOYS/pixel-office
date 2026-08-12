@@ -181,6 +181,27 @@ def main():
                 blit(canvas, shadow, x, y + CELL)
     write_png(f"{OUT}/west_bg.png", canvas)
 
+    # ── 辦公區底圖：切掉它西緣那截被裁斷的牆 ──────────────────────────────
+    # bg_base 原本是一張獨立的辦公室設計圖，第 6 列有一道【往西延伸】的牆，在圖的左緣
+    # 被裁掉。以前那裡就是畫面邊界，看不出來；西區蓋上去之後，那 10px 變成一截懸空在
+    # 走廊上方的白邊，而且比西區的南牆高一列——線就是在這裡對不齊的。
+    #
+    # 改 LimeZu 素材本身會讓「腳本是唯一真相」破功（那份檔案不進 git，改了沒人知道），
+    # 所以在這裡產一份補過的副本，跟著其他產物一起裝進 Design/。來源讀的是
+    # _extracted/Office_Design_2，寫的是 OUT/，不會自己吃自己。
+    ob = [r[:] for r in read_png(BG_BASE)]
+    CUT_X, CUT_Y0, CUT_Y1, WALL_X = 9, 96, 102, 9   # 牆的左框在 x=9，往西全是多的
+    got = "".join("W" if min(ob[CUT_Y0 + 1][x][:3]) > 235 else "?" for x in range(CUT_X))
+    if got != "W" * CUT_X:
+        raise SystemExit(f"compose_room: bg_base 西緣不是預期的白頂（{got}）"
+                         "——素材換版了，這段裁切的座標要重新量")
+    navy = ob[CUT_Y1][WALL_X]                        # 取牆自己的深藍，不寫死顏色
+    for y in range(CUT_Y0, CUT_Y1):
+        for x in range(CUT_X):
+            ob[y][x] = (0, 0, 0, 0)
+        ob[y][WALL_X] = navy                         # 補回左框，頂面才收得住
+    write_png(f"{OUT}/bg_base.png", ob)
+
     # ── 家具 ────────────────────────────────────────────────────────────
     tabletop = sub(sheet, 6 * CELL, 18 * CELL, 2 * CELL, CELL)
     tablelegs = sub(sheet, 6 * CELL, 19 * CELL, 2 * CELL, CELL)
