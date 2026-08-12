@@ -186,16 +186,49 @@ def main():
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
 
-    # 立體牆面（'='）：整段填滿牆頂的白，再沿著【牆與非牆的交界】收一條 1px 深藍。
-    # 這跟「畫一條線代表牆」差在哪：線只描得出邊界，描不出「這是一道有厚度的東西」。
-    # 填滿之後相鄰的牆自然黏成一體，轉角不必特別處理——沒有兩條線要對齊，就沒有對不齊。
+    # 立體牆面（'='）：牆的【厚度方向】每 5px 一條深藍，中間留白——就是把 LimeZu 的 6px
+    # 頂面條 N+WWWW+N 一直疊下去（相鄰兩條共用中間那條深藍，所以週期是 5 不是 6）。
+    # 只在頭尾收兩條線的話，牆是一大片白，讀不出厚度；有了內部的線才看得出「這是一道牆」。
     #
-    # 分兩趟：先全部填滿，再全部收邊。同一趟做的話，後畫的格子會把前一格剛收好的邊蓋掉。
+    # 線要跟牆【平行】：橫牆的線是橫的（往厚度方向疊），直牆的線是直的。所以先判斷每一格
+    # 屬於橫牆還是直牆——左右有牆＝橫牆，否則直牆。轉角那格算橫牆，橫向那段本來就跨到底，
+    # 直牆從它下面接上。
+    #
+    # ⚠ 相位用【整段的起點】算，不是格子的起點。每格各自從 0 起算的話，兩格厚的牆在接縫
+    #   那裡會錯開半條線。span() 就是為了找那個起點。
+    horiz = lambda r, c: at(r, c - 1) == "=" or at(r, c + 1) == "="
+    same = lambda r, c, h: at(r, c) == "=" and horiz(r, c) == h
+
+    def span(r, c, dr, dc, h):
+        """這格所屬的牆在 (dr,dc) 方向上：往回幾格、整段共幾格"""
+        a = b = 0
+        while same(r - (a + 1) * dr, c - (a + 1) * dc, h): a += 1
+        while same(r + (b + 1) * dr, c + (b + 1) * dc, h): b += 1
+        return a, a + b + 1
+
+    def striped(p, p0, T):
+        """p 這條線是深藍還是白。末端強制收深藍，但太靠近就不再多畫一條（免得兩條黏在一起）"""
+        return wall_edge if ((p - p0) % 5 == 0 and p0 + T - 1 - p >= 2) or p == p0 + T - 1 else wall_top
+
     walls = [(r, c) for r in range(CH) for c in range(CW) if west[r][c] == "="]
     for r, c in walls:
-        for j in range(CELL):
+        x, y = c * CELL, r * CELL
+        if horiz(r, c):
+            a, n = span(r, c, 1, 0, True)
+            y0, T = (r - a) * CELL, n * CELL
+            for j in range(CELL):
+                col = striped(y + j, y0, T)
+                for i in range(CELL):
+                    canvas[y + j][x + i] = col
+        else:
+            a, n = span(r, c, 0, 1, False)
+            x0, T = (c - a) * CELL, n * CELL
             for i in range(CELL):
-                canvas[r * CELL + j][c * CELL + i] = wall_top
+                col = striped(x + i, x0, T)
+                for j in range(CELL):
+                    canvas[y + j][x + i] = col
+    # 收邊：牆與非牆的交界一律一條深藍。橫牆的上下緣、直牆的左右緣上面已經收過（冪等），
+    # 這一趟真正補的是【段的兩端】——例如大門立面被門切開的那兩個斷面。
     for r, c in walls:
         x, y = c * CELL, r * CELL
         if at(r - 1, c) != "=":
@@ -246,12 +279,11 @@ def main():
     def widen(img, cells):
         """把桌面橫向拉寬到 cells 格：左右兩端保留原本的邊，中間那一格重複填。
         直接把整張圖並排會出現兩條桌腳／兩道邊，看起來像兩張桌子拼起來。"""
-        L, R = CELL // 2, len(img[0]) - CELL // 2
+        L = CELL // 2
         band = [row[L:L + 1] for row in img]
         need = cells * CELL - len(img[0])
         return [img[j][:L] + band[j] * need + img[j][L:] for j in range(len(img))]
 
-    mid = [tabletop[10][:]] * CELL
     top3, legs3 = widen(tabletop, 3), widen(tablelegs, 3)
     mid3 = [top3[10][:]] * CELL
     table = [r[:] for r in top3[:12]] + mid3 + [r[:] for r in top3[12:]] \
