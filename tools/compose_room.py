@@ -210,6 +210,10 @@ def main():
                 out.append(cur); cur = []
         return out + ([cur] if cur else [])
 
+    # 橫線先畫，並記住畫在哪幾格；直線【跳過】那幾格。轉角由橫線收頭——gym 的左上角就是
+    # 整片橫向頂面，直牆從它下面才開始。不跳過的話直線會從格子頂端起畫，在四個角各戳出
+    # 10px，變成交叉而不是接合，看起來就是「線沒有連起來」。
+    capped = set()
     for horiz in (True, False):
         lines = ([[(r, c) for c in range(CW)] for r in range(CH)] if horiz
                  else [[(r, c) for r in range(CH)] for c in range(CW)])
@@ -229,7 +233,8 @@ def main():
                 x, y = c * CELL, r * CELL
                 if horiz:
                     blit(canvas, wall_cap, x, y if inner < 0 else y + CELL - 6)
-                else:
+                    capped.add((r, c))
+                elif (r, c) not in capped:
                     blit(canvas, thin_v, (x if inner < 0 else x + CELL - 7), y)
     write_png(f"{OUT}/west_bg.png", canvas)
 
