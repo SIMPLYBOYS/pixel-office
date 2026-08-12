@@ -118,7 +118,7 @@ def read_west_map():
     body = re.search(r"static readonly string\[\] West\s*=\s*\{(.*?)\n    \};", src, re.S)
     if not body:
         raise SystemExit("compose_room: RoomBuilder.cs 裡找不到 West 地圖——改過欄位名就要同步這裡")
-    rows = re.findall(r'"([#.DT]+)"', body.group(1))
+    rows = re.findall(r'"([#.DT=]+)"', body.group(1))
     if len({len(r) for r in rows}) != 1:
         raise SystemExit(f"compose_room: West 各列不等寬 {[len(r) for r in rows]}")
     return rows
@@ -158,6 +158,11 @@ def main():
     wall_body = sub(bg, 4 * CELL, 6, CELL, CELL)       # 牆身（可重複）
     wall_foot = sub(bg, 4 * CELL, 31, CELL, 1)         # 牆的下緣深藍線
     shadow = sub(bg, 4 * CELL, 32, CELL, 7)            # 牆腳陰影
+    # 細牆（'='）只有那條線，沒有牆面。橫的就是 wall_cap 本身（6px）；直的取辦公區西牆的
+    # 剖面（深藍+白5+深藍＝7px）。兩者跟 LimeZu 官方 Gym_2 量出來的完全一致，不是自己調的。
+    thin_v = sub(bg, 9, 105, 7, CELL)
+    if not all(min(thin_v[j][1][:3]) > 235 for j in range(CELL)):
+        raise SystemExit("compose_room: 直向細牆的取樣點不是白牆面——bg_base 換版了，要重新量")
 
     canvas = [[(0, 0, 0, 0)] * W for _ in range(H)]
     for r in range(CH):
@@ -179,6 +184,53 @@ def main():
             if at(r + 1, c) != "#":                    # 最下緣才有暗線與陰影
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
+
+    # 細牆：整段一起畫，不逐格判斷。逐格的話轉角會缺一塊——角落那格的四鄰都是牆，
+    # 沒有任何一邊「面向房間」，線就會在轉角斷開。整段來畫，段本身就跨到底，角落自然收得住。
+    #
+    # 線畫在【面向房間的那一邊】：牆外那半留著地板底色不動。這樣看起來就是「房間到這條線
+    # 為止」，而不是「這裡有一格看起來能走卻走不進去的地」——線外面是建築物外面，本來就
+    # 不該走進去。
+    # 圖外【不算】房間。at() 對界外回 "."（厚牆那段靠這個在地圖邊緣也長出頂面），沿用的話
+    # 最外那列會判成「外面是房間」而在建築物最外緣多畫一條線。
+    room = lambda r, c: 0 <= r < CH and 0 <= c < CW and at(r, c) not in "#="
+    for r in range(CH):                                # 細牆先清掉底色：線的外面是建築物外面，
+        for c in range(CW):                            # 不該還鋪著地板——那會讀成「牆畫在地上」
+            if west[r][c] == "=":
+                for j in range(CELL):
+                    for i in range(CELL):
+                        canvas[r * CELL + j][c * CELL + i] = (0, 0, 0, 0)
+
+    def runs(cells):
+        out, cur = [], []
+        for k in cells:
+            if at(*k) == "=":
+                cur.append(k)
+            elif cur:
+                out.append(cur); cur = []
+        return out + ([cur] if cur else [])
+
+    for horiz in (True, False):
+        lines = ([[(r, c) for c in range(CW)] for r in range(CH)] if horiz
+                 else [[(r, c) for r in range(CH)] for c in range(CW)])
+        for run in (seg for ln in lines for seg in runs(ln)):
+            # 段的哪一側是房間？兩側各數一次，多的那邊就是室內；都沒有＝這段在建築物外面
+            d = (1, 0) if horiz else (0, 1)
+            side = [sum(room(r + s * d[0], c + s * d[1]) for r, c in run) for s in (-1, 1)]
+            if side[0] == side[1]:
+                continue                               # 含 0-0：外緣那列什麼都不畫
+            inner = -1 if side[0] > side[1] else 1
+            # 段可能比房間長（外牆會一路延伸到建築物角落）。只畫【真的貼著房間】的那幾格，
+            # 再往兩端各多一格把轉角接起來——多的那格正好是另一個方向的線經過的地方。
+            hit = [room(r + inner * d[0], c + inner * d[1]) for r, c in run]
+            for i, (r, c) in enumerate(run):
+                if not (hit[i] or (i and hit[i - 1]) or (i + 1 < len(hit) and hit[i + 1])):
+                    continue
+                x, y = c * CELL, r * CELL
+                if horiz:
+                    blit(canvas, wall_cap, x, y if inner < 0 else y + CELL - 6)
+                else:
+                    blit(canvas, thin_v, (x if inner < 0 else x + CELL - 7), y)
     write_png(f"{OUT}/west_bg.png", canvas)
 
     # ── 辦公區底圖：切掉它西緣那截被裁斷的牆 ──────────────────────────────
@@ -349,7 +401,7 @@ def main():
             ov = min(it["x"] + it["w"], (cx + 1) * CELL) - max(it["x"], cx * CELL)
             if ov <= CELL * 0.45 or not (0 <= cy < CH and 0 <= cx < CW - UNDERLAP):
                 continue
-            blocked = west[cy][cx] in "#T"
+            blocked = west[cy][cx] in "#T="       # '=' 是細牆，牆薄不代表走得過去
             if it["name"] in seats and blocked:
                 bad.append(f"{it['name']} 的座位 ({cx},{cy}) 被標成擋路，人坐不進去")
             elif it["name"] not in seats and not blocked:
