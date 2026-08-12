@@ -65,11 +65,13 @@ public static class CharacterBuilder
         if (old != null) Object.DestroyImmediate(old);
 
         string folder = $"{CharRoot}/{ReceptionPrefix}";
-        var frames = AssetDatabase.FindAssets("t:Sprite", new[] { folder })
+        var all = AssetDatabase.FindAssets("t:Sprite", new[] { folder })
             .Select(g => AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(g)))
-            .Where(s => s != null && s.name.Contains("_idle_down_"))
-            .OrderBy(s => s.name).ToArray();
-        if (frames.Length == 0)
+            .Where(s => s != null).ToArray();
+        Sprite[] Frames(string key) => all.Where(s => s.name.Contains(key))
+                                          .OrderBy(s => s.name).ToArray();
+        var idle = Frames("_idle_down_");
+        if (idle.Length == 0)
         {
             Debug.LogError($"CharacterBuilder: {folder} 沒有幀——先跑 tools/make_character.py 10，" +
                            "再把 limezu/_extracted/characters/p10 複製到 " + CharRoot);
@@ -80,7 +82,8 @@ public static class CharacterBuilder
         var sr = go.AddComponent<SpriteRenderer>();
         sr.spriteSortPoint = SpriteSortPoint.Pivot;   // pivot=腳底 → 櫃檯(-5)畫在她(-3.06)前面
         var loop = go.AddComponent<SpriteLoop>();
-        loop.frames = frames;
+        loop.frames = idle;
+        loop.extra = Frames("_phone_");   // 偶爾接電話（純隨機的裝飾，見 SpriteLoop 註解）
         go.transform.position = ReceptionPost;
     }
 
