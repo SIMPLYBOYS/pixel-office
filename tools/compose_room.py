@@ -35,6 +35,9 @@ LAYOUT = f"{ROOT}/tools/west_layout.json"
 OUT = f"{ROOT}/limezu/_extracted/West"
 INSTALL = f"{ROOT}/unity/Assets/Sprites/LimeZu/Design"
 CELL = 16
+# 立體牆面內部那幾條深藍線的間距（px）。8＝16px 的直牆分成兩條 7px 的白帶，剛好是 LimeZu
+# 官方 Gym_2 直牆剖面 N+WWWWW+N 的寬度。調小線會變密（5 看起來像影線），調大會回到色塊。
+WALL_PITCH = 8
 
 
 # ── PNG ────────────────────────────────────────────────────────────────────
@@ -186,8 +189,9 @@ def main():
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
 
-    # 立體牆面（'='）：牆的【厚度方向】每 5px 一條深藍，中間留白——就是把 LimeZu 的 6px
-    # 頂面條 N+WWWW+N 一直疊下去（相鄰兩條共用中間那條深藍，所以週期是 5 不是 6）。
+    # 立體牆面（'='）：牆的【厚度方向】每 WALL_PITCH 個像素一條深藍，中間留白——就是把
+    # LimeZu 的頂面條 N+W…W+N 一直疊下去（相鄰兩條共用中間那條深藍，所以週期＝一條線
+    # 加上一段白，不含另一端的線）。
     # 只在頭尾收兩條線的話，牆是一大片白，讀不出厚度；有了內部的線才看得出「這是一道牆」。
     #
     # 線要跟牆【平行】：橫牆的線是橫的（往厚度方向疊），直牆的線是直的。所以先判斷每一格
@@ -208,7 +212,8 @@ def main():
 
     def striped(p, p0, T):
         """p 這條線是深藍還是白。末端強制收深藍，但太靠近就不再多畫一條（免得兩條黏在一起）"""
-        return wall_edge if ((p - p0) % 5 == 0 and p0 + T - 1 - p >= 2) or p == p0 + T - 1 else wall_top
+        return (wall_edge if ((p - p0) % WALL_PITCH == 0 and p0 + T - 1 - p >= 2) or p == p0 + T - 1
+                else wall_top)
 
     walls = [(r, c) for r in range(CH) for c in range(CW) if west[r][c] == "="]
     for r, c in walls:
