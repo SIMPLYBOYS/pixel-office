@@ -176,6 +176,9 @@
   pre.code { position: relative; background: #0f1319; border: 1px solid var(--line); border-radius: 8px;
              padding: 9px 11px; margin: 6px 0; overflow-x: auto; }
   pre.code code { background: none; padding: 0; display: block; white-space: pre; line-height: 1.55; }
+  /* 單行長內容（審批卡的參數 JSON、一句 shell 指令）改用折行——它沒有縮排可以失去，
+     橫向捲動在窄欄裡等於把後半藏起來（實際回報：審批參數看不完整）。多行程式碼維持不折。 */
+  pre.code.wrap code { white-space: pre-wrap; word-break: break-all; }
   /* 長程式碼收合：工作串是對話，整份檔案貼進來會把上下文淹掉。摘要保留語言與行數，
      一眼知道折起來的是什麼、有多大，不用展開才知道要不要展開。 */
   .codewrap { margin: 6px 0; }
@@ -1220,6 +1223,7 @@ async function renderBody(box, text, animate, foldCode = false) {
         host = d;
       }
       const pre = el('pre', undefined, 'code');
+      if (!seg.v.trim().includes('\n')) pre.classList.add('wrap');   // 單行＝折行，見 CSS 註解
       if (seg.lang) pre.appendChild(el('span', seg.lang, 'lang'));
       const code = el('code');
       pre.appendChild(code);
