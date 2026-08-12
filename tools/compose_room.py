@@ -113,19 +113,20 @@ def crop_opaque(img):
 
 
 # ── 地圖：唯一真相在 RoomBuilder.cs，這裡用讀的，不另存一份 ────────────────────
-def read_west_map():
+def read_map(name):
     src = open(ROOM_CS, encoding="utf-8").read()
-    body = re.search(r"static readonly string\[\] West\s*=\s*\{(.*?)\n    \};", src, re.S)
+    body = re.search(r"static readonly string\[\] " + name + r"\s*=\s*\{(.*?)\n    \};", src, re.S)
     if not body:
-        raise SystemExit("compose_room: RoomBuilder.cs 裡找不到 West 地圖——改過欄位名就要同步這裡")
+        raise SystemExit(f"compose_room: RoomBuilder.cs 裡找不到 {name} 地圖——改過欄位名就要同步這裡")
     rows = re.findall(r'"([#.DT=]+)"', body.group(1))
     if len({len(r) for r in rows}) != 1:
-        raise SystemExit(f"compose_room: West 各列不等寬 {[len(r) for r in rows]}")
+        raise SystemExit(f"compose_room: {name} 各列不等寬 {[len(r) for r in rows]}")
     return rows
 
 
 def main():
-    west = read_west_map()
+    west = read_map("West")
+    office = read_map("OfficeRows")
     CW, CH = len(west[0]), len(west)
     # 底圖往東多畫一格墊在辦公區底下。辦公區底圖在它自己的 x=0 欄第 6~9 列是【全透明】的
     # （原設計圖那裡是建築物外緣，本來就沒畫），以前在畫面邊緣看不出來，西區貼上去之後
@@ -296,6 +297,18 @@ def main():
     for y in range(H):
         for i in range(UNDERLAP):
             canvas[y][(CW0 + i) * CELL:(CW0 + i + 1) * CELL] = canvas[y][(CW0 - 1) * CELL:CW0 * CELL]
+
+    # 大樓的西牆線（兩區之間那條）由墊底欄補畫。bg_base 自己的西牆線只畫到列 9——
+    # 它的建築在下半是內縮的，大廳那幾列它什麼都沒有；不補的話大廳的地板直接斷在
+    # 建築物外面，東緣沒有任何分界。畫在 bg 同一個位置（bg local x9–15＝墊底欄 +9..+15）、
+    # 同一種 N+WWWWW+N 剖面：bg 有畫的列被它蓋住（像素一模一樣），沒畫的列由這裡接手，
+    # 上下接成一條。哪幾列該畫看 OfficeRows 的 x0——那裡是牆就有分界，是走道開口就留空。
+    for r in range(CH):
+        if office[r][0] == "#" and west[r][CW0 - 1] not in "=#":
+            for j in range(CELL):
+                for i in range(7):
+                    canvas[r * CELL + j][CW0 * CELL + 9 + i] = \
+                        wall_edge if i in (0, 6) else wall_top
     write_png(f"{OUT}/west_bg.png", canvas)
 
     # ── 辦公區底圖：切掉它西緣那截被裁斷的牆 ──────────────────────────────
@@ -356,10 +369,23 @@ def main():
         imgs[name] = img
         items.append({"name": name, "x": x, "y": y, "w": w, "h": h})
 
-    # 不佔地板格的（自動門）。牆改成立體牆面之後就沒有「牆面」可以貼東西了，掛畫因此拿掉；
-    # wall_art() 那個把畫貼到牆面上的輔助函式也跟著刪掉——沒有呼叫點的程式碼會誤導下一個人
-    # 以為還能掛。要掛回來的話：把那段牆改回 '#'，並從 git 歷史取回 wall_art()。
-    NO_BLOCK = set()
+    # 掛牆的陳設（畫、螢幕）：貼在【牆面】上，不是站在地板上。
+    # 先前跟其他家具一樣底邊對齊地板格，畫就變成立在地上——牆是 1 格高，畫要往上推
+    # 大半格才會落在牆面。它們也不佔地板：牆上的畫本來就擋不住人。
+    NO_BLOCK = set()   # 不佔地板格的（掛牆的陳設、自動門）
+
+    def wall_art(obj, cx, cy):
+        """掛在牆面上。cy = 那道牆的【最下面】一列。
+
+        牆的剖面是 6px 頂面 + 26px 牆面（共 2 格），所以畫要貼在牆的下緣往上一點——
+        底邊離牆腳 4px。牆若只有一格（16px），畫（20px）比牆還高，怎麼擺都會浮出去；
+        那是【地圖】要改成兩列，不是這裡調偏移量能救的。"""
+        img, _, _ = crop_opaque(d1_sprite(obj))
+        name = "d1_" + obj
+        NO_BLOCK.add(name)
+        imgs[name] = img
+        items.append({"name": name, "x": cx * CELL, "y": (cy + 1) * CELL - 4 - len(img),
+                      "w": len(img[0]), "h": len(img)})
 
     # 烙在設計圖裡的原畫人物要清掉——畫死的人不會動，跟「每個動作都對應真實狀態」牴觸。
     # extract_design.py 對 Office_Design_2 做過同一件事（它的 PATCHES），這裡是 Design_1 的版本。
@@ -404,6 +430,7 @@ def main():
         place(f"w_chair_b{i+1}", chair_l, 11, cy)
 
     # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
+    wall_art("obj_09", 2, 8)   # 彩色掛畫：掛回大門立面（第 7-8 列）的牆身上
     # 門外的擺設位置來自 tools/west_layout.json——那是在 Unity 裡手調好之後用
     # tools/freeze_layout.py 抽回來的。為什麼不寫死在這裡：Build Room 會 DestroyImmediate
     # 整個 Room 重建，手調的位置下一次就沒了；腳本才是唯一真相，場景是產物。
