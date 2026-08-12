@@ -634,7 +634,13 @@ async function board(id) {
   box.open = wasOpen;
   box.classList.toggle('stale', !r.live);
   // ontoggle 而非 addEventListener：這個函式每收到一則事件就重跑一次，addEventListener 會愈疊愈多
-  box.ontoggle = () => localStorage.boardOpen = box.open ? '1' : '0';
+  box.ontoggle = () => {
+    localStorage.boardOpen = box.open ? '1' : '0';
+    // 展開就重抓。事件驅動的更新有兩個前提——面板是【開著的】而且選中的就是看板本人；
+    // 收起來的那段時間主持人換了幾塊板，展開時看到的還是上一輪的殘影。
+    // 實測踩過：畫面上是訪客那塊板，磁碟上早就換成 board-memory-review.json 了。
+    if (box.open) board(selected);
+  };
   const cols = box.querySelector('.cols');
   for (const c of r.columns) {
     const col = el('div', '');
