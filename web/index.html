@@ -327,7 +327,7 @@
         <textarea id="box" disabled placeholder="先點左側員工，再描述任務…"></textarea>
         <button id="send" disabled>送出</button>
       </div>
-      <div class="hint" id="hint">Enter 送出、Shift+Enter 換行（需 bot 開 COGITO_HTTP_ADDR）</div>
+      <div class="hint" id="hint">Enter 換行；按送出鈕才派工，1.6 秒內可按 Esc 取消（需 bot 開 COGITO_HTTP_ADDR）</div>
     </div>
   </section>
 <script>
@@ -554,7 +554,8 @@ function updateComposer() {
   btn.disabled = false;             // …但按鈕改成中止，別讓人只能乾等
   btn.textContent = workingNow ? '中止' : '送出';
   btn.classList.toggle('stop', workingNow);
-  btn.onclick = () => dispatch(workingNow ? '/stop' : $('box').value);
+  // 中止要立刻生效（那本身就是反悔），只有派工走反悔窗
+  btn.onclick = () => workingNow ? dispatch('/stop') : queueSend($('box').value);
   // 看板不是人，措辭不能沿用派工那套：「派給這位員工」會讓人以為只有一個人在做，
   // 實際上它會開一場全隊會議、產出 spec、再分工。說清楚它會做什麼，比說它是誰重要。
   const isMode = a && a.npc === false;
@@ -752,6 +753,39 @@ async function profile(id) {
   box.addEventListener('toggle', () => { localStorage.profOpen = box.open ? '1' : '0'; });
 }
 
+// 送出前的反悔窗。派工是【不可逆】的——一旦進了 cogito 就開始花錢，也沒有「收回」這回事，
+// 只能 /stop（那時前面的步驟已經跑過了）。所以真正能反悔的位置只有【還沒送出去之前】。
+const SEND_GRACE = 1600;   // ms：夠按到 Esc，又不會讓人覺得卡住
+let pendingSend = null;    // {timer, text}
+
+function cancelSend() {
+  if (!pendingSend) return false;
+  clearTimeout(pendingSend.timer);
+  $('box').value = pendingSend.text;   // 原文放回去，游標接著改
+  $('box').disabled = false;
+  $('box').focus();
+  pendingSend = null;
+  $('hint').textContent = '已取消，回到編輯 ✎';
+  return true;
+}
+
+// 排一次送出：先清空輸入框（讓人看得出「已經收下了」），但真正的呼叫延後到反悔窗結束。
+// 不先送再想辦法撤回——撤不回來的東西，介面就不該假裝撤得回來。
+function queueSend(text) {
+  if (!selected || !text.trim() || pendingSend) return;
+  const box = $('box');
+  pendingSend = { text: box.value, timer: 0 };
+  box.value = '';
+  box.disabled = true;
+  $('hint').textContent = '即將送出…（Esc 取消）';
+  pendingSend.timer = setTimeout(() => {
+    const t = pendingSend.text;
+    pendingSend = null;
+    box.disabled = false;
+    dispatch(t);
+  }, SEND_GRACE);
+}
+
 async function dispatch(text) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
@@ -772,9 +806,12 @@ async function openDir(cardId) {
   $('hint').textContent = r.ok ? '已開啟產出資料夾 📂' : `開不了：${r.error}`;
 }
 
-$('box').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); dispatch($('box').value); }
-});
+// Enter 不再送出——textarea 的預設行為就是換行，所以這裡【不攔】它。
+// 派工的代價比一則訊息高得多（開任務、走位、花錢），而 Enter 是打字時最容易誤觸的鍵：
+// 多行的需求描述打到一半就被送出去過。送出一律走按鈕。
+//
+// Esc 綁在 document 而不是輸入框上：反悔窗期間輸入框是 disabled 的，鍵盤事件到不了它身上。
+addEventListener('keydown', e => { if (e.key === 'Escape') cancelSend(); });
 
 const BADGE = { working: '⏳ 進行中', ok: '✔ 已完成', error: '✗ 失敗', lost: '⚠ 失聯',
                 superseded: '↻ 已由續跑接手', note: '· 雜記' };
