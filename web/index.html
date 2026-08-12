@@ -231,6 +231,11 @@
   /* 預覽的捲動【只發生在 .txt 這一層】：md 檔裡本來就可能有好幾個程式碼區塊，
      每塊各自捲的話會變成一頁好幾條捲軸（實際踩到）。內層只留長行的橫向捲動。 */
   .pv .txt { max-height: 460px; overflow: auto; }
+    /* md 表格：spec/meeting 檔的任務拆解就是表格，不畫成表就是滿螢幕的 | */
+    table.mdt { border-collapse: collapse; margin: 6px 0; font-size: .92em; }
+    table.mdt th, table.mdt td { border: 1px solid var(--line); padding: 3px 8px;
+      text-align: left; vertical-align: top; }
+    table.mdt th { background: rgba(255,255,255,.05); font-weight: 600; }
   .pv .txt pre.code { margin: 6px 0; border: 0; max-height: none; overflow-x: auto; overflow-y: hidden; }
   .pv .txt > pre.code:first-child { margin-top: 0; }
   .sbar { padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -1093,24 +1098,55 @@ function plainOf(text) {
 }
 
 // 逐行處理區塊語法。換行留在文字流裡（.tx 是 pre-wrap），只有分隔線吃掉自己那個換行。
+// 表格：連續的 |…| 行成一塊。這是 spec/meeting 檔最主要的內容（任務拆解表），
+// 不接的話整份看起來就是滿螢幕的 | 與 ---，正是「呈現大量 md 語法」的來源。
+function mdTable(box, rows) {
+  const cells = r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  const t = el('table', undefined, 'mdt');
+  rows.forEach((r, i) => {
+    if (i === 1 && /^[\s|:-]+$/.test(r)) return;   // 第二行是對齊列（|---|---|），不畫
+    const tr = document.createElement('tr');
+    for (const c of cells(r)) {
+      const td = document.createElement(i === 0 ? 'th' : 'td');
+      inlineFmt(td, c);
+      tr.appendChild(td);
+    }
+    t.appendChild(tr);
+  });
+  box.appendChild(t);
+}
+
 function markdown(box, text) {
   const lines = text.split('\n');
-  lines.forEach((line, i) => {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // 表格要一次吃掉一整塊——逐行處理的話每一列都變成獨立的一行文字
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const run = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) run.push(lines[i++].trim());
+      i--;
+      mdTable(box, run);
+      continue;
+    }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
-    const hr = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line);
-    if (hr) {
+    // 清單：把 markdown 的記號換成真的項目符號，縮排照原樣留著（巢狀才看得出層次）
+    const li = line.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/);
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       box.appendChild(el('span', undefined, 'hr'));
-      return;                                   // 分隔線自己就是一塊，不再補換行
+      continue;                                 // 分隔線自己就是一塊，不再補換行
     }
     if (h) {
       const span = el('span', undefined, 'h');
       inlineFmt(span, h[2]);
       box.appendChild(span);
+    } else if (li) {
+      box.appendChild(document.createTextNode(li[1] + '• '));
+      inlineFmt(box, li[2]);
     } else {
       inlineFmt(box, line);
     }
     if (i < lines.length - 1) box.appendChild(document.createTextNode('\n'));
-  });
+  }
 }
 
 // 補回被截斷的語法符號：橋為了控制長度會截字（審批卡 300、訊息 200、工具參數 120），
