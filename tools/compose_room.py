@@ -158,11 +158,12 @@ def main():
     wall_body = sub(bg, 4 * CELL, 6, CELL, CELL)       # 牆身（可重複）
     wall_foot = sub(bg, 4 * CELL, 31, CELL, 1)         # 牆的下緣深藍線
     shadow = sub(bg, 4 * CELL, 32, CELL, 7)            # 牆腳陰影
-    # 細牆（'='）只有那條線，沒有牆面。橫的就是 wall_cap 本身（6px）；直的取辦公區西牆的
-    # 剖面（深藍+白5+深藍＝7px）。兩者跟 LimeZu 官方 Gym_2 量出來的完全一致，不是自己調的。
-    thin_v = sub(bg, 9, 105, 7, CELL)
-    if not all(min(thin_v[j][1][:3]) > 235 for j in range(CELL)):
-        raise SystemExit("compose_room: 直向細牆的取樣點不是白牆面——bg_base 換版了，要重新量")
+    # 立體牆面（'='）＝【外框 + 填滿 + 外框】，結構取自 LimeZu 官方 Gym_2：它的直牆剖面
+    # 就是 N+WWWWW+N。所以只要兩種像素：牆頂那片白，跟收邊的深藍。
+    wall_top = wall_cap[2][0]                          # 頂面的白
+    wall_edge = wall_cap[0][0]                         # 外框的深藍
+    if min(wall_top[:3]) < 235 or max(wall_edge[:3]) > 90:
+        raise SystemExit("compose_room: 牆頂剖面不是預期的白/深藍——bg_base 換版了，要重新量")
 
     canvas = [[(0, 0, 0, 0)] * W for _ in range(H)]
     for r in range(CH):
@@ -185,57 +186,26 @@ def main():
                 blit(canvas, wall_foot, x, y + CELL - 1)
                 blit(canvas, shadow, x, y + CELL)
 
-    # 細牆：整段一起畫，不逐格判斷。逐格的話轉角會缺一塊——角落那格的四鄰都是牆，
-    # 沒有任何一邊「面向房間」，線就會在轉角斷開。整段來畫，段本身就跨到底，角落自然收得住。
+    # 立體牆面（'='）：整段填滿牆頂的白，再沿著【牆與非牆的交界】收一條 1px 深藍。
+    # 這跟「畫一條線代表牆」差在哪：線只描得出邊界，描不出「這是一道有厚度的東西」。
+    # 填滿之後相鄰的牆自然黏成一體，轉角不必特別處理——沒有兩條線要對齊，就沒有對不齊。
     #
-    # 線畫在【面向房間的那一邊】：牆外那半留著地板底色不動。這樣看起來就是「房間到這條線
-    # 為止」，而不是「這裡有一格看起來能走卻走不進去的地」——線外面是建築物外面，本來就
-    # 不該走進去。
-    # 圖外【不算】房間。at() 對界外回 "."（厚牆那段靠這個在地圖邊緣也長出頂面），沿用的話
-    # 最外那列會判成「外面是房間」而在建築物最外緣多畫一條線。
-    room = lambda r, c: 0 <= r < CH and 0 <= c < CW and at(r, c) not in "#="
-    for r in range(CH):                                # 細牆先清掉底色：線的外面是建築物外面，
-        for c in range(CW):                            # 不該還鋪著地板——那會讀成「牆畫在地上」
-            if west[r][c] == "=":
-                for j in range(CELL):
-                    for i in range(CELL):
-                        canvas[r * CELL + j][c * CELL + i] = (0, 0, 0, 0)
-
-    def runs(cells):
-        out, cur = [], []
-        for k in cells:
-            if at(*k) == "=":
-                cur.append(k)
-            elif cur:
-                out.append(cur); cur = []
-        return out + ([cur] if cur else [])
-
-    # 橫線先畫，並記住畫在哪幾格；直線【跳過】那幾格。轉角由橫線收頭——gym 的左上角就是
-    # 整片橫向頂面，直牆從它下面才開始。不跳過的話直線會從格子頂端起畫，在四個角各戳出
-    # 10px，變成交叉而不是接合，看起來就是「線沒有連起來」。
-    capped = set()
-    for horiz in (True, False):
-        lines = ([[(r, c) for c in range(CW)] for r in range(CH)] if horiz
-                 else [[(r, c) for r in range(CH)] for c in range(CW)])
-        for run in (seg for ln in lines for seg in runs(ln)):
-            # 段的哪一側是房間？兩側各數一次，多的那邊就是室內；都沒有＝這段在建築物外面
-            d = (1, 0) if horiz else (0, 1)
-            side = [sum(room(r + s * d[0], c + s * d[1]) for r, c in run) for s in (-1, 1)]
-            if side[0] == side[1]:
-                continue                               # 含 0-0：外緣那列什麼都不畫
-            inner = -1 if side[0] > side[1] else 1
-            # 段可能比房間長（外牆會一路延伸到建築物角落）。只畫【真的貼著房間】的那幾格，
-            # 再往兩端各多一格把轉角接起來——多的那格正好是另一個方向的線經過的地方。
-            hit = [room(r + inner * d[0], c + inner * d[1]) for r, c in run]
-            for i, (r, c) in enumerate(run):
-                if not (hit[i] or (i and hit[i - 1]) or (i + 1 < len(hit) and hit[i + 1])):
-                    continue
-                x, y = c * CELL, r * CELL
-                if horiz:
-                    blit(canvas, wall_cap, x, y if inner < 0 else y + CELL - 6)
-                    capped.add((r, c))
-                elif (r, c) not in capped:
-                    blit(canvas, thin_v, (x if inner < 0 else x + CELL - 7), y)
+    # 分兩趟：先全部填滿，再全部收邊。同一趟做的話，後畫的格子會把前一格剛收好的邊蓋掉。
+    walls = [(r, c) for r in range(CH) for c in range(CW) if west[r][c] == "="]
+    for r, c in walls:
+        for j in range(CELL):
+            for i in range(CELL):
+                canvas[r * CELL + j][c * CELL + i] = wall_top
+    for r, c in walls:
+        x, y = c * CELL, r * CELL
+        if at(r - 1, c) != "=":
+            for i in range(CELL): canvas[y][x + i] = wall_edge
+        if at(r + 1, c) != "=":
+            for i in range(CELL): canvas[y + CELL - 1][x + i] = wall_edge
+        if at(r, c - 1) != "=":
+            for j in range(CELL): canvas[y + j][x] = wall_edge
+        if at(r, c + 1) != "=":
+            for j in range(CELL): canvas[y + j][x + CELL - 1] = wall_edge
     write_png(f"{OUT}/west_bg.png", canvas)
 
     # ── 辦公區底圖：切掉它西緣那截被裁斷的牆 ──────────────────────────────
@@ -297,23 +267,10 @@ def main():
         imgs[name] = img
         items.append({"name": name, "x": x, "y": y, "w": w, "h": h})
 
-    # 掛牆的陳設（畫、螢幕）：貼在【牆面】上，不是站在地板上。
-    # 先前跟其他家具一樣底邊對齊地板格，畫就變成立在地上——牆是 1 格高，畫要往上推
-    # 大半格才會落在牆面。它們也不佔地板：牆上的畫本來就擋不住人。
-    NO_BLOCK = set()   # 不佔地板格的（掛牆的陳設、自動門）
-
-    def wall_art(obj, cx, cy):
-        """掛在牆面上。cy = 那道牆的【最下面】一列。
-
-        牆的剖面是 6px 頂面 + 26px 牆面（共 2 格），所以畫要貼在牆的下緣往上一點——
-        底邊離牆腳 4px。牆若只有一格（16px），畫（20px）比牆還高，怎麼擺都會浮出去；
-        那是【地圖】要改成兩列，不是這裡調偏移量能救的。"""
-        img, _, _ = crop_opaque(d1_sprite(obj))
-        name = "d1_" + obj
-        NO_BLOCK.add(name)
-        imgs[name] = img
-        items.append({"name": name, "x": cx * CELL, "y": (cy + 1) * CELL - 4 - len(img),
-                      "w": len(img[0]), "h": len(img)})
+    # 不佔地板格的（自動門）。牆改成立體牆面之後就沒有「牆面」可以貼東西了，掛畫因此拿掉；
+    # wall_art() 那個把畫貼到牆面上的輔助函式也跟著刪掉——沒有呼叫點的程式碼會誤導下一個人
+    # 以為還能掛。要掛回來的話：把那段牆改回 '#'，並從 git 歷史取回 wall_art()。
+    NO_BLOCK = set()
 
     # 烙在設計圖裡的原畫人物要清掉——畫死的人不會動，跟「每個動作都對應真實狀態」牴觸。
     # extract_design.py 對 Office_Design_2 做過同一件事（它的 PATCHES），這裡是 Design_1 的版本。
@@ -358,7 +315,6 @@ def main():
         place(f"w_chair_b{i+1}", chair_l, 11, cy)
 
     # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
-    wall_art("obj_09", 2, 8)   # 彩色掛畫：掛在公司南牆（第 7-8 列）的牆面上
     # 門外的擺設位置來自 tools/west_layout.json——那是在 Unity 裡手調好之後用
     # tools/freeze_layout.py 抽回來的。為什麼不寫死在這裡：Build Room 會 DestroyImmediate
     # 整個 Room 重建，手調的位置下一次就沒了；腳本才是唯一真相，場景是產物。
