@@ -33,7 +33,9 @@ public static class RoomBuilder
 
     // 家具位置唯一真相 = tools/extract_design.py 的輸出 furniture.json，不手抄
     [System.Serializable]
-    class Item { public string name; public int x, y, w, h; }
+    // top=1：永遠畫最上層（貼在別件家具上緣的陳設，如書架頂的音響）。
+    // Y-sort 以底邊 pivot 比誰在前，「擺在高家具上」的小物 pivot 反而高，會被那件家具蓋掉。
+    class Item { public string name; public int x, y, w, h, top; }
     [System.Serializable]
     class FurnitureData { public int canvasW, artH; public Item[] items; }
 
@@ -70,7 +72,7 @@ public static class RoomBuilder
     {
         "=============",
         "=============",   // 北外牆（房間在南側→畫成立面）
-        "=TTTT.=.TTT..",   // 左：櫃檯（訪客站 x5）｜ 右：會議室（長桌 x8-10）。x12 不設牆：
+        "=TTTTT=.TTT..",   // 左：櫃檯（訪客站 x5、(5,2) 盆栽）｜ 右：會議室。x12 不設牆：
         "=TTTT.=.TTT..",   //   辦公區自己的西牆就在旁邊 (13,*)，再放一格就是兩道平行的牆
         "=TTTT.=.TTT..",   //   夾一條走不進去的地板縫（同 (12,6) 那個教訓，整欄適用）
         "=............",   // ← 門內走廊，(12,5) 接辦公區
@@ -282,7 +284,7 @@ public static class RoomBuilder
                 go.transform.localPosition = new Vector3(offsetX + it.x / PPU, -(it.y + it.h) / PPU, 0);
                 var sr = go.AddComponent<SpriteRenderer>();
                 sr.sprite = sprites[it.name];
-                sr.sortingOrder = 0;
+                sr.sortingOrder = it.top;
                 sr.spriteSortPoint = SpriteSortPoint.Pivot; // pivot=左下 → 以底邊 Y-sort
             }
         }

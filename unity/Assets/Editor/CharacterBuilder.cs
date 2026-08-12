@@ -41,11 +41,47 @@ public static class CharacterBuilder
                 Debug.LogError($"CharacterBuilder: {prefix} 的出生點 {spawn} 落在牆裡——" +
                                "他會卡在原地、所有走位都逾時。請改到可走格（建議用他自己的工位）。");
         foreach (var (prefix, spawn) in Personas) BuildOne(prefix, spawn);
+        BuildReception();
         if (GameObject.Find("BrainGateway") == null)
             new GameObject("BrainGateway").AddComponent<BrainGateway>();
         UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(
             UnityEngine.SceneManagement.SceneManager.GetActiveScene());
         Debug.Log($"CharacterBuilder: {Personas.Length} 個 NPC 完成");
+    }
+
+    // 總機小姐：櫃檯後的常駐角色，【不在】Personas 名單裡——她不投影任何 agent 狀態，
+    // 所以不掛 NPCAgent/FakeBrain/碰撞那一套（掛了就會被生活迴圈派去亂晃，總機離崗）。
+    // 出生點刻意不過 Walkable 驗證：她的崗位本來就在櫃檯的家具格（'T'）裡，不用走路。
+    //
+    // 她跟被清掉的「畫死西裝男」（compose_room 的 D1_PATCHES）差在哪：她是活的物件，
+    // 有待機動畫，透過櫃檯 sprite 上挖的洞（D1_HOLES）露出來——桌面遮腰、書架遮兩側。
+    // 位置對準那個洞：世界 px x52-68、腳底 y49 → (60/16, -49/16)。
+    const string ReceptionPrefix = "p10";   // 盤髮白衫的那位（01/05/07/12/17/19 已是員工）
+    static readonly Vector3 ReceptionPost = new(3.75f, -3.0625f, 0);
+
+    static void BuildReception()
+    {
+        var old = GameObject.Find("NPC_reception");
+        if (old != null) Object.DestroyImmediate(old);
+
+        string folder = $"{CharRoot}/{ReceptionPrefix}";
+        var frames = AssetDatabase.FindAssets("t:Sprite", new[] { folder })
+            .Select(g => AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(g)))
+            .Where(s => s != null && s.name.Contains("_idle_down_"))
+            .OrderBy(s => s.name).ToArray();
+        if (frames.Length == 0)
+        {
+            Debug.LogError($"CharacterBuilder: {folder} 沒有幀——先跑 tools/make_character.py 10，" +
+                           "再把 limezu/_extracted/characters/p10 複製到 " + CharRoot);
+            return;
+        }
+
+        var go = new GameObject("NPC_reception");
+        var sr = go.AddComponent<SpriteRenderer>();
+        sr.spriteSortPoint = SpriteSortPoint.Pivot;   // pivot=腳底 → 櫃檯(-5)畫在她(-3.06)前面
+        var loop = go.AddComponent<SpriteLoop>();
+        loop.frames = frames;
+        go.transform.position = ReceptionPost;
     }
 
     static void BuildOne(string prefix, Vector3 spawn)

@@ -171,6 +171,16 @@ def main():
         for c in range(CW + UNDERLAP):
             blit(canvas, outer if r > DOOR_ROW else floor, c * CELL, r * CELL)
 
+    # 櫃檯房照 Design_1 上排房間的原型換裝（Aaron 給的截圖）：整室深色格紋地板、
+    # 北牆牆身換成磚面。樣本直接取自 D1 底圖——同一位作者的像素，不會有色差。
+    # 磚面只鋪 cols 1-5（櫃檯房自己的範圍），到隔間就停：D1 本來就是一房一種面。
+    d1bg = read_png(f"{D1}/bg_base.png")
+    checker = sub(d1bg, 64, 48, CELL, CELL)
+    for r in range(2, 5):
+        for c in range(1, 6):
+            blit(canvas, checker, c * CELL, r * CELL)
+    # ⚠ 磚牆面在【'=' 牆畫完之後】才鋪（見下面 walls 迴圈後）——先鋪會被北牆的立面蓋掉。
+
     # 墊底欄沿用西區最東欄的牆況：那一欄是走道東牆，續一格才不會有半截牆浮在接縫上
     west = [row + row[-1] * UNDERLAP for row in west]
     CW += UNDERLAP
@@ -292,6 +302,12 @@ def main():
                         for i in range(thick):
                             canvas[yj][p0 + off + i] = wall_edge
 
+    # 櫃檯房的北牆牆身換磚面（D1 上排房間的樣式）。蓋掉立面的淡紫牆身 y6-30，
+    # 保留上緣的白色頂線（y0-5）與下緣的深藍腳線（y31）——D1 的磚牆本來就這樣收邊。
+    brick = sub(d1bg, 48, 6, CELL, 25)
+    for c in range(1, 6):
+        blit(canvas, brick, c * CELL, 6)
+
     # 墊底欄：把最東欄整欄複製過去。橫牆沿著 x 是均勻的，複製就等於把線延長到接縫底下，
     # 剛好補上辦公區底圖在那裡的破洞；它由辦公區蓋在上面，只有破洞處會露出來。
     for y in range(H):
@@ -373,6 +389,7 @@ def main():
     # 先前跟其他家具一樣底邊對齊地板格，畫就變成立在地上——牆是 1 格高，畫要往上推
     # 大半格才會落在牆面。它們也不佔地板：牆上的畫本來就擋不住人。
     NO_BLOCK = set()   # 不佔地板格的（掛牆的陳設、自動門）
+    TOPS = set()       # 永遠畫最上層的（sortingOrder 1）——貼在別件家具上緣的陳設
 
     def wall_art(obj, cx, cy):
         """掛在牆面上。cy = 那道牆的【最下面】一列。
@@ -391,6 +408,10 @@ def main():
     # extract_design.py 對 Office_Design_2 做過同一件事（它的 PATCHES），這裡是 Design_1 的版本。
     # (dest 矩形, 來源往上位移)：拿正上方的等位像素蓋掉，書架本身是縱向重複的圖樣，接得上。
     D1_PATCHES = {"obj_03": (32, 16, 57, 41, 16)}   # 櫃檯後面那位西裝男
+    # 挖穿的洞：總機小姐（活的 NPC，CharacterBuilder 的 NPC_reception）站在櫃檯後，
+    # 從這個洞透出來。洞比西裝男的補丁窄——兩側維持補出來的書架，只挖她身體的寬度。
+    # Y-sort 讓櫃檯（pivot 更南）畫在她前面：桌面遮腰、書架遮兩側，唯獨洞裡看得到她。
+    D1_HOLES = {"obj_03": (36, 19, 52, 41)}
 
     def d1_sprite(obj):
         im = read_png(f"{D1}/{obj}.png")
@@ -400,6 +421,12 @@ def main():
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     im[y][x] = im[y - dy][x] if 0 <= y - dy < len(im) else (0, 0, 0, 0)
+        if obj in D1_HOLES:
+            x0, y0, x1, y1 = D1_HOLES[obj]
+            im = [r[:] for r in im]
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    im[y][x] = (0, 0, 0, 0)
         return im
 
     def place_px(name, img, x, y):
@@ -422,6 +449,13 @@ def main():
     # 連通元件掃描把整叢當一件抽出來，天生就有層次與交疊。
     # 它 4.5 格高，上緣會壓在北牆上——那是對的，書架本來就靠牆。碰撞只看底邊那一列。
     d1("obj_03", 1, 4)
+    # 房間補妝（同樣照 D1 原型）：音響擺書架頂上（D1 的相對位置原樣平移）、圖表螢幕掛磚牆、
+    # 東北角一盆植栽。音響與圖表都壓在櫃檯書架的上緣，Y-sort 會讓櫃檯蓋掉它們——
+    # 所以進 TOPS（RoomBuilder 給 sortingOrder 1）。位置刻意避開總機小姐：
+    # 她的可見像素從 y27 起（腳 y49 - 幀高 32 + 空白 10），圖表底邊收在 y26。
+    d1_px("obj_01", 19, 3); NO_BLOCK.add("d1_obj_01"); TOPS.add("d1_obj_01")
+    d1_px("obj_02", 48, 4); NO_BLOCK.add("d1_obj_02"); TOPS.add("d1_obj_02")
+    d1("obj_06", 5, 2)
 
     # 會議室（門內右側，獨立一間）：長桌 x8-9 佔第 2~4 列，兩側各三張椅子朝內
     place("w_table", table, 8, 4)
@@ -488,6 +522,8 @@ def main():
 
     for name, img in imgs.items():
         write_png(f"{OUT}/{name}.png", img)
+    for it in items:
+        it["top"] = 1 if it["name"] in TOPS else 0
     json.dump({"canvasW": W, "artH": H, "items": items},
               open(f"{OUT}/west.json", "w"), indent=1)
 
