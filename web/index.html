@@ -859,12 +859,28 @@ const tog = (id, open) => open
   ? (opened.add(id), closed.delete(id))
   : (opened.delete(id), closed.add(id));
 
+// 手動開合一張卡＝「我要看這張卡」，不是「我要追即時輸出」。
+// 兩件事一起做，缺一不可：
+//   ① 關掉自動跟捲。卡多半就在底部，展開前 stuck 是 true，內容一長出來下一次
+//      keepBottom() 就 scrollTop = scrollHeight——使用者看到的是「點一下直接跳到最後」。
+//      釘住的標題列救不了這個：它釘的是位置，救不了被甩走的視窗。
+//   ② 把卡頂對齊到 feed 的內容頂端，也就是 sticky 標題列釘住的那個位置——
+//      展開後第一眼看到的是卡頭與開頭幾則，然後自己慢慢往下捲。
+// 要回到跟捲，捲回底部就好（scroll 事件會把 stuck 設回 true）。
+function alignTop(el) {
+  const f = $('feed');
+  const pad = parseFloat(getComputedStyle(f).paddingTop) || 0;
+  f.scrollTop += el.getBoundingClientRect().top - f.getBoundingClientRect().top - pad;
+}
+
 // details 的開合改由 click 接管：toggle 事件是非同步的，程式自動開合會被誤記成使用者意圖
 function bindToggle(el, id, t) {
   el.querySelector('summary').addEventListener('click', ev => {
     ev.preventDefault();
     el.open = !el.open;
     tog(id, el.open);
+    stuck = false;
+    alignTop(el);
   });
 }
 
