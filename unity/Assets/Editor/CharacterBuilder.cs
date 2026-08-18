@@ -24,6 +24,7 @@ public static class CharacterBuilder
         ("p07", new Vector3(RoomBuilder.OfficeX + 10.5f, -5.5f, 0)),   // chair_3
         ("p05", new Vector3(RoomBuilder.OfficeX + 3.5f, -9.5f, 0)),    // chair_4
         ("p12", new Vector3(RoomBuilder.OfficeX + 6.5f, -9.5f, 0)),    // chair_5
+        ("p08", new Vector3(RoomBuilder.OfficeX + 9.5f, -9.5f, 0)),    // chair_6
         ("p19", new Vector3(RoomBuilder.OfficeX + 13.5f, -14.5f, 0)),  // boss_seat
     };
 

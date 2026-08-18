@@ -347,7 +347,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 #   兩次工具呼叫之間的長考在時間軸上是一段全空白，看起來像 agent 掛了。
 # 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
 WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的固定工位
-             "p05": "chair_4", "p12": "chair_5",
+             "p05": "chair_4", "p12": "chair_5", "p08": "chair_6",
              "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
 BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡（面向老闆桌）
 BOARD = "board_1"     # 白板前：規劃類子 agent 站這裡，不佔工位
@@ -361,7 +361,7 @@ COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空�
 # 各工位【旁邊】的站位：委派時主 agent 走過去，面向坐著的同事——
 # 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
 DESK_SIDE = {"p17": "side_1", "p01": "side_2", "p07": "side_3",
-             "p05": "side_4", "p12": "side_5", "p19": BOSS_DOOR}
+             "p05": "side_4", "p12": "side_5", "p08": "side_6", "p19": BOSS_DOOR}
 # 閱讀投影：連續讀檔/查資料 → 低頭看書。cogito 的工具名開頭就分得出讀寫，不必列舉全名。
 READ_RE = re.compile(r"^(read|grep|glob|list|search|cat|head|tail|find|fetch|browse|web|get_)", re.I)
 reading: set[str] = set()   # 正在「看書」的人——同狀態不重發指令（工具事件很密）
@@ -623,7 +623,9 @@ def office_bubble(kind: str, label: str) -> str | None:
 # 沒人有空時退回舊行為（主 agent 頭上帶小名冒泡）。cogito / Unity 零改動。
 # 慣用人選：具名子 agent 派給職務對得上的人（沒空就退回任一閒置者）
 SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07",
-           "implementer": "p12", "performance": "p05", "correctness": "p17"}
+           "implementer": "p12", "performance": "p05", "correctness": "p17",
+           # 市場調查類：小樺（產品 Team 的研究員，輔佐 PM）
+           "researcher": "p08", "market-research": "p08", "analyst": "p08"}
 SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
 # background=true 的 spawn 會【立刻】回一句回執，那不是成果：
 #   「🌀 已在背景啟動子 agent [老徐]（ID: bg-1）。要等它交件就用 subagent_await…」
