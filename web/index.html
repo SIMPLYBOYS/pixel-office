@@ -878,6 +878,17 @@ function alignTop(el) {
   requestAnimationFrame(() => { stuck = false; });
 }
 
+// WebKit 在 <details> 開合之後【不會重算】sticky 的約束：第一次展開時釘得住，關掉再開
+// 就變成普通元素跟著內容捲走（Chromium 不受影響，我在 Chromium 上重現不出來）。
+// 把 position 拿掉、強制一次 reflow、再放回去，逼它重新計算。同一幀內完成、不會有閃爍，
+// 對沒這個問題的瀏覽器也只是多一次 layout。
+function nudgeSticky(el) {
+  const sum = el.querySelector(':scope > summary');
+  sum.style.position = 'static';
+  void sum.offsetHeight;          // 這行不能省：不讀一次版面就不會真的重算
+  sum.style.position = '';
+}
+
 // details 的開合改由 click 接管：toggle 事件是非同步的，程式自動開合會被誤記成使用者意圖
 function bindToggle(el, id, t) {
   el.querySelector('summary').addEventListener('click', ev => {
@@ -885,6 +896,7 @@ function bindToggle(el, id, t) {
     el.open = !el.open;
     tog(id, el.open);
     stuck = false;
+    if (el.open) nudgeSticky(el);
     alignTop(el);
   });
 }
