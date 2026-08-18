@@ -2053,10 +2053,18 @@ async def no_store_dev_assets(request, call_next):
     新舊建置混在一起 → RuntimeError: memory access out of bounds（實測踩過，而且無痕
     模式永遠正常，因為它的快取是空的，最難聯想到快取）。
     這兩個路徑都是【開發中每天重建】的東西，快取省的那點頻寬不值得這種偵錯成本。
+
+    /avatars 用 no-cache 而不是 no-store：差別是「還能存，但每次都要回頭問」。
+    新同事上線時人設先落地、頭像後產（兩支腳本），中間那個空窗只要有人載過名冊，
+    瀏覽器就把那張 404 記起來——之後怎麼重新整理都是文字頭像，看起來像「這個人沒有臉」。
+    no-cache 讓它每次帶 If-Modified-Since 回頭問一次，沒變就回 304（無 body），
+    在本機幾乎沒有成本，換掉的是一整類「明明檔案在、畫面就是不更新」的偵錯。
     """
     resp = await call_next(request)
     if request.url.path.startswith(("/unity", "/shell")):
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    elif request.url.path.startswith("/avatars"):
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 _ROOT = Path(__file__).parent.parent
 _WEBGL = _ROOT / "unity" / "Builds" / "WebGL"
