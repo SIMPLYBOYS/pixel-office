@@ -7,6 +7,7 @@
   :root {
     --bg: #101216; --panel: #16191f; --line: #23272f;
     --text: #d7dbe2; --dim: #7d838d; --accent: #f5c451; --ok: #6fc276;
+    --card: #131720;   /* 任務卡底色：釘住的標題列要用同一個不透明色蓋住捲過去的內容 */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -214,16 +215,24 @@
   .daybox > summary .del:hover { opacity: 1; }
   .daybox[open] > summary { margin-bottom: 8px; }
   .daybox .dayitems { padding-left: 2px; }
-  .tcard { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; background: #131720; }
+  .tcard { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; background: var(--card); }
   .tcard summary {
     cursor: pointer; padding: 9px 12px; display: flex; align-items: center; gap: 8px;
     list-style: none; user-select: none;
   }
   .tcard summary::-webkit-details-marker { display: none; }
+  /* 展開後標題列釘在頂端。工作串動輒幾十則，捲到中段想收起來就得先捲回去找標題——
+     釘住之後隨時關得掉，狀態徽章、時間區間、📁 也一直留在視線內。
+     只釘【直接子】summary：委派子卡也有 summary，一起釘會兩層互相蓋住。 */
+  .tcard > summary { position: sticky; top: 0; z-index: 2; background: var(--card);
+                     border-radius: 10px 10px 0 0; }
+  /* 分隔線從 .tbody 移上來：border-top 掛在內容上會跟著捲走，釘住的標題就失去下緣，
+     變成一排字浮在另一排字上面。掛在 summary 才會跟著釘住的那一列走。 */
+  .tcard[open] > summary { border-bottom: 1px solid var(--line); }
   .tcard summary .ttitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tcard summary .trange { font-size: 11px; color: var(--dim); flex: none; }
   .tcard .badge { margin-left: 0; flex: none; }
-  .tcard .tbody { padding: 4px 12px 10px; border-top: 1px solid var(--line); }
+  .tcard .tbody { padding: 4px 12px 10px; }
   .wd { font-size: 11px; color: var(--dim); padding: 6px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .wd:hover { color: var(--accent); text-decoration: underline; }
   /* 產出檔案：卡片展開後列出來，點一下就地預覽（圖片／PDF／純文字） */
