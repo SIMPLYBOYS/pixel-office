@@ -871,6 +871,11 @@ function alignTop(el) {
   const f = $('feed');
   const pad = parseFloat(getComputedStyle(f).paddingTop) || 0;
   f.scrollTop += el.getBoundingClientRect().top - f.getBoundingClientRect().top - pad;
+  // ⚠ 捲動事件是【非同步】的：它會在這行之後才跑，用對齊【後】的位置重算 stuck。
+  // 對齊如果剛好落在底部 40px 內，跟捲就被偷偷打開了——短卡、串尾的卡、以及【每一次
+  // 收合】（feed 縮短，必然貼底）都會踩到。下一次 keepBottom() 就又把人甩到最底部，
+  // 症狀正是「開一次好好的，關掉再開就失效」。所以捲完再關一次。
+  requestAnimationFrame(() => { stuck = false; });
 }
 
 // details 的開合改由 click 接管：toggle 事件是非同步的，程式自動開合會被誤記成使用者意圖
