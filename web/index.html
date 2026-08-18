@@ -818,12 +818,14 @@ async function dispatch(text) {
 }
 
 // 開啟產出資料夾：路徑不從這裡送，只給卡號讓橋自己查（橋端不做任意路徑開啟器）
-async function openDir(cardId) {
-  const r = await (await fetch('/office/open', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent: selected, card: cardId }),
-  })).json();
-  $('hint').textContent = r.ok ? '已開啟產出資料夾 📂' : `開不了：${r.error}`;
+// 跳到上方固定的 📂 工作區面板：展開、捲到可見。面板本身在換人時已載入根目錄；
+// 若使用者先前逛到子目錄，維持原路徑不重設（他要的是「回去看檔案」，不是「回根目錄」）。
+function jumpWs() {
+  const box = $('ws');
+  if (box.hidden) { $('hint').textContent = '這位員工還沒有工作區'; return; }
+  box.open = true;
+  localStorage.wsOpen = '1';
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // Enter 不再送出——textarea 的預設行為就是換行，所以這裡【不攔】它。
@@ -854,7 +856,6 @@ function bindToggle(el, id, t) {
     ev.preventDefault();
     el.open = !el.open;
     tog(id, el.open);
-    if (el.open && t) files(el, t);   // 展開才抓產出清單
   });
 }
 
@@ -1414,40 +1415,24 @@ function cardEl(t) {
     btn.className = 'wdbtn';
     btn.textContent = '📁';
     btn.title = t.workdir + '（開啟資料夾）';
-    btn.onclick = e => { e.preventDefault(); e.stopPropagation(); openDir(t.id); };  // 別順手把卡片摺起來
+    btn.onclick = e => { e.preventDefault(); e.stopPropagation(); jumpWs(); };  // 別順手把卡片摺起來
     el.querySelector('summary').insertBefore(btn, el.querySelector('summary .trange'));
   }
   if (t.workdir) {   // 產出目錄：只留 channels/ 之後那段，完整路徑放 tooltip
     const wd = document.createElement('div');
     wd.className = 'wd';
-    wd.title = t.workdir + '（點擊開啟資料夾）';
+    wd.title = t.workdir + '（點擊跳到上方工作區）';
     wd.textContent = '📁 ' + t.workdir.split('/').slice(-2).join('/');
-    wd.onclick = () => openDir(t.id);   // 產出是一整包檔案，逐個下載沒意義，直接進資料夾
+    wd.onclick = jumpWs;   // 檔案瀏覽在上方固定面板，這裡只是捷徑
     el.querySelector('.tbody').appendChild(wd);
   }
   bindToggle(el, t.id, t);
   return el;
 }
 
-// 產出檔案清單：只在卡片【第一次展開】時抓一次（收合的卡沒人看，別替它打 API）
-async function files(card, t) {
-  const body = card.querySelector('.tbody');
-  if (!t.workdir || body.querySelector('.files')) return;
-  const r = await (await fetch(`/office/files/${selected}/${t.id}`)).json();
-  if (!r.ok || !r.files.length) return;
-  const row = el('div', undefined, 'files');
-  const pv = el('div', undefined, 'pv');
-  pv.style.display = 'none';
-  for (const f of r.files) {
-    const chip = el('span', `${f.name} · ${(f.size / 1024).toFixed(1)}K`, 'chip');
-    chip.onclick = () => showFile(pv, row, chip, f,
-      `/office/file/${selected}/${t.id}?p=${encodeURIComponent(f.name)}`);
-    row.appendChild(chip);
-  }
-  body.insertBefore(row, body.querySelector('.wd')?.nextSibling || null);
-  body.insertBefore(pv, row.nextSibling);
-}
-
+// 產出檔案不再逐卡列：每張卡的 workdir 都是同一個頻道目錄，逐卡展開＝同一批檔案
+// 在每張卡上各印一遍（實測 kanban 一張卡 27 顆 chip，捲三張卡看到 81 顆）。
+// 檔案瀏覽統一交給上方固定的 📂 工作區面板；卡上只留 📁 一行當跳轉。
 function showFile(pv, row, chip, f, url) {  // preview() 已被收合摘要用掉了
   const on = chip.classList.contains('on');
   row.querySelectorAll('.chip').forEach(c => c.classList.remove('on'));
@@ -1553,7 +1538,6 @@ function sync(el, t, bodySel, live) {
   }
 
   el.open = shouldOpen(t);
-  if (el.open && el.classList.contains('tcard')) files(el, t);   // 自動展開的卡也要有清單
 }
 
 async function feed() {
