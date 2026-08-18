@@ -390,6 +390,7 @@ def run() -> None:
     alerts()
     clear_day()
     parallel_subs()
+    headcount()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -630,6 +631,56 @@ def parallel_subs() -> None:
         post(c, agent=parent, kind="done", label="ok")
         assert not any(h in main.busy for h in left), \
             f"主 agent 收工後仍有沒被釋放的支援者：{[h for h in left if h in main.busy]}"
+
+
+def headcount() -> None:
+    """協作人數上限：看板專用、只加在【新任務】上、超出名冊要擋。
+
+    這條合約的另一半在 personas/kanban.md（「開會的規矩」第 1 條）——兩邊都改到才算數，
+    所以措辭關鍵字在這裡也驗一次：主持人認的是「【協作限制】」那五個字。
+    """
+    sent = []
+
+    class _Cap(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}))
+            return _FakeResp()
+
+    with TestClient(main.app) as c:
+        main.httpx.AsyncClient = lambda **kw: _Cap()
+        main.COGITO_HTTP = "http://fake"
+        main.busy.clear()
+
+        c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "題目 A", "people": 3})
+        assert "【協作限制】" in sent[-1]["text"] and "3 位" in sent[-1]["text"], sent[-1]
+        assert sent[-1]["text"].startswith("題目 A"), "限制要附在題目【後面】，不然卡片標題被前綴洗掉"
+
+        # 一位＝不開會，但落檔流程照舊（人少不等於可以跳過 spec/board）
+        c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "題目 B", "people": 1})
+        one = sent[-1]["text"]
+        assert "1 位" in one and "不必開會" in one and "board.json" in one, one
+
+        # 自動：沒帶 people 就一個字都不加——預設行為不能被這個功能改掉
+        c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "題目 C"})
+        assert sent[-1]["text"] == "題目 C", sent[-1]
+
+        # 超出名冊擋下來（上限＝實際人數，不寫死）
+        r = c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "題目 D",
+                                             "people": len(main.npcs()) + 1}).json()
+        assert r["ok"] is False and "參與人數" in r["error"], r
+
+        # 一般員工帶了 people 也不該被加料——他本來就是一個人做
+        c.post("/office/dispatch", json={"agent": "p01", "text": "題目 E", "people": 2})
+        assert sent[-1]["text"] == "題目 E", sent[-1]
+
+        # 進行中的互動不加料：一句 approve 被接上一段指令就不再是 approve 了
+        main.pending_approval["p01"] = "x"
+        main.approval_src["p01"] = "office:p01"
+        main.conv_npc.clear()
+        c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "/stop", "people": 2})
+        assert sent[-1]["text"] == "/stop", sent[-1]
+        main.clear_approval("p01")
+    main.COGITO_HTTP = ""
 
 
 def clear_all() -> None:

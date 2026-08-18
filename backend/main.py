@@ -1732,6 +1732,20 @@ async def office_stream():
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+# 協作人數上限：外殼只送一個數字，怎麼講給主持人聽由橋決定——措辭跟 personas/kanban.md
+# 的「開會的規矩」是一份合約的兩半，散在前端會慢慢對不上。
+#
+# 用【附加一行】而不是改 persona：人數是這一次任務的參數，不是這個角色的長期設定。
+# 寫進 persona 就變成每一次都適用，下一題還得記得改回來。
+def with_headcount(text: str, people: int) -> str:
+    if people == 1:
+        return (f"{text}\n\n【協作限制】這次只找 1 位成員（不含你這位主持人）——"
+                "不必開會，直接請他給意見即可。spec.md、board.json、板子寫好停一次問老闆，"
+                "這些一律照舊。")
+    return (f"{text}\n\n【協作限制】這次最多找 {people} 位成員參與（不含你這位主持人）。"
+            "人選由你判斷，但總數不得超過這個數。")
+
+
 @app.post("/office/dispatch")
 async def office_dispatch(d: dict):
     """Web 外殼派工/審批 → 轉發 cogito HTTP 入口（token 在橋端，瀏覽器拿不到）。"""
@@ -1747,6 +1761,13 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
+    # 人數上限只對看板有意義（其他人本來就是一個人做），而且不能套在 approve/reject//stop
+    # 那些【任務進行中】的互動上——那會把一句 "approve" 變成一段新指令。
+    people = d.get("people")
+    if aid == KANBAN and verb not in ("approve", "reject", "/stop") and isinstance(people, int):
+        if not 1 <= people <= len(npcs()):
+            return {"ok": False, "error": f"參與人數要在 1–{len(npcs())} 之間"}
+        text = with_headcount(text, people)
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
             # 中止時若正卡在審批：【先送駁回再送中止】。agent 這時阻塞在等審批，中止指令它根本

@@ -273,6 +273,16 @@
     color: var(--dim); padding: 9px 12px; resize: none; font: inherit; height: 62px;
   }
   .composer .hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
+  /* 協作人數：只在選中看板時出現。放在輸入框【上方】而不是旁邊——它是這次任務的設定，
+     不是送出動作的一部分，混進同一列會讓人以為要先選才能送。 */
+  .crew { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap;
+          color: var(--dim); margin-bottom: 8px; }
+  .crew label { white-space: nowrap; }   /* 側欄可以被拖窄，標籤斷成兩行會很醜 */
+  .crew select { background: #0f1115; color: var(--text); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 12px; }
+  /* 說明自己佔一行：跟選單擠同一列的話，窄欄下兩邊都會折行 */
+  .crew .note { color: #6b7280; flex-basis: 100%; font-size: 11px; }
+  .crew .note:empty { display: none; }
   .composer textarea:not(:disabled) { color: var(--text); }
   .inputrow { display: flex; gap: 8px; align-items: stretch; }
   .inputrow textarea { flex: 1; }
@@ -350,6 +360,13 @@
     <div class="feed" id="feed"></div>
     <div class="composer">
       <div id="approvalCard" style="display:none"></div>
+      <div class="crew" id="crew" hidden>
+        <label for="crewN">參與人數</label>
+        <select id="crewN">
+          <option value="">自動（主持人自己判斷）</option>
+        </select>
+        <span class="note" id="crewNote"></span>
+      </div>
       <div class="inputrow">
         <textarea id="box" disabled placeholder="先點左側員工，再描述任務…"></textarea>
         <button id="send" disabled>送出</button>
@@ -586,6 +603,28 @@ function updateComposer() {
   // 看板不是人，措辭不能沿用派工那套：「派給這位員工」會讓人以為只有一個人在做，
   // 實際上它會開一場全隊會議、產出 spec、再分工。說清楚它會做什麼，比說它是誰重要。
   const isMode = a && a.npc === false;
+  // 人數選項只給看板：其他人本來就是一個人做，給了只會讓人以為派工也能揪團。
+  // 上限＝名冊實際人數，不寫死——加一位同事不該讓這個選單少一格。
+  const crew = $('crew'), sel = $('crewN');
+  crew.hidden = !isMode;
+  if (isMode) {
+    const team = Object.values(agentsData).filter(x => x.npc !== false).length;
+    if (sel.options.length !== team + 1) {           // 名冊變了才重建，免得每輪把選擇洗掉
+      const keep = sel.value;
+      sel.length = 1;
+      for (let n = 1; n <= team; n++) sel.add(new Option(`${n} 位`, String(n)));
+      sel.value = keep;
+    }
+    if (!sel.dataset.bound) {                        // 記住選擇：同一種任務多半連著派好幾次
+      sel.value = localStorage.crewN || '';
+      sel.onchange = () => { localStorage.crewN = sel.value; updateComposer(); };
+      sel.dataset.bound = '1';
+    }
+    sel.disabled = workingNow;
+    $('crewNote').textContent = sel.value === '1'
+      ? '一位＝不開會，直接請他給意見；spec 與板子照樣會寫'
+      : sel.value ? '這是上限，人選仍由主持人判斷' : '';
+  }
   $('box').placeholder = workingNow
     ? (isMode ? '⏳ 協作進行中——可按「中止」停下整場'
               : `⏳ ${a.name} 工作中——可按「中止」停下這件事`)
@@ -815,11 +854,20 @@ function queueSend(text) {
   }, SEND_GRACE);
 }
 
+// 目前選的人數（null＝自動）。看板以外一律 null——橋那邊也會再擋一次，
+// 兩邊都擋是因為這個值會變成給主持人的指令，送錯對象就是憑空多一段話。
+function crewN() {
+  const a = agentsData[selected];
+  if (!a || a.npc !== false) return null;
+  const v = parseInt($('crewN').value, 10);
+  return Number.isFinite(v) ? v : null;
+}
+
 async function dispatch(text) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent: selected, text: text.trim() }),
+    body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN() }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';
