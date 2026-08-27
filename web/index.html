@@ -158,7 +158,13 @@
              cursor: pointer; font-size: 12.5px; }
   .ws .row:hover { background: #1d212a; }
   .ws .row.on { background: #232936; color: var(--accent); }
-  .ws .row .sz { margin-left: auto; font-size: 11px; color: var(--dim); flex: none; }
+  .ws .row .sz { font-size: 11px; color: var(--dim); flex: none; }
+  /* 改動時間：靠右、等寬數字（不對齊的話一整排時間會左右跳動，掃描起來很吵）。
+     窄欄優先犧牲它而不是檔名——檔名才是找檔案的依據。 */
+  .ws .row .tm { margin-left: auto; font-size: 11px; color: #6b7280; flex: none;
+                 font-variant-numeric: tabular-nums; }
+  .ws .row .tm.fresh { color: var(--accent); }   /* 這次任務剛動過的，一眼分得出來 */
+  @media (max-width: 340px) { .ws .row .tm { display: none; } }
   .ws .row.na { cursor: default; color: var(--dim); }
   .ws .row.na:hover { background: none; }
   /* 標題列的小控制項（↻ 重載、🗑 收掉）。選擇器掛在 .prof 而不是 .ws——任務板是
@@ -804,6 +810,22 @@ async function board(id) {
   }
 }
 
+// 檔案時間的措辭：一小時內講「幾分鐘前」，今天講時分，更早講月/日。
+// 為什麼不一律給完整時間戳——工作區大多是【剛剛才產出】的東西，「3 分鐘前」比
+// 「08/27 18:50」更快回答「這是不是這次任務做的」。完整時間放 title，滑上去看得到。
+const FRESH_MS = 10 * 60 * 1000;   // 十分鐘內＝這一輪剛動過（標黃）
+const isFresh = t => t && Date.now() - t * 1000 < FRESH_MS;
+
+function fileTime(t) {
+  if (!t) return '';
+  const d = new Date(t * 1000), diff = Date.now() - d;
+  if (diff < 60_000) return '剛剛';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分前`;
+  if (d.toLocaleDateString('sv') === today())
+    return d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return d.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' });
+}
+
 async function workspace(id, path) {
   const box = $('ws');
   const r = await (await fetch(`/office/ws/${id}?p=${encodeURIComponent(path)}`)).json();
@@ -832,8 +854,10 @@ async function workspace(id, path) {
   for (const e of r.entries) {
     const size = e.dir ? '' : (e.size / 1024).toFixed(1) + 'K';
     const row = el('div', undefined, 'row' + (e.kind === 'raw' ? ' na' : ''));
+    const tm = el('span', fileTime(e.mtime), 'tm' + (isFresh(e.mtime) ? ' fresh' : ''));
+    tm.title = e.mtime ? new Date(e.mtime * 1000).toLocaleString() : '';
     row.append(el('span', e.dir ? '📁' : e.kind === 'image' ? '🖼' : e.kind === 'pdf' ? '📕' : '📄'),
-                document.createTextNode(e.name), el('span', size, 'sz'));
+                document.createTextNode(e.name), tm, el('span', size, 'sz'));
     if (e.dir) row.onclick = () => workspace(id, e.path);
     else if (e.kind !== 'raw') row.onclick = () => showFile(pv, rows, row, e,
       `/office/wsfile/${id}?p=${encodeURIComponent(e.path)}`);

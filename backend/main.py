@@ -1473,12 +1473,20 @@ def listing(base: Path, rel: str) -> dict:
         if f.name.startswith(".") or (not rel and infra_file(f.name)):
             continue
         r = str(f.relative_to(base))
+        # 改動時間：agent 是【邊做邊寫檔】的，哪些是這次任務剛產出的、哪些是上週留下來的，
+        # 光看檔名分不出來。送秒級 epoch 讓前端自己決定要顯示絕對時間還是「3 分鐘前」——
+        # 格式化交給看得到使用者時區的那一端做。
+        #
+        # 只給 mtime 不給 ctime：POSIX 的 st_ctime 是 inode 變更時間（改權限也會動），
+        # 不是「建立時間」；真正的建立時間 st_birthtime 只有部分平台有。與其送一個
+        # 在 Linux 上會默默變成別的意思的欄位，不如只送一個到處都對的。
+        st = f.stat()
         if f.is_dir():
-            dirs.append({"name": f.name, "path": r, "dir": True})
+            dirs.append({"name": f.name, "path": r, "dir": True, "mtime": int(st.st_mtime)})
         else:
             ext = f.suffix.lstrip(".").lower()
             files.append({"name": f.name, "path": r, "dir": False, "ext": ext,
-                          "size": f.stat().st_size,
+                          "size": st.st_size, "mtime": int(st.st_mtime),
                           "kind": "image" if PREVIEW_TYPES.get(ext, "").startswith("image")
                                   else "pdf" if ext == "pdf"
                                   else "text" if ext in PREVIEW_TYPES else "raw"})

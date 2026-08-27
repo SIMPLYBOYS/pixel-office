@@ -558,6 +558,15 @@ def previews() -> None:
             assert ("AGENTS.md", False) not in names, f"根目錄的 AGENTS.md 該被濾掉：{names}"
             assert ("k.env", False) in names, "白名單外的檔案要列出來（只是不給預覽）"
             assert next(e for e in root["entries"] if e["name"] == "k.env")["kind"] == "raw"
+            # 改動時間：agent 邊做邊寫檔，哪些是這次任務剛產出的、哪些是上週留下來的，
+            # 光看檔名分不出來。目錄與檔案都要有——資料夾也會被寫進東西。
+            import time as _t
+            now = int(_t.time())
+            for e in root["entries"]:
+                assert isinstance(e.get("mtime"), int), f"{e['name']} 少了 mtime：{e}"
+                assert abs(e["mtime"] - now) < 300, f"{e['name']} 的 mtime 不合理：{e['mtime']}"
+            assert any(e["dir"] and "mtime" in e for e in root["entries"]), "資料夾也要有 mtime"
+
             deep = c.get("/office/ws/p01", params={"p": "sub"}).json()
             subnames = [e["name"] for e in deep["entries"]]
             assert deep["ok"] and deep["up"] == "" and "note.txt" in subnames
