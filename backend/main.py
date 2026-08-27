@@ -649,6 +649,31 @@ def npc_by_name(name: str) -> str | None:
     return next((aid for aid, a in npcs().items() if a.name == name), None)
 
 
+def archived_boards() -> list[dict]:
+    """封存過的板（board.<時間>.json）。新的在前。
+
+    只列不展開：清單要回答的是「有哪幾塊、什麼時候的、講什麼」，一次把九塊板的欄位
+    全算出來是白花的。題目與卡數要讀檔才知道，但那是九次小 json——比讓使用者對著
+    一排時間戳猜哪塊是哪塊划算得多。
+    """
+    base = agent_dir(KANBAN)
+    if base is None:
+        return []
+    out = []
+    for f in sorted(base.glob("board.*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if f.name == "board.json":      # 那是活板，不是封存
+            continue
+        item = {"file": f.name, "mtime": int(f.stat().st_mtime), "task": "", "n": 0}
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            item["task"] = d.get("task", "")
+            item["n"] = len(d.get("tasks") or [])
+        except (OSError, ValueError):
+            item["task"] = "（讀不動）"
+        out.append(item)
+    return out
+
+
 def board_file() -> Path | None:
     """目前這塊板。找不到就是還沒上板。
 
@@ -1605,15 +1630,33 @@ def meeting_progress() -> dict | None:
 
 
 @app.get("/office/board")
-def office_board():
+def office_board(f: str = ""):
     """看板快照。還沒上板時退回【會議進度】；連會都還沒開就整個不顯示。
+
+    f=<board.時間.json> 可以指定看某一塊【封存板】。回應一律附上封存清單，讓外殼
+    在「目前沒有活板」時也開得了門——不然收掉最後一塊之後，整個面板連同封存入口
+    一起消失，那些紀錄等於被鎖在磁碟上。
 
     ⚠ 會議進度【不需要工作區】——它的資料全來自任務卡。先前這裡在 agent_dir 為 None 時
     就提早回傳，等於「還沒建過工作區就永遠看不到進度」，順序放錯了。
     """
-    f = board_file()
-    if f is None:
-        return meeting_progress() or {"ok": False, "error": "還沒有進行中的協作任務"}
+    arch = archived_boards()
+    if f:
+        # 只認清單裡的檔名。不接受路徑、不做拼接——這是照使用者輸入去讀磁碟的入口，
+        # 白名單比任何字串檢查都可靠。
+        if not any(a["file"] == f for a in arch):
+            return {"ok": False, "error": "找不到這塊封存板", "archives": arch}
+        picked = agent_dir(KANBAN) / f
+        return board_snapshot(picked, arch, archived=f)
+    live = board_file()
+    if live is None:
+        r = meeting_progress() or {"ok": False, "error": "還沒有進行中的協作任務"}
+        r["archives"] = arch
+        return r
+    return board_snapshot(live, arch)
+
+
+def board_snapshot(f: Path, arch: list[dict], archived: str = "") -> dict:
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -1638,7 +1681,10 @@ def office_board():
     # live＝主持人現在真的在推進這塊板。board.json 只有主持人在跑時才會更新，它一收工
     # 「進行中」那欄就永遠停在原地——畫面上看起來有人在做，實際沒有。投影不能說謊：
     # 板子是不是活的，橋知道，就要講出來。
-    return {"ok": True, "task": data.get("task", ""), "live": KANBAN in busy,
+    # 封存板【永遠】不是活的：它是一份紀錄，不是現在的狀態。就算主持人此刻正在跑，
+    # 這塊板上的「進行中」也早就停在收掉的那一刻——標成 live 就是說謊。
+    return {"ok": True, "task": data.get("task", ""), "live": (not archived) and KANBAN in busy,
+            "archived": archived, "archives": arch,
             "columns": [{"key": k, "name": n, "cards": cols[k]} for k, n in BOARD_COLUMNS]}
 
 

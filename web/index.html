@@ -147,6 +147,18 @@
   .board .people .ok { color: #76c47a; }
   .board .people .bad { color: #e07070; }
   .board .people .wait { color: #e8c454; }
+  /* 封存板：整塊再壓一階，而且左緣一條琥珀色的邊——「你正在看的是紀錄，不是現在」
+     要用【看的】就分得出來，不能只靠標題那行字。 */
+  .board.archived { border-left: 3px solid #6d5a2a; }
+  .board.archived .cols { opacity: .78; }
+  .prof .idle.arch { color: #c9a961; }
+  .board .archlist { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+  .board .arow { display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; font-size: 12px;
+                 border-radius: 6px; cursor: pointer; color: var(--dim); }
+  .board .arow:hover { background: #1d212a; color: var(--text); }
+  .board .arow.on { background: #232936; color: var(--accent); }
+  .board .arow .when { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .board .arow .n { margin-left: auto; flex: none; font-size: 11px; color: #6b7280; }
   /* 未在推進：整塊板降低存在感，「進行中」那欄的卡不再用亮色暗示有人在做 */
   .board .idle { color: #e8c454; font-size: 11px; }
   .board.stale .cols { opacity: .55; }
@@ -711,16 +723,69 @@ let wsPath = '';   // 目前看的相對路徑：重新載入與自動刷新都�
 // 看板面板：唯讀的四欄投影。只在「看板」那張卡上顯示——board.json 是協作模式的產物，
 // 掛在別人身上沒有意義。人不拖卡片，所以這裡沒有任何互動，只有一顆 ↻（agent 寫檔時橋不會知道）。
 let lastBoard = null;   // 上一次成功取得的快照：用來判斷「這次切過來會不會有板子」
+// 封存清單：只在【真的有】封存時才出現。沒有封存的人（多數時候）看到的介面
+// 跟以前一模一樣——這是「看得到歷史」與「介面乾淨」之間唯一不用取捨的做法：
+// 入口的存在本身就是資料驅動的。
+function archBtn(arch) {
+  return arch.length ? `<span class="rl ar" title="看過去封存的板">🗄 封存 ${arch.length}</span>` : '';
+}
+
+const archWhen = (arch, file) => {
+  const a = arch.find(x => x.file === file);
+  return a ? new Date(a.mtime * 1000).toLocaleString('zh-TW',
+    { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : file;
+};
+
+// 清單預設收著，按 🗄 才展開——九塊板一次全列出來就是把面板變成檔案總管。
+function bindArch(box, id, arch) {
+  const list = box.querySelector('.archlist');
+  const btn = box.querySelector('.ar');
+  if (!btn || !list) return;
+  btn.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    if (list.children.length) { list.textContent = ''; return; }   // 再按一次＝收起來
+    for (const a of arch) {
+      const row = el('div', undefined, 'arow' + (a.file === viewArch ? ' on' : ''));
+      row.append(el('span', archWhen(arch, a.file), 'when'),
+                 document.createTextNode(a.task || a.file),
+                 el('span', `${a.n} 卡`, 'n'));
+      row.onclick = () => { viewArch = a.file; board(id); };
+      list.appendChild(row);
+    }
+  };
+}
+
+// 正在看哪一塊【封存板】（''＝目前的活板）。收掉最後一塊之後整個面板會消失，
+// 那些紀錄就等於被鎖在磁碟上——所以封存入口即使沒有活板也要開得了門。
+let viewArch = '';
+
 async function board(id) {
   const box = $('board');
   if (!agentsData[id] || agentsData[id].npc !== false) { box.hidden = true; return; }
   // 已經知道有板子，就【先把版面撐好】再去抓。等 fetch 回來才決定顯不顯示的話，右欄會在切換
   // 時多跳一次（量到 feed 高度 573→245 隔了一整幀），看起來就是閃一下。
   if (lastBoard) box.hidden = false;
-  const r = await (await fetch('/office/board')).json();
-  box.hidden = !r.ok;
+  const r = await (await fetch('/office/board' + (viewArch ? `?f=${encodeURIComponent(viewArch)}` : ''))).json();
+  const arch = r.archives || [];
+  if (viewArch && !r.ok) { viewArch = ''; return board(id); }   // 那塊板被刪了：退回目前的板
+  box.hidden = !r.ok && !arch.length;
   lastBoard = r.ok ? r : null;
-  if (!r.ok) return;
+  if (!r.ok) {
+    // 沒有活板、但有封存：只畫一行入口。這是整個面板最樸素的狀態——
+    // 有東西可看就別把門關上，但也別假裝有一塊板在跑。
+    // 樣式要在【提早 return 之前】清掉。從封存板按「回到目前」會走到這條分支，
+    // 標題換回來了、琥珀色左緣卻還在——看起來像還在看紀錄。
+    box.classList.remove('archived', 'stale');
+    const sig = 'arch:' + arch.map(a => a.file).join(',');
+    if (box.dataset.sig !== sig || !box.children.length) {
+      box.dataset.sig = sig;
+      box.innerHTML = `<summary>🗂 任務板　<span class="idle">目前沒有進行中的板</span>
+          ${archBtn(arch)}</summary><div class="body"><div class="archlist"></div></div>`;
+      bindArch(box, id, arch);
+      box.open = localStorage.boardOpen !== '0';
+    }
+    return;
+  }
   // 內容沒變就不要重畫：推進中每一則事件都會呼叫這裡，每次都重建 innerHTML 就是持續閃爍。
   const sig = JSON.stringify(r);
   if (box.dataset.sig === sig && box.children.length) return;
@@ -754,18 +819,27 @@ async function board(id) {
   // 圖示與名詞都要跟上面那張人設卡分開——兩個「📋 看板」並排，沒人分得出誰是誰。
   // 「未在推進」要講出來：board.json 只有主持人在跑時才更新，它收工後「進行中」那欄會停在
   // 原地，畫面上看起來有人在做、實際沒有。投影寧可顯得樸素，也不能說謊。
-  box.innerHTML = `<summary>🗂 任務板${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
-      ${r.live ? '' : '<span class="idle">⏸ 未在推進</span>'}
+  // 看封存板時措辭要換掉：它不是「未在推進」（那是活板停擺），是一份【已經結束的紀錄】。
+  // 也不給 🗑——封存板沒有「收掉」這回事，按了只會去動到活板。
+  box.innerHTML = `<summary>🗂 ${r.archived ? '封存板' : '任務板'}${r.task ? '｜' + esc(r.task.slice(0, 40)) : ''}
+      ${r.archived ? `<span class="idle arch">🗄 ${esc(archWhen(arch, r.archived))} 的紀錄</span>`
+                   : r.live ? '' : '<span class="idle">⏸ 未在推進</span>'}
       <span class="rl" title="重新載入">↻</span>
-      <span class="rl clr" title="收掉這塊板（改名封存在工作區，不會真的刪掉）">🗑 收掉</span></summary>
-    <div class="body"><div class="cols"></div></div>`;
-  for (const [sel, fn] of [['.rl', () => board(id)], ['.clr', clearBoard]])
+      ${r.archived ? '<span class="rl back" title="回到目前的板">↩ 回到目前</span>'
+                   : '<span class="rl clr" title="收掉這塊板（改名封存在工作區，不會真的刪掉）">🗑 收掉</span>'}
+      ${archBtn(arch)}</summary>
+    <div class="body"><div class="archlist"></div><div class="cols"></div></div>`;
+  const acts = [['.rl', () => board(id)]];
+  acts.push(r.archived ? ['.back', () => { viewArch = ''; board(id); }] : ['.clr', clearBoard]);
+  for (const [sel, fn] of acts)
     box.querySelector(sel).onclick = e => {
       e.preventDefault(); e.stopPropagation();   // 不要順手把面板收起來
       fn();
     };
+  bindArch(box, id, arch);
   box.open = wasOpen;
   box.classList.toggle('stale', !r.live);
+  box.classList.toggle('archived', !!r.archived);
   // ontoggle 而非 addEventListener：這個函式每收到一則事件就重跑一次，addEventListener 會愈疊愈多
   box.ontoggle = () => {
     localStorage.boardOpen = box.open ? '1' : '0';

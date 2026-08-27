@@ -391,6 +391,7 @@ def run() -> None:
     clear_day()
     parallel_subs()
     headcount()
+    board_archive()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -690,6 +691,55 @@ def headcount() -> None:
         assert sent[-1]["text"] == "/stop", sent[-1]
         main.clear_approval("p01")
     main.COGITO_HTTP = ""
+
+
+def board_archive() -> None:
+    """封存板：沒有活板時也列得出來、指定看得到、而且【永遠不是 live】、檔名只認白名單。
+
+    最後那條是安全線：f= 是照使用者輸入去讀磁碟的入口，白名單比任何字串檢查都可靠。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        k = Path(tmp) / "office_kanban"
+        k.mkdir()
+        (k / "board.0812-123840.json").write_text(json.dumps({
+            "task": "封存的題目", "tasks": [{"id": "a", "title": "甲", "status": "done"},
+                                            {"id": "b", "title": "乙", "deps": ["a"], "status": "todo"},
+                                            {"id": "c", "title": "丙", "deps": ["b"], "status": "todo"}]},
+            ensure_ascii=False), encoding="utf-8")
+        old_dir, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp)
+        main.history.clear(); main.last_report.clear()
+        try:
+            with TestClient(main.app) as c:
+                # 沒有活板：面板不能整個消失，否則那些紀錄等於被鎖在磁碟上
+                r = c.get("/office/board").json()
+                assert r["ok"] is False, r
+                assert [a["file"] for a in r["archives"]] == ["board.0812-123840.json"], r
+                assert r["archives"][0]["task"] == "封存的題目" and r["archives"][0]["n"] == 3
+
+                # 指定看：欄位照樣【算】出來，不是照 status 直接分——
+                # b 的相依(a)已完成＝待辦，c 的相依(b)還沒完成＝等待相依
+                r = c.get("/office/board", params={"f": "board.0812-123840.json"}).json()
+                assert r["ok"] and r["archived"] == "board.0812-123840.json", r
+                got = {c2["key"]: len(c2["cards"]) for c2 in r["columns"]}
+                assert got == {"todo": 1, "blocked": 1, "doing": 0, "done": 1}, got
+
+                # 封存板【永遠】不是活的——就算主持人此刻正在跑，這塊板早就停在收掉那一刻
+                main.busy.add(main.KANBAN)
+                assert c.get("/office/board", params={"f": "board.0812-123840.json"}
+                             ).json()["live"] is False
+                main.busy.discard(main.KANBAN)
+
+                # 檔名白名單：只認清單裡的檔名。
+                # ⚠ 這裡要驗【錯誤訊息】而不只是 ok=False——越界路徑就算白名單被拔掉，
+                # 最後也會因為「讀不動」回 false，測試照樣綠。那種綠的是假的：
+                # 真正的風險是指到一個【合法 JSON】的檔（磁碟上到處都是），
+                # 那時沒有白名單就真的讀出來了。所以判準是「有沒有走到讀檔那一步」。
+                for bad in ("../../../etc/passwd", "board.json", "沒這個.json"):
+                    r = c.get("/office/board", params={"f": bad}).json()
+                    assert r["ok"] is False and r["error"] == "找不到這塊封存板", (bad, r)
+        finally:
+            main.CHANNELS_DIR = old_dir
 
 
 def clear_all() -> None:
