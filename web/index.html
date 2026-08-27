@@ -268,9 +268,13 @@
   .subcard .subbody { padding: 2px 0 8px 4px; }
   .face.sm { width: 22px; height: 22px; border-radius: 5px; }
   .composer { border-top: 1px solid var(--line); padding: 12px 16px; }
+  /* 輸入框可以往上拉高：多行的任務描述在 62px 裡幾乎看不清楚（實際回報）。
+     只開【垂直】——寬度歸側欄的拖曳桿管，兩套調寬的機制會互相打架。
+     上限 45vh：再高就把工作串擠沒了，那是這個面板的主角。 */
   .composer textarea {
     width: 100%; background: #0f1115; border: 1px solid var(--line); border-radius: 8px;
-    color: var(--dim); padding: 9px 12px; resize: none; font: inherit; height: 62px;
+    color: var(--dim); padding: 9px 12px; resize: vertical; font: inherit;
+    height: 62px; min-height: 62px; max-height: 45vh;
   }
   .composer .hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
   /* 協作人數：只在選中看板時出現。放在輸入框【上方】而不是旁邊——它是這次任務的設定，
@@ -284,10 +288,13 @@
   .crew .note { color: #6b7280; flex-basis: 100%; font-size: 11px; }
   .crew .note:empty { display: none; }
   .composer textarea:not(:disabled) { color: var(--text); }
-  .inputrow { display: flex; gap: 8px; align-items: stretch; }
+  /* 底部對齊而不是 stretch：輸入框可以被拉高，送出鈕不該跟著長成一大塊黃色。
+     貼齊輸入框下緣，跟大多數聊天介面的手感一致。 */
+  .inputrow { display: flex; gap: 8px; align-items: flex-end; }
   .inputrow textarea { flex: 1; }
   .inputrow button {
     border: 0; border-radius: 8px; padding: 0 18px; font: inherit; cursor: pointer;
+    height: 62px; flex: none;
     background: var(--accent); color: #241c05;
   }
   .inputrow button:disabled { background: #2a2f3a; color: var(--dim); cursor: default; }
@@ -823,6 +830,16 @@ async function profile(id) {
 
 // 送出前的反悔窗。派工是【不可逆】的——一旦進了 cogito 就開始花錢，也沒有「收回」這回事，
 // 只能 /stop（那時前面的步驟已經跑過了）。所以真正能反悔的位置只有【還沒送出去之前】。
+// 記住輸入框被拉成多高。純視覺偏好，放 localStorage 就好（跟提示音靜音同一級）。
+// 用 ResizeObserver 而不是監聽拖曳：使用者也可能用鍵盤或瀏覽器手勢改大小。
+addEventListener('DOMContentLoaded', () => {
+  const box = $('box');
+  if (localStorage.boxH) box.style.height = localStorage.boxH;
+  new ResizeObserver(() => {
+    if (box.style.height) localStorage.boxH = box.style.height;
+  }).observe(box);
+});
+
 const SEND_GRACE = 1600;   // ms：夠按到 Esc，又不會讓人覺得卡住
 let pendingSend = null;    // {timer, text}
 
