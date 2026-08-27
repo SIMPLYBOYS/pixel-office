@@ -19,6 +19,12 @@
   :root { --rail: 232px; --dock: 400px; }
   .grip { background: var(--line); cursor: col-resize; }
   .grip:hover, body.dragging .grip { background: var(--accent); }
+  /* 橫向把手：工作串與輸入區之間那條線。它就是 .composer 原本的上框線，
+     只是改成拖得動的——線本來就在那裡，使用者以為可以拖是很自然的期待。 */
+  .hgrip { height: 5px; flex: none; background: var(--line); cursor: row-resize; }
+  .hgrip:hover, body.vdragging .hgrip { background: var(--accent); }
+  body.vdragging { cursor: row-resize; user-select: none; }
+  body.vdragging iframe { pointer-events: none; }   /* 同 body.dragging：別讓游標掉進 Unity 畫布 */
   /* 拖曳中讓 iframe 不吃事件——否則游標一進 Unity 畫布就斷開 */
   body.dragging iframe { pointer-events: none; }
   body.dragging { cursor: col-resize; user-select: none; }
@@ -267,7 +273,7 @@
   .subcard .trange { font-size: 11px; color: var(--dim); flex: none; margin-left: auto; }
   .subcard .subbody { padding: 2px 0 8px 4px; }
   .face.sm { width: 22px; height: 22px; border-radius: 5px; }
-  .composer { border-top: 1px solid var(--line); padding: 12px 16px; }
+  .composer { padding: 12px 16px; }   /* 上框線由 .hgrip 擔任 */
   /* 輸入框可以往上拉高：多行的任務描述在 62px 裡幾乎看不清楚（實際回報）。
      只開【垂直】——寬度歸側欄的拖曳桿管，兩套調寬的機制會互相打架。
      上限 45vh：再高就把工作串擠沒了，那是這個面板的主角。 */
@@ -365,6 +371,7 @@
     <details class="prof board" id="board" hidden></details>
     <details class="prof" id="profile" hidden></details>
     <div class="feed" id="feed"></div>
+    <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
     <div class="composer">
       <div id="approvalCard" style="display:none"></div>
       <div class="crew" id="crew" hidden>
@@ -448,6 +455,40 @@ function bindGrip(id, opt) {
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => g.addEventListener(ev, endDrag));
   g.addEventListener('dblclick', () => { opt.set(opt.def); localStorage[opt.key] = opt.def; });
 }
+// 橫向把手：拖那條線＝調整輸入框高度。
+//
+// 刻意【不】另外做一套「composer 高度」的狀態：輸入框自己的 resize 角把手已經在改
+// box.style.height 了，再加一個各改各的高度，兩邊就會互相打架（拖線變高、拉角又跳回去）。
+// 這裡改的是同一個值、存的是同一個 key——兩個入口，一份真相。
+const BOX_DEF = '62px';
+function setBoxH(px) {
+  const box = $('box');
+  const max = innerHeight * 0.45;      // 同 CSS 的 max-height：拉過頭會把工作串擠沒了
+  box.style.height = Math.max(62, Math.min(px, max)) + 'px';
+}
+(() => {
+  const g = $('gripB');
+  let startY = 0, startH = 0;
+  const end = () => {
+    if (!document.body.classList.contains('vdragging')) return;
+    document.body.classList.remove('vdragging');
+    localStorage.boxH = $('box').style.height;
+  };
+  g.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    g.setPointerCapture(e.pointerId);
+    startY = e.clientY;
+    startH = $('box').getBoundingClientRect().height;
+    document.body.classList.add('vdragging');
+  });
+  g.addEventListener('pointermove', e => {
+    if (!document.body.classList.contains('vdragging')) return;
+    if (!e.buttons) return end();       // 同直向把手：在視窗外放手時 pointerup 不會回來
+    setBoxH(startH + (startY - e.clientY));   // 往上拖＝輸入區變高
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => g.addEventListener(ev, end));
+  g.addEventListener('dblclick', () => { setBoxH(62); localStorage.boxH = BOX_DEF; });
+})();
 bindGrip('gripL', { set: setRail, fromX: x => x, def: RAIL_DEF, key: 'railW', varName: '--rail' });
 bindGrip('gripR', { set: setDock, fromX: x => innerWidth - x, def: DOCK_DEF, key: 'dockW', varName: '--dock' });
 addEventListener('resize', () => { setRail(cssW('--rail')); setDock(cssW('--dock')); });
