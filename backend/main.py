@@ -1017,7 +1017,7 @@ def dup_of_last(aid: str, text: str) -> bool:
     長度門檻本來就是錯的抽象：它想擋的是「✓ bash」「第 5 輪」那種會正常重複的記號，
     但那些兩邊都不帶 💬，用前綴狀態就分得乾淨，跟長短無關。
 
-    截斷長度兩條路不同（300 vs 200），所以比【較短那段的前綴】而不是整段。
+    兩條路的排版改寫與長度都可能不同，所以比【正規化後的前綴】（sig）而不是整段。
     """
     card = last_report.get(aid)
     if not card or not card.get("events"):
@@ -1084,18 +1084,26 @@ def write_tool_text(label: str, detail: str) -> str | None:
 
 
 def tl_text(kind: str, label: str, detail: str) -> str | None:
-    """事件 → 時間軸一行；None＝不記（think/turn）。比泡泡完整（帶參數/結果預覽）。"""
+    """事件 → 時間軸一行；None＝不記（think/turn）。
+
+    這裡是「dashboard 看得到、辦公室看不到」的主要漏斗（實際回報：對照 run view 才發現
+    工作串訊息不完整，常不知道下一步怎麼操作）——所以原則改成：**cogito 已經替每種
+    事件截好長度（msg 8000/result 400/tool 120），橋不再二次剪裁**。二次剪裁砍掉的
+    正好是 agent 放在訊息尾巴的行動指示（「下一步需要你確認 X」）。
+    """
     if kind == "tool":
         if label in WRITE_TOOLS and detail:
             if (block := write_tool_text(label, detail)) is not None:
                 return block
-        return f"▸ {label}" + (f"｜{detail[:80]}" if detail else "")
+        return f"▸ {label}" + (f"｜{detail}" if detail else "")
     if kind == "result":
-        return f"✓ {label}"
+        # 先前只畫「✓ 工具名」——cogito 明明帶了結果預覽，被整個丟掉；
+        # dashboard 有 160 字預覽，工作串 0 字，落差就是這樣來的。
+        return f"✓ {label}" + (f"｜{detail}" if detail else "")
     if kind == "error":
-        return f"✗ {label}" + (f"：{detail[:120]}" if detail else "")
+        return f"✗ {label}" + (f"：{detail}" if detail else "")
     if kind == "msg":
-        return label[:200]
+        return label  # 全文入卡。去重（sig）比正規化前 40 字、卡片事件數有上限，放寬安全
     return None
 
 
@@ -1212,7 +1220,10 @@ async def office_event(ev: dict):
         card = last_report.get(aid) or report_card(aid, "（橋重啟，任務開頭沒記到）")
         if aid not in chat_mode:  # 閒聊的回話不覆蓋任務的報告全文
             card["report"] = label
-        log_ev(aid, label[:200])
+        # 全文入時間軸（原本砍到 200 字）。agent 的行動指示常在訊息【尾巴】——「板子開好了，
+        # 下一步需要你回覆 X」——砍掉的正好是那段（實際回報：對照 dashboard 才發現訊息不完整，
+        # 常不知道下一步怎麼操作）。card["report"] 只留最後一則，中間輪次的全文只有這裡。
+        log_ev(aid, label)
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
         if chatting and (desk := WORK_DESK.get(aid)):
             await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
@@ -1392,7 +1403,7 @@ async def office_chat(ev: dict):
         else:
             await pose(aid, "phone")   # 原地等：沒有走位，就不必等抵達
         await bubble(aid, "⚠ 等待審批")
-    log_ev(aid, f"💬 {text[:300]}")   # 重複由 log_ev 統一擋（同一則訊息會走兩條路送來）
+    log_ev(aid, f"💬 {text}")   # 全文入卡（與 msg 路對齊）；重複由 log_ev 統一擋（同一則訊息會走兩條路送來）
     return {"ok": True}
 
 

@@ -394,6 +394,7 @@ def run() -> None:
     board_archive()
     cost_projection()
     steer_dispatch()
+    full_stream()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -889,6 +890,38 @@ def steer_dispatch() -> None:
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
+
+
+def full_stream() -> None:
+    """工作串不再是 dashboard 的殘缺版：msg 全文入卡（指示常在尾巴）、result/error 帶內容。
+
+    「dashboard 看得到、辦公室看不到」的漏斗都在橋端的二次剪裁——cogito 已替每種事件
+    截好長度，橋不再剪。實際回報：對照 run view 才發現訊息不完整，不知道下一步怎麼操作。
+    """
+    with TestClient(main.app) as c:
+        main.busy.discard("p12")
+        post(c, agent="p12", kind="start", label="整理規格")
+        # ① msg：600 字、行動指示在最尾巴——先前砍到 200 字，尾巴必丟
+        body = "規格整理如下：" + "細節" * 290 + "【下一步請回覆採用方案 B】"
+        post(c, agent="p12", kind="msg", label=body)
+        evs = [e["text"] for e in c.get("/office/report/p12").json()["timeline"]]
+        assert any(t.endswith("【下一步請回覆採用方案 B】") for t in evs), \
+            f"msg 的尾巴（行動指示）被砍掉了：{[t[-30:] for t in evs]}"
+        # ② result：先前只畫「✓ 工具名」，cogito 帶的結果預覽整個被丟
+        post(c, agent="p12", kind="result", label="bash", detail="3 處 TODO，都在 tools/")
+        evs = [e["text"] for e in c.get("/office/report/p12").json()["timeline"]]
+        assert "✓ bash｜3 處 TODO，都在 tools/" in evs, evs
+        # ③ error：detail 不再砍在 120 字
+        long_err = "編譯失敗：" + "錯" * 150
+        post(c, agent="p12", kind="error", label="go", detail=long_err)
+        evs = [e["text"] for e in c.get("/office/report/p12").json()["timeline"]]
+        assert any(t == f"✗ go：{long_err}" for t in evs), [t[-20:] for t in evs]
+        # ④ chat 路同步放寬（同一個對話窗，兩條路不能一寬一窄）
+        chat = "好的老闆，" + "說明" * 200 + "【收尾：明天給你完整報告】"
+        c.post("/office/chat", json={"agent": "office:p12", "text": chat})
+        evs = [e["text"] for e in c.get("/office/report/p12").json()["timeline"]]
+        assert any(t.endswith("【收尾：明天給你完整報告】") for t in evs), "chat 尾巴被砍"
+        post(c, agent="p12", kind="done", label="ok")
 
 
 def dup_msg() -> None:
