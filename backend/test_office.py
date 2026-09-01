@@ -393,6 +393,7 @@ def run() -> None:
     headcount()
     board_archive()
     cost_projection()
+    steer_dispatch()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -847,6 +848,45 @@ def stop_clears_approval() -> None:
             assert "p07" not in main.pending_approval, "審批卡沒收掉，畫面會一直卡在選擇上"
     finally:
         main.httpx.AsyncClient = old
+        main.COGITO_HTTP = ""
+        main.busy.discard("p07")
+
+
+def steer_dispatch() -> None:
+    """插話（steer→constrain→stop 的第一階）：工作中放行 /steer 轉發 cogito、
+    投影進工作串；閒著時擋下——代發成新任務會把「糾正」靜默升級成「開工」。"""
+    sent = []
+
+    class _Rec(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}).get("text"))
+            return _FakeResp()
+
+    main.COGITO_HTTP = "http://fake"
+    old_client = main.httpx.AsyncClient
+    main.httpx.AsyncClient = lambda **kw: _Rec()
+    try:
+        with TestClient(main.app) as c:
+            # 閒著：插不了話，且【不能】轉發（送過去就變成一句新訊息）
+            main.busy.discard("p07")
+            r = c.post("/office/dispatch", json={"agent": "p07", "text": "/steer 先查快取"}).json()
+            assert r["ok"] is False and "沒在工作中" in r["error"], r
+            assert sent == [], f"閒置時不該轉發 cogito：{sent}"
+
+            # 工作中：放行、原文轉發、工作串留痕
+            post(c, agent="p07", kind="start", label="盤點依賴")
+            r = c.post("/office/dispatch", json={"agent": "p07", "text": "/steer 別再讀 lock 檔，直接看 go.mod"}).json()
+            assert r["ok"], r
+            assert sent == ["/steer 別再讀 lock 檔，直接看 go.mod"], sent
+            evs = [e["text"] for e in c.get("/office/report/p07").json()["timeline"]]
+            assert any("🧑‍💼 老闆插話：別再讀 lock 檔" in t for t in evs), evs
+
+            # 空插話擋下
+            r = c.post("/office/dispatch", json={"agent": "p07", "text": "/steer"}).json()
+            assert r["ok"] is False and "空的" in r["error"], r
+            post(c, agent="p07", kind="done", label="ok")
+    finally:
+        main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
 

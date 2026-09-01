@@ -138,7 +138,7 @@ cogito 早就有——`internal/tools/worktree.go` 開 detached worktree、merge
 | # | 條目 | 狀態 | 依據 |
 |---|---|---|---|
 | ① | 記憶庫進 git | ✅ 已完成（cogito `533953d`，2026-09-01）。盤點時發現 `workspace/.git` 早已存在（agent 自己會 commit skills 進去），缺的只是沒人 commit 記憶——補上 `commitMemory`：單一提交者、一提案一 commit、撤回留帳、非 git 工作區靜默降級；既有 229 個記錄檔收成基線 commit | `evolve/memory_git.go` |
-| ② | steer 這一階 | ❌ 未做。cogito 忙碌時明拒（`core.go` ⏳ 上一個任務仍在進行…可用 /stop）；橋的 verb 白名單只有 approve/reject//stop；`reminder.go` 的 nudge 是內部系統提醒，使用者塞不進去 | `chatbot/core.go` tryAcquire 分支 |
+| ② | steer 這一階 | ✅ 已完成（cogito `b804751` ＋橋與外殼，2026-09-01）：`/steer` 走不佔鎖的指令 gate → session 插話佇列 → 引擎回合邊界收進對話（不打斷當前步驟）；外殼工作中開放輸入框，按鈕依內容切「中止／📨 插話」；閒置時擋下不代發（「糾正」不得靜默升級成「開工」）。constrain 刻意不做——MaxTurns/MaxCostUSD 已是硬防線，需求出現再說 | `chatbot/core.go` trySteerCommand |
 | ③ | 回覆義務＋hop cap | ➖ 不適用，維持不動。仍是星狀拓撲，沒有點對點信箱 | grep 無 mailbox/inbox |
 | ④ | 成本讀真的 | ✅ 已完成（cogito `232cea3` ＋橋端，2026-09-01）：done 事件帶本次真實花費（0/未知不送——顯示 $0.0000 是把「沒拿到 usage」偽裝成「免費」）；卡片時間欄「16:54–16:55｜$0.0231」、時間軸「✔ 任務完成（$0.0231）」，中斷也標帳 | `office_reporter.go` Cost 欄位 |
 | ⑤ | worktree 隔離 | ✅ 已完成（筆記原文寫錯，已更正見上） | `tools/worktree.go`、`agents/implementer.md` |

@@ -654,18 +654,29 @@ setInterval(() => {
   if (Object.values(agentsData).some(a => a.approval)) cue('approval');
 }, 60000);
 
-// 忙碌防呆：選中的員工工作中 → 鎖送出（審批按鈕不受影響，那是任務中互動）
+// 忙碌時的 composer：不鎖輸入框——工作中打字是「插話」（糾正方向、不中止），
+// 按鈕依內容切換：空＝中止、有字＝📨 插話。切換是看得見的（字樣＋顏色一起變），
+// 不會發生「以為按中止結果送出插話」——想中止就把字清掉（Esc 或全選刪除）。
 function updateComposer() {
   if (!selected) return;
   const a = agentsData[selected];
   const workingNow = !!(a && a.busy);
-  const btn = $('send');
-  $('box').disabled = workingNow;   // 工作中不收新任務…
-  btn.disabled = false;             // …但按鈕改成中止，別讓人只能乾等
-  btn.textContent = workingNow ? '中止' : '送出';
-  btn.classList.toggle('stop', workingNow);
-  // 中止要立刻生效（那本身就是反悔），只有派工走反悔窗
-  btn.onclick = () => workingNow ? dispatch('/stop') : queueSend($('box').value);
+  const btn = $('send'), box = $('box');
+  box.disabled = false;
+  btn.disabled = false;
+  const paint = () => {
+    const steering = workingNow && box.value.trim();
+    btn.textContent = workingNow ? (steering ? '📨 插話' : '中止') : '送出';
+    btn.classList.toggle('stop', workingNow && !steering);
+  };
+  paint();
+  box.oninput = paint;
+  // 中止與插話都立刻生效（中止是反悔、插話搶的就是時機），只有派工走反悔窗
+  btn.onclick = () => {
+    const t = box.value.trim();
+    if (!workingNow) return queueSend(box.value);
+    return t ? steer(t) : dispatch('/stop');
+  };
   // 看板不是人，措辭不能沿用派工那套：「派給這位員工」會讓人以為只有一個人在做，
   // 實際上它會開一場全隊會議、產出 spec、再分工。說清楚它會做什麼，比說它是誰重要。
   const isMode = a && a.npc === false;
@@ -691,9 +702,9 @@ function updateComposer() {
       ? '一位＝不開會，直接請他給意見；spec 與板子照樣會寫'
       : sel.value ? '這是上限，人選仍由主持人判斷' : '';
   }
-  $('box').placeholder = workingNow
-    ? (isMode ? '⏳ 協作進行中——可按「中止」停下整場'
-              : `⏳ ${a.name} 工作中——可按「中止」停下這件事`)
+  box.placeholder = workingNow
+    ? (isMode ? '⏳ 協作進行中——打字可「插話」給主持人糾正方向（不中止），或按「中止」停下整場'
+              : `⏳ ${a.name} 工作中——打字可「插話」糾正方向（不中止），或按「中止」停下這件事`)
     : (isMode ? '描述一件要整隊完成的任務——會先開會、收斂成 spec，再分工…'
               : '描述任務派給這位員工…');
 }
@@ -1017,6 +1028,17 @@ function crewN() {
   if (!a || a.npc !== false) return null;
   const v = parseInt($('crewN').value, 10);
   return Number.isFinite(v) ? v : null;
+}
+
+// 插話：塞一句話給【進行中】的任務糾正方向（cogito 下一輪生效），不打斷正在跑的那一步。
+// 不走反悔窗——插話搶的就是時機，1.6 秒後才送等於看著它再走錯一步。
+async function steer(text) {
+  const r = await (await fetch('/office/dispatch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: selected, text: '/steer ' + text }),
+  })).json();
+  $('hint').textContent = r.ok ? '已插話 📨 下一輪生效——不打斷正在跑的那一步' : `插話失敗：${r.error}`;
+  if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
 }
 
 async function dispatch(text) {

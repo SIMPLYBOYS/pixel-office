@@ -1816,17 +1816,24 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": "缺 agent 或 text"}
     verb = text.split()[0]
     # 防呆：工作中不收新任務（cogito 也會擋，這裡先給即時回饋）。
-    # approve/reject/stop 是任務【進行中】的互動，一律放行——擋住中止等於沒有中止。
+    # approve/reject/stop/steer 是任務【進行中】的互動，一律放行——擋住中止等於沒有中止，
+    # 擋住插話等於把「糾正走偏」的唯一選項留給「殺掉重來」。
     if verb in ("approve", "reject") and (src := approval_from(aid)):
         return {"ok": False, "error": f"這張審批來自 {src}，請回 {src} 核准（cogito 按頻道解析審批）"}
-    if aid in busy and verb not in ("approve", "reject", "/stop"):
+    if aid in busy and verb not in ("approve", "reject", "/stop", "/steer"):
         return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
+    # 插話只在工作中有意義。閒著時不代發成新任務——那會把「糾正」靜默升級成「開工」。
+    if verb == "/steer":
+        if aid not in busy:
+            return {"ok": False, "error": f"{agents[aid].name} 沒在工作中，插不了話——直接派任務就好"}
+        if not text[len("/steer"):].strip():
+            return {"ok": False, "error": "插話是空的——/steer 後面要接要補的那句話"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
     # 人數上限只對看板有意義（其他人本來就是一個人做），而且不能套在 approve/reject//stop
     # 那些【任務進行中】的互動上——那會把一句 "approve" 變成一段新指令。
     people = d.get("people")
-    if aid == KANBAN and verb not in ("approve", "reject", "/stop") and isinstance(people, int):
+    if aid == KANBAN and verb not in ("approve", "reject", "/stop", "/steer") and isinstance(people, int):
         if not 1 <= people <= len(npcs()):
             return {"ok": False, "error": f"參與人數要在 1–{len(npcs())} 之間"}
         text = with_headcount(text, people)
@@ -1851,6 +1858,10 @@ async def office_dispatch(d: dict):
         # 真正收卡等 cogito 的 done 事件——中止要等目前這一步（模型呼叫或工具）跑完才生效。
         log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
         await bubble(aid, "⚠ 中斷")
+    elif verb == "/steer":
+        # 投影：插話上工作串（卡片正開著，直接掛進去）＋泡泡。cogito 端下一輪生效。
+        log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
+        await bubble(aid, "📨 插話")
     elif verb in ("approve", "reject"):
         clear_approval(aid)  # cogito 確認收到才收卡
         notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
