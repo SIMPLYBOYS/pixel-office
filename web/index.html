@@ -305,6 +305,9 @@
      不是送出動作的一部分，混進同一列會讓人以為要先選才能送。 */
   .crew { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap;
           color: var(--dim); margin-bottom: 8px; }
+  /* display:flex 的特異度蓋過 hidden 屬性的 UA display:none——JS 一直有把 hidden 設對，
+     但畫面照樣顯示（實際回報：選個別員工仍看到「參與人數」）。這行把 hidden 的話語權還回去。 */
+  .crew[hidden] { display: none; }
   .crew label { white-space: nowrap; }   /* 側欄可以被拖窄，標籤斷成兩行會很醜 */
   .crew select { background: #0f1115; color: var(--text); border: 1px solid var(--line);
                  border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 12px; }
