@@ -137,7 +137,7 @@ cogito 早就有——`internal/tools/worktree.go` 開 detached worktree、merge
 
 | # | 條目 | 狀態 | 依據 |
 |---|---|---|---|
-| ① | 記憶庫進 git | ❌ 未做，但**比筆記寫的更近**：`workspace/.git` 已存在（agent 自己會 commit skills 進去），只是 `.claw/memory/` 沒被追蹤、apply/undo 沒有 commit 呼叫。剩下的只是在 `ApplyProposedMemory`／`RevokeAutopass` 收尾時 add+commit 記憶目錄 | `git -C workspace ls-files .claw/memory` 空 |
+| ① | 記憶庫進 git | ✅ 已完成（cogito 533953d，2026-09-01）：commitMemory 單一提交者、一提案一 commit、撤回留帳、非 git 工作區靜默降級；既有 229 檔收成基線。原判「❌ 未做，但**比筆記寫的更近**：`workspace/.git` 已存在（agent 自己會 commit skills 進去），只是 `.claw/memory/` 沒被追蹤、apply/undo 沒有 commit 呼叫。剩下的只是在 `ApplyProposedMemory`／`RevokeAutopass` 收尾時 add+commit 記憶目錄 | `git -C workspace ls-files .claw/memory` 空 |
 | ② | steer 這一階 | ❌ 未做。cogito 忙碌時明拒（`core.go` ⏳ 上一個任務仍在進行…可用 /stop）；橋的 verb 白名單只有 approve/reject//stop；`reminder.go` 的 nudge 是內部系統提醒，使用者塞不進去 | `chatbot/core.go` tryAcquire 分支 |
 | ③ | 回覆義務＋hop cap | ➖ 不適用，維持不動。仍是星狀拓撲，沒有點對點信箱 | grep 無 mailbox/inbox |
 | ④ | 成本讀真的 | 🟡 cogito 端**全有**（`session.TotalCostUSD` 真實累計、收工報「本次花費 $x」、`MaxCostUSD` 熔斷且 `path.go` 護著不讓 agent 自改）。缺的只剩投影：`officeEvent` 沒有 cost 欄位 → 外殼看不到。done 事件帶上＋外殼顯示即可 | `office_reporter.go` 欄位表 |
