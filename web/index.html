@@ -1748,7 +1748,9 @@ function sync(el, t, bodySel, live) {
   const b = el.querySelector(':scope > summary .badge');
   b.className = 'badge ' + t.status;
   b.textContent = BADGE[t.status] || t.status;
-  el.querySelector(':scope > summary .trange').textContent = when(t);
+  // cost 是 cogito 報的【真實】花費（協定：0/未知不送）——有才顯示，絕不畫 $0 假裝免費
+  el.querySelector(':scope > summary .trange').textContent =
+    when(t) + (t.cost > 0 ? `｜$${t.cost.toFixed(4)}` : '');
   const pv = el.querySelector(':scope > summary .spreview');
   if (pv) pv.textContent = preview(t);
 

@@ -392,6 +392,7 @@ def run() -> None:
     parallel_subs()
     headcount()
     board_archive()
+    cost_projection()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -740,6 +741,36 @@ def board_archive() -> None:
                     assert r["ok"] is False and r["error"] == "找不到這塊封存板", (bad, r)
         finally:
             main.CHANNELS_DIR = old_dir
+
+
+def cost_projection() -> None:
+    """收工帶真實花費：卡片與時間軸都看得到錢；0/未知【什麼都不顯示】。
+
+    誠實線：只認 cogito 報的正數（協定：0/未知不送）。畫 $0.0000 會把「沒拿到 usage」
+    偽裝成「免費」——投影估計值跟畫假的進度條是同一種謊，寧可空白。
+    """
+    with TestClient(main.app) as c:
+        post(c, agent="p05", kind="start", label="花錢的任務")
+        post(c, agent="p05", kind="done", label="ok", cost=0.0231)
+        r = c.get("/office/report/p05").json()
+        assert r["cost"] == 0.0231, r.get("cost")
+        assert any("✔ 任務完成（$0.0231）" in e["text"] for e in r["timeline"]), r["timeline"]
+
+        # cost=0（沒拿到 usage）與負數（上游出 bug 也不能畫出 $-0.01）：
+        # 卡片不帶欄位、時間軸不出現錢——不顯示、不編造。
+        # ⚠ 0 靠 falsy 就擋得住，守門的 cost <= 0 真正扛的是負數——所以要驗負的。
+        post(c, agent="p05", kind="start", label="不知道花多少的任務")
+        post(c, agent="p05", kind="done", label="ok", cost=-0.01)
+        r = c.get("/office/report/p05").json()
+        assert "cost" not in r, r["cost"]
+        assert not any("$" in e["text"] for e in r["timeline"]), r["timeline"]
+
+        # 中斷也標帳——燒掉的錢不因任務失敗就不見
+        post(c, agent="p05", kind="start", label="燒了錢又失敗的任務")
+        post(c, agent="p05", kind="done", label="error", detail="爆了", cost=0.5)
+        r = c.get("/office/report/p05").json()
+        assert r["cost"] == 0.5
+        assert any("✗ 任務中斷（$0.5000）" in e["text"] for e in r["timeline"]), r["timeline"]
 
 
 def clear_all() -> None:

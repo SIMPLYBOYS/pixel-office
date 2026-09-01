@@ -1217,11 +1217,18 @@ async def office_event(ev: dict):
         if chatting and (desk := WORK_DESK.get(aid)):
             await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
         chat_mode.discard(aid)
+        # cost 是 cogito 算好的【真實】花費（協定：0/未知不送）。只認正數——
+        # 沒有數字就什麼都不顯示，寧可空白也不畫 $0.0000 假裝免費。
+        cost = ev.get("cost")
+        if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
+            cost = None
         if not chatting:  # 閒聊不改任務卡狀態（那張卡早就完成了）
             close_card(aid, "ok" if label == "ok" else "error")
             card = last_report.get(aid)
             if card and label != "ok" and ev.get("detail"):
                 card["report"] = card["report"] or ev["detail"]
+            if card and cost:
+                card["cost"] = cost  # **card 攤平：report / history 自動帶到外殼
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
@@ -1230,7 +1237,8 @@ async def office_event(ev: dict):
         release_work(aid)
         if not chatting:
             notify("agent", aid, alert="done" if label == "ok" else "error")
-            log_ev(aid, "✔ 任務完成" if label == "ok" else "✗ 任務中斷")
+            paid = f"（${cost:.4f}）" if cost else ""  # 中斷也標——燒掉的錢不因失敗就不見
+            log_ev(aid, ("✔ 任務完成" if label == "ok" else "✗ 任務中斷") + paid)
             a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
     else:
         # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
