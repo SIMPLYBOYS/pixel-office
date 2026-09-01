@@ -108,9 +108,10 @@ cogito 自己有成本熔斷（相機的 `CAM_DECISION` 就把它列為要推鏡
 
 **他們**：每個 agent 可以有自己的 worktree。
 
-**我們**：看板一次並行最多三個子 agent，全部共用同一個頻道工作目錄。目前他們多半只是
-讀檔與寫各自的產出檔，還沒撞過。但哪天讓子 agent 同時改同一份程式碼，worktree 是
-現成的答案。**先記著，不急。**
+**我們**：~~全部共用同一個頻道工作目錄~~ **這段寫錯了**（2026-09-01 盤點修正）：
+cogito 早就有——`internal/tools/worktree.go` 開 detached worktree、merge-back 用鎖序列化，
+具名 agent 檔宣告 `isolation: worktree` 即用（`implementer.md` 就有宣告），非 git repo
+時靜默降級為共享。**這條已完成，不是 action item。**
 
 ## 三、明確不學的
 
@@ -131,3 +132,13 @@ cogito 自己有成本熔斷（相機的 `CAM_DECISION` 就把它列為要推鏡
 
 真正該搬過來的只有兩條：**記憶庫進 git 解掉 rev_rollback**、以及**熔斷補上 steer 這一階**。
 其餘的價值在於印證——好幾條我們以為是品味的決定，別人獨立走到了同一個地方。
+
+## 五、盤點現況（2026-09-01，對著 cogito 程式碼查的）
+
+| # | 條目 | 狀態 | 依據 |
+|---|---|---|---|
+| ① | 記憶庫進 git | ❌ 未做，但**比筆記寫的更近**：`workspace/.git` 已存在（agent 自己會 commit skills 進去），只是 `.claw/memory/` 沒被追蹤、apply/undo 沒有 commit 呼叫。剩下的只是在 `ApplyProposedMemory`／`RevokeAutopass` 收尾時 add+commit 記憶目錄 | `git -C workspace ls-files .claw/memory` 空 |
+| ② | steer 這一階 | ❌ 未做。cogito 忙碌時明拒（`core.go` ⏳ 上一個任務仍在進行…可用 /stop）；橋的 verb 白名單只有 approve/reject//stop；`reminder.go` 的 nudge 是內部系統提醒，使用者塞不進去 | `chatbot/core.go` tryAcquire 分支 |
+| ③ | 回覆義務＋hop cap | ➖ 不適用，維持不動。仍是星狀拓撲，沒有點對點信箱 | grep 無 mailbox/inbox |
+| ④ | 成本讀真的 | 🟡 cogito 端**全有**（`session.TotalCostUSD` 真實累計、收工報「本次花費 $x」、`MaxCostUSD` 熔斷且 `path.go` 護著不讓 agent 自改）。缺的只剩投影：`officeEvent` 沒有 cost 欄位 → 外殼看不到。done 事件帶上＋外殼顯示即可 | `office_reporter.go` 欄位表 |
+| ⑤ | worktree 隔離 | ✅ 已完成（筆記原文寫錯，已更正見上） | `tools/worktree.go`、`agents/implementer.md` |
