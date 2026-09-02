@@ -925,6 +925,8 @@ def repo_binding() -> None:
         try:
             with TestClient(main.app) as c:
                 assert [r["name"] for r in c.get("/office/repos").json()["repos"]] == ["demo-app"]
+                # 帶 agent：還沒掛過 → bound=False
+                assert c.get("/office/repos", params={"agent": "p05"}).json()["repos"][0]["bound"] is False
 
                 main.busy.discard("p05")
                 r = c.post("/office/dispatch", json={"agent": "p05", "text": "修掉啟動 crash",
@@ -946,6 +948,19 @@ def repo_binding() -> None:
                 n = subprocess.run(["git", "-C", str(src), "branch", "-a"],
                                    capture_output=True, text=True).stdout.count("office/p05-")
                 assert n == 1, f"同員工同 repo 應沿用分支，開了 {n} 條"
+
+                # 掛過之後 bound=True，且排在清單最前面——「最近使用」用磁碟上的真實
+                # worktree 判斷，不記在瀏覽器（換瀏覽器/清快取都還在，且天生 per-員工）。
+                # 另造一個字母序更前面的 repo，證明排序真的是 bound 優先而不是碰巧。
+                other = Path(tmp) / "repos" / "aaa-other"
+                other.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+                rs = c.get("/office/repos", params={"agent": "p05"}).json()["repos"]
+                assert [r["name"] for r in rs] == ["demo-app", "aaa-other"], \
+                    f"掛過的要排最前面（bound 優先於字母序）：{[r['name'] for r in rs]}"
+                assert rs[0]["bound"] is True and rs[1]["bound"] is False
+                # 沒帶 agent 就沒有 bound 欄位（那是「對誰而言」的事實，沒指定人就答不出來）
+                assert "bound" not in c.get("/office/repos").json()["repos"][0]
 
                 # 白名單：不認識的名字/路徑一律拒收。
                 # ⚠ 驗【錯誤訊息】而不只是 ok=False——拔掉白名單，越界路徑最後也會因為

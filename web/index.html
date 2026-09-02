@@ -309,8 +309,9 @@
      但畫面照樣顯示（實際回報：選個別員工仍看到「參與人數」）。這行把 hidden 的話語權還回去。 */
   .crew[hidden] { display: none; }
   .crew label { white-space: nowrap; }   /* 側欄可以被拖窄，標籤斷成兩行會很醜 */
-  .crew select { background: #0f1115; color: var(--text); border: 1px solid var(--line);
+  .crew select, .crew input { background: #0f1115; color: var(--text); border: 1px solid var(--line);
                  border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 12px; }
+  .crew input { min-width: 16ch; flex: 1 1 16ch; }   /* 可搜尋的 repo 欄：窄欄下也還打得下字 */
   /* 說明自己佔一行：跟選單擠同一列的話，窄欄下兩邊都會折行 */
   .crew .note { color: #6b7280; flex-basis: 100%; font-size: 11px; }
   .crew .note:empty { display: none; }
@@ -404,9 +405,11 @@
       </div>
       <div class="crew" id="repoRow" hidden>
         <label for="repoSel">工作 repo</label>
-        <select id="repoSel">
-          <option value="">不綁定（沙箱作業）</option>
-        </select>
+        <!-- 用 input+datalist 而不是 select：實測掃得到 288 個 repo，下拉選單在那個量級
+             等於不能用（原生 type-ahead 只從開頭比對）。datalist 是瀏覽器原生的子字串
+             過濾，打 "unity" 就出來，而且退化成純文字輸入框也還能用。 -->
+        <input id="repoSel" list="repoList" placeholder="不綁定（沙箱作業）—— 打幾個字搜尋" autocomplete="off">
+        <datalist id="repoList"></datalist>
         <span class="note" id="repoNote"></span>
       </div>
       <div class="inputrow">
@@ -721,30 +724,36 @@ function updateComposer() {
   const rr = $('repoRow'), rs = $('repoSel');
   rr.hidden = !reposList.length;
   if (reposList.length) {
-    if (rs.options.length !== reposList.length + 1) {
-      const keep = rs.value;
-      rs.length = 1;
-      for (const r of reposList) rs.add(new Option(r.name, r.name));
-      rs.value = keep;
-    }
     if (!rs.dataset.bound) {
-      rs.value = localStorage.repoSel || '';
-      rs.onchange = () => { localStorage.repoSel = rs.value; updateComposer(); };
+      rs.oninput = () => updateComposer();     // 邊打邊更新提示（含「這個名字不存在」）
       rs.dataset.bound = '1';
     }
     rs.disabled = workingNow;
-    $('repoNote').textContent = rs.value
-      ? '真實 repo 以 worktree 掛進工作區，成果 commit 在 office/... 分支——驗收後自己合併'
-      : '';
+    const v = rs.value.trim();
+    const hit = reposList.find(r => r.name === v);
+    $('repoNote').textContent =
+      !v ? ''
+      : !hit ? `⚠ 沒有叫「${v}」的 repo——清單來自 ${reposList.length} 個本機專案，打幾個字會出現候選`
+      : hit.bound ? '這位員工已經在這個 repo 上工作過——沿用同一個 worktree 與分支'
+      : '會開一個新的 worktree 與 office/… 分支，成果 commit 在那裡——驗收後自己合併';
   }
 }
 
-// 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。載入一次就好：清單變動＝老闆自己加了專案，重新整理合理
+// 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。每次換人都重抓：bound 是【那位員工】有沒有
+// 掛過這個 repo 的 worktree，人不同答案就不同。
 let reposList = [];
-(async () => {
-  try { reposList = (await (await fetch('/office/repos')).json()).repos || []; } catch { reposList = []; }
+async function loadRepos(aid) {
+  try {
+    const q = aid ? '?agent=' + encodeURIComponent(aid) : '';
+    reposList = (await (await fetch('/office/repos' + q)).json()).repos || [];
+  } catch { reposList = []; }
+  // 已經在上面工作過的排最前面（後端已排序）——datalist 依文件順序顯示，
+  // 所以「還沒打字就看得到常用的那幾個」是免費的。
+  $('repoList').innerHTML = reposList
+    .map(r => `<option value="${esc(r.name)}">${r.bound ? '進行中' : ''}</option>`).join('');
   if (selected) updateComposer();
-})();
+}
+loadRepos('');
 
 function pick(id) {
   selected = id;
@@ -757,6 +766,7 @@ function pick(id) {
   }).catch(() => {});   // 鏡頭是錦上添花，連不上不該影響選人
   roster();
   updateComposer();
+  loadRepos(id);   // 換人＝「已在進行中」的那組會變（worktree 是 per-員工 的）
   // 順序有意義：上方三塊面板【先】定位，工作串最後畫。
   // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
   // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→
@@ -1045,6 +1055,14 @@ function cancelSend() {
 // 不先送再想辦法撤回——撤不回來的東西，介面就不該假裝撤得回來。
 function queueSend(text) {
   if (!selected || !text.trim() || pendingSend) return;
+  // repo 打到一半就按送出：當場擋下。讓它跑完 1.6 秒反悔窗再被橋回一句錯，
+  // 是白等一輪——而且那時輸入框已經清空了，得重打。
+  const rv = $('repoSel').value.trim();
+  if (rv && !reposList.some(r => r.name === rv)) {
+    $('hint').textContent = `沒有叫「${rv}」的 repo——清空表示不綁定，或從候選裡選一個`;
+    $('repoSel').focus();
+    return;
+  }
   const box = $('box');
   pendingSend = { text: box.value, timer: 0 };
   box.value = '';
@@ -1083,7 +1101,7 @@ async function dispatch(text) {
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
-                           repo: $('repoSel').value || null }),
+                           repo: $('repoSel').value.trim() || null }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';

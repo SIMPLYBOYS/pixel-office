@@ -1836,9 +1836,25 @@ def local_repos() -> list[dict]:
             for p in sorted(root.iterdir()) if (p / ".git").exists()]
 
 
+def worktree_path(aid: str, name: str) -> Path | None:
+    """這位員工掛這個 repo 的 worktree 落點。bind_repo 與「進行中」判斷共用，避免兩邊漂掉。"""
+    return None if CHANNELS_DIR is None else CHANNELS_DIR / f"office_{aid}" / name
+
+
 @app.get("/office/repos")
-def office_repos():
-    return {"ok": True, "root": REPOS_DIR, "repos": local_repos()}
+def office_repos(agent: str = ""):
+    """可派工的 repo 清單。帶 agent 時，這位員工【已經在上面工作過的】（worktree 還在）排最前面。
+
+    「最近使用」不記在瀏覽器：磁碟上的 worktree 就是真實狀態——換瀏覽器、清快取、
+    重灌都還在，而且天生 per-員工（老徐養文件的 repo 跟小葵改前端的本來就不同）。
+    """
+    repos = local_repos()
+    if agent in agents:
+        for r in repos:
+            wt = worktree_path(agent, r["name"])
+            r["bound"] = bool(wt and wt.exists())
+        repos.sort(key=lambda r: (not r["bound"], r["name"]))
+    return {"ok": True, "root": REPOS_DIR, "repos": repos}
 
 
 def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
@@ -1849,9 +1865,9 @@ def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
     cogito 的檔案工具 rooted 在頻道工作區（越界是工具層硬擋），這條防線不拆。
     已掛過就沿用同一個 worktree／分支——同一位員工對同一個 repo 的工作是連續的。
     """
-    if CHANNELS_DIR is None:
+    dst = worktree_path(aid, repo["name"])
+    if dst is None:
         return "未設 COGITO_CHANNELS，找不到員工的頻道工作區"
-    dst = CHANNELS_DIR / f"office_{aid}" / repo["name"]
     if dst.exists():
         r = subprocess.run(["git", "-C", str(dst), "branch", "--show-current"],
                            capture_output=True, text=True, timeout=10)
