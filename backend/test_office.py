@@ -397,6 +397,7 @@ def run() -> None:
     steer_dispatch()
     full_stream()
     repo_binding()
+    git_lens()
     schedule_jobs()
     clear_all()
     note_not_echoed()
@@ -980,6 +981,73 @@ def repo_binding() -> None:
             main.httpx.AsyncClient = old_client
             main.COGITO_HTTP = ""
             main.busy.discard("p05")
+
+
+def git_lens() -> None:
+    """工作區在 worktree 裡改用 git 鏡頭：回答「他改了什麼」而不是「什麼時候改的」。
+
+    mtime 在 worktree 裡本來就不可信——checkout 會把每個檔案的 mtime 蓋成當下，
+    綁完 repo 的十分鐘內整個專案都會被標成「剛動過」。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "repos" / "demo-app"
+        (src / "lib").mkdir(parents=True)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                    ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=src, check=True)
+        (src / "app.py").write_text("print(1)\n")
+        (src / "keep.py").write_text("# 沒人動我\n")
+        (src / "lib" / "deep.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=src, check=True)
+
+        old_repos, main.REPOS_DIR = main.REPOS_DIR, str(Path(tmp) / "repos")
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
+        try:
+            wt_name, _ = main.bind_repo("p12", {"name": "demo-app", "path": str(src)})
+            wt = main.CHANNELS_DIR / "office_p12" / wt_name
+            # 工作區【根】不套鏡頭：那裡不是我們掛的 worktree，mtime 才是對的權威。
+            # ⚠ 這條要在「工作區本身就在一個 git repo 裡」的前提下驗才有意義——那正是
+            # 真實部署（CHANNELS_DIR 在 cogito 的 workspace 底下，而 workspace 自己是
+            # git repo）。少了這個前提，rev-parse 直接失敗，守門根本沒被走到＝假綠。
+            for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                        ["git", "config", "user.name", "t"]):
+                subprocess.run(cmd, cwd=main.CHANNELS_DIR.parent, check=True)
+            r0 = main.office_ws("p12", "")
+            assert "git" not in r0, f"外層 repo 的狀態不該被當成員工的改動：{r0.get('git')}"
+
+            # 員工做了三件事：改一個檔（已 commit）、改一個深層檔（未 commit）、留一個新檔
+            (wt / "app.py").write_text("print(1)\nprint(2)\n")
+            subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+            subprocess.run(["git", "commit", "-qm", "改了 app"], cwd=wt, check=True)
+            (wt / "lib" / "deep.py").write_text("x = 2\n")
+            (wt / "報告.md").write_text("做完了\n")
+
+            r = main.office_ws("p12", wt_name)
+            g = r["git"]
+            assert g["repo"] == "demo-app" and g["branch"].startswith("office/p12-"), g
+            assert g["commits"] == 1, f"應算得出 1 個 commit：{g}"
+            assert g["total"] == 3, f"改了 3 個（app.py/deep.py/報告.md）：{g}"
+            assert "_root" not in g and "changed" not in g, "內部欄位不該外送"
+            ents = {e["name"]: e for e in r["entries"]}
+            assert ents["app.py"]["git"] == "M", ents["app.py"]        # 已 commit 的也算
+            assert ents["報告.md"]["git"] == "?", ents["報告.md"]        # 未加入的新檔
+            assert "git" not in ents["keep.py"], "沒改的檔案要留白——每列都標等於沒標"
+            # 資料夾標「底下幾個檔有動」：不然改動藏在深層目錄裡完全看不出來
+            assert ents["lib"]["git_n"] == 1, ents["lib"]
+
+            # 進到子目錄一樣有鏡頭（不是只有 worktree 根那一層）
+            deep = main.office_ws("p12", f"{wt_name}/lib")
+            assert deep["git"]["repo"] == "demo-app"
+            assert {e["name"]: e.get("git") for e in deep["entries"]} == {"deep.py": "M"}
+
+            # 沒有出發點（此功能之前建的 worktree）：只講分支，不猜 diff
+            subprocess.run(["git", "-C", str(wt), "config", "--unset", main.GIT_BASE_KEY], check=True)
+            g2 = main.office_ws("p12", wt_name)["git"]
+            assert "note" in g2 and "total" not in g2, f"沒基準就不該給 diff：{g2}"
+        finally:
+            main.REPOS_DIR, main.CHANNELS_DIR = old_repos, old_ch
 
 
 def schedule_jobs() -> None:

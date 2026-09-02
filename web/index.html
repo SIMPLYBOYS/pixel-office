@@ -177,6 +177,11 @@
                  font-variant-numeric: tabular-nums; }
   .ws .row .tm.fresh { color: var(--accent); }   /* 這次任務剛動過的，一眼分得出來 */
   @media (max-width: 340px) { .ws .row .tm { display: none; } }
+  /* git 鏡頭的摘要列：這一層在 worktree 裡時，先回答「跟我給他的版本比差在哪」 */
+  .ws .gsum { font-size: 11px; color: var(--dim); padding: 4px 2px 6px; line-height: 1.6;
+              border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .ws .gsum b { color: var(--accent); }
+  .ws .gstat { color: #6b7280; }
   .ws .row.na { cursor: default; color: var(--dim); }
   .ws .row.na:hover { background: none; }
   /* 標題列的小控制項（↻ 重載、🗑 收掉）。選擇器掛在 .prof 而不是 .ws——任務板是
@@ -946,6 +951,12 @@ async function board(id) {
 // 為什麼不一律給完整時間戳——工作區大多是【剛剛才產出】的東西，「3 分鐘前」比
 // 「08/27 18:50」更快回答「這是不是這次任務做的」。完整時間放 title，滑上去看得到。
 const FRESH_MS = 10 * 60 * 1000;   // 十分鐘內＝這一輪剛動過（標黃）
+
+// git 狀態的中文化。用字要能直接回答「這個檔案怎麼了」——M/A/D 對讀 git 的人夠了，
+// 但工作區面板的讀者是老闆，不是每個人都天天看 porcelain。
+const GIT_MARK = { M: '改過', A: '新增', D: '刪除', R: '改名', C: '複製', '?': '新檔（未加入）' };
+const GIT_TITLE = { M: '這個檔案被修改過', A: '新增的檔案（已 git add）', D: '被刪掉了',
+                    R: '改了名字', C: '複製自別的檔案', '?': '新檔案，還沒 git add' };
 const isFresh = t => t && Date.now() - t * 1000 < FRESH_MS;
 
 function fileTime(t) {
@@ -977,6 +988,18 @@ async function workspace(id, path) {
   box.open = wasOpen;
   box.querySelector('.crumb').innerHTML =
     `<b>${esc(r.root)}</b>${path ? ' / ' + esc(path) : ''}　${r.entries.length} 項`;
+  // git 鏡頭：這一層在掛進來的 worktree 裡時，問題不是「什麼時候改的」而是「改了什麼」。
+  // （mtime 在這裡本來就不可信：worktree checkout 會把每個檔案的 mtime 蓋成當下。）
+  if (r.git) {
+    const g = r.git;
+    const sum = el('div', undefined, 'gsum');
+    sum.innerHTML = g.note
+      ? `🔗 ${esc(g.repo)}｜${esc(g.branch || '（無分支）')}　<i>${esc(g.note)}</i>`
+      : `🔗 ${esc(g.repo)}｜${esc(g.branch)}　改了 <b>${g.total}</b> 個檔`
+        + (g.commits ? `　${g.commits} 個 commit` : '　<i>尚未 commit</i>')
+        + (g.stat ? `<div class="gstat">${esc(g.stat)}　（對照出發點 ${esc(g.base)}）</div>` : '');
+    box.querySelector('.body').insertBefore(sum, box.querySelector('.crumb'));
+  }
   const rows = box.querySelector('.rows'), pv = box.querySelector('.pv');
   if (r.up !== null && r.up !== undefined) {
     const up = el('div', '⬆︎ 上一層', 'row');
@@ -986,8 +1009,15 @@ async function workspace(id, path) {
   for (const e of r.entries) {
     const size = e.dir ? '' : (e.size / 1024).toFixed(1) + 'K';
     const row = el('div', undefined, 'row' + (e.kind === 'raw' ? ' na' : ''));
-    const tm = el('span', fileTime(e.mtime), 'tm' + (isFresh(e.mtime) ? ' fresh' : ''));
-    tm.title = e.mtime ? new Date(e.mtime * 1000).toLocaleString() : '';
+    // worktree 內換 git 欄：檔案標自己的狀態、資料夾標底下改了幾個檔；沒改動的留白
+    // ——留白才看得出哪幾個有動（每一列都標等於沒標）。
+    const tm = r.git
+      ? el('span', e.git ? (GIT_MARK[e.git] || e.git) : e.git_n ? `${e.git_n} 個改動` : '',
+           'tm' + (e.git || e.git_n ? ' fresh' : ''))
+      : el('span', fileTime(e.mtime), 'tm' + (isFresh(e.mtime) ? ' fresh' : ''));
+    tm.title = r.git
+      ? (e.git ? GIT_TITLE[e.git] || e.git : e.git_n ? `這個資料夾底下有 ${e.git_n} 個檔案有改動` : '沒有改動')
+      : (e.mtime ? new Date(e.mtime * 1000).toLocaleString() : '');
     row.append(el('span', e.dir ? '📁' : e.kind === 'image' ? '🖼' : e.kind === 'pdf' ? '📕' : '📄'),
                 document.createTextNode(e.name), tm, el('span', size, 'sz'));
     if (e.dir) row.onclick = () => workspace(id, e.path);

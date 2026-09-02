@@ -1506,6 +1506,98 @@ def infra_file(name: str) -> bool:
     return name in INFRA_FILES
 
 
+# ── git 鏡頭：工作區列表在 worktree 裡改看「他改了什麼」───────────────────────
+# 為什麼需要換鏡頭：工作區原本的權威是 mtime（「這輪剛產出的檔案」標黃），那對員工【產出】
+# 的檔案成立——它們本來不存在。但 worktree 裡的檔案本來就在，而且 `git worktree add` 的
+# checkout 會把每個檔案的 mtime 蓋成當下（實測：原檔 08/01 → worktree 09/02 11:20）。
+# 於是綁完 repo 的十分鐘內，整個專案幾千個檔案全部標黃——訊號在最需要的時刻變成噪音。
+#
+# 同一棵樹、兩個鏡頭：worktree 外看 mtime（產出了什麼），worktree 內看 git（改了什麼）。
+# 後者同時把驗收從「自己開終端機比對」變成一眼可見。
+GIT_BASE_KEY = "office.base"   # worktree 的出發點 commit，bind_repo 當下寫進 git config
+GIT_STAT_MAX = 3000            # 改動檔案數上限：超過就只給總結，不逐檔標（那多半是誤操作）
+
+
+def git_out(d: Path, *args: str, timeout: int = 10) -> str | None:
+    """在 d 跑一個唯讀 git 指令。失敗（非 repo／git 不在／逾時）一律回 None——
+    鏡頭是加值層，壞了就退回 mtime 鏡頭，絕不讓工作區瀏覽整個失敗。
+
+    core.quotePath=false 是必要的：git 預設把非 ASCII 路徑轉義成 "\\350\\210\\207…"，
+    於是中文檔名一個都對不上（測試抓到——而 agent 產出的報告幾乎都是中文檔名）。"""
+    try:
+        r = subprocess.run(["git", "-C", str(d), "-c", "core.quotePath=false", *args],
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def git_lens(d: Path, base: Path) -> dict | None:
+    """d 若位於【工作區底下的某個 worktree】內，回這個 worktree 的改動狀態；否則 None。
+
+    比對基準是 bind_repo 記下的出發點（office.base）。沒有它就答不出「他改了什麼」——
+    此時只回分支名與一句說明，不猜（猜錯的 diff 比沒有 diff 更糟）。
+    """
+    top = git_out(d, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    root = Path(top.strip())
+    # 必須是【工作區底下的】repo。工作區本身若剛好是個 repo（或員工自己 git init 了根目錄），
+    # 那不是我們掛的 worktree，不套這個鏡頭。
+    if root == base.resolve() or base.resolve() not in root.parents:
+        return None
+    lens: dict = {"repo": root.name, "_root": str(root),
+                  "branch": (git_out(root, "branch", "--show-current") or "").strip(),
+                  "changed": {}}
+    sha = (git_out(root, "config", "--get", GIT_BASE_KEY) or "").strip()
+    if not sha:
+        lens["note"] = "找不到出發點（這個 worktree 建立於此功能之前），只能顯示分支"
+        return lens
+    lens["base"] = sha[:8]
+    lens["commits"] = len((git_out(root, "rev-list", f"{sha}..HEAD") or "").split())
+    # 已提交＋未提交一起算：員工被要求 commit 到分支上，但收工當下也可能還有沒 commit 的。
+    # 兩者對老闆是同一件事——「跟我給他的版本比，現在差在哪」。
+    names = git_out(root, "diff", "--name-status", sha) or ""
+    untracked = git_out(root, "ls-files", "--others", "--exclude-standard") or ""
+    changed: dict[str, str] = {}
+    for line in names.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            changed[parts[-1]] = parts[0][:1]   # M/A/D/R…
+    for line in untracked.splitlines():
+        if line.strip():
+            changed[line.strip()] = "?"
+    lens["total"] = len(changed)
+    if len(changed) <= GIT_STAT_MAX:
+        lens["changed"] = changed
+    if stat := (git_out(root, "diff", "--shortstat", sha) or "").strip():
+        lens["stat"] = stat   # 如「3 files changed, 120 insertions(+), 8 deletions(-)」
+    return lens
+
+
+def apply_lens(r: dict, lens: dict, base: Path) -> None:
+    """把 git 狀態標到列表的每一筆上。檔案標自己的狀態；資料夾標底下有幾個檔改過
+    ——不然「改動藏在三層目錄裡」這件事在列表上完全看不出來，只能一層層點進去找。
+
+    列表項的 path 是相對【工作區根】（listing 的 base），git 的路徑是相對 worktree 根，
+    兩者差一段前綴，所以要換算過去。"""
+    changed = lens.get("changed") or {}
+    root = lens.get("_root")
+    if not changed or not root:
+        return
+    top = Path(root)
+    for e in r.get("entries", []):
+        try:
+            rel = str((base / e["path"]).resolve().relative_to(top))
+        except ValueError:
+            continue   # 不在這個 worktree 底下（同層還有工作區自己的產出檔）
+        if e.get("dir"):
+            if n := sum(1 for p in changed if p.startswith(rel + "/")):
+                e["git_n"] = n
+        elif st := changed.get(rel):
+            e["git"] = st
+
+
 def listing(base: Path, rel: str) -> dict:
     """列一層目錄：資料夾在前、檔名排序；隱藏檔跳過；不在白名單的副檔名只列不給預覽。"""
     d = resolve_in(base, rel)
@@ -1599,6 +1691,12 @@ def office_ws(aid: str, p: str = ""):
     r = listing(base, p)
     if r.get("ok"):
         r["root"] = base.name
+        # git 鏡頭：這一層若在掛進來的 worktree 內，改用「他改了什麼」而不是 mtime
+        if (d := resolve_in(base, p)) and (lens := git_lens(d, base)):
+            apply_lens(r, lens, base)
+            lens.pop("changed", None)   # 逐檔狀態已經標在列表上了，不必再送一份
+            lens.pop("_root", None)     # 內部欄位：絕對路徑不外送
+            r["git"] = lens
     return r
 
 
@@ -1878,6 +1976,13 @@ def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         return f"worktree 開不出來：{(r.stderr or r.stdout).strip()[-120:]}"
+    # 記下【出發點】：驗收時要問的是「他改了什麼」，那需要一個基準 commit。
+    # 事後推不出來——分支名不帶來源、reflog 會過期、預設分支名各家不同。當下寫死最可靠，
+    # 存在 worktree 自己的 git config 裡：跟著 worktree 走，刪掉 worktree 就一起消失。
+    if (sha := subprocess.run(["git", "-C", str(dst), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10)).returncode == 0:
+        subprocess.run(["git", "-C", str(dst), "config", GIT_BASE_KEY, sha.stdout.strip()],
+                       capture_output=True, text=True, timeout=10)
     return repo["name"], branch
 
 
