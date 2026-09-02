@@ -1,0 +1,10 @@
+[
+  {
+    "name": "security-unity-demo",
+    "weekday": 0,
+    "hour": 9,
+    "agent": "p07",
+    "repo": "unity_demo",
+    "text": "例行安全巡檢：對工作 repo 做一輪安全稽核。重點：1) 憑證與金鑰有沒有被 commit（.env、token、私鑰）；2) 依賴有沒有已知漏洞（requirements.txt / 套件版本）；3) 對外入口的輸入驗證（HTTP endpoint 的參數、路徑遍歷）；4) 上次巡檢報告裡列的待辦有沒有處理。產出 security-report-<日期>.md 到工作區根目錄，結論按嚴重度排序，每條附檔案位置。只讀不改——發現問題列出來，不要自行修。"
+  }
+]

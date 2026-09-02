@@ -402,6 +402,13 @@
         </select>
         <span class="note" id="crewNote"></span>
       </div>
+      <div class="crew" id="repoRow" hidden>
+        <label for="repoSel">工作 repo</label>
+        <select id="repoSel">
+          <option value="">不綁定（沙箱作業）</option>
+        </select>
+        <span class="note" id="repoNote"></span>
+      </div>
       <div class="inputrow">
         <textarea id="box" disabled placeholder="先點左側員工，再描述任務…"></textarea>
         <button id="send" disabled>送出</button>
@@ -710,7 +717,34 @@ function updateComposer() {
               : `⏳ ${a.name} 工作中——打字可「插話」糾正方向（不中止），或按「中止」停下這件事`)
     : (isMode ? '描述一件要整隊完成的任務——會先開會、收斂成 spec，再分工…'
               : '描述任務派給這位員工…');
+  // 工作 repo（Devin 對照筆記 ①）：入口資料驅動——OFFICE_REPOS_DIR 沒設就一個像素都不多
+  const rr = $('repoRow'), rs = $('repoSel');
+  rr.hidden = !reposList.length;
+  if (reposList.length) {
+    if (rs.options.length !== reposList.length + 1) {
+      const keep = rs.value;
+      rs.length = 1;
+      for (const r of reposList) rs.add(new Option(r.name, r.name));
+      rs.value = keep;
+    }
+    if (!rs.dataset.bound) {
+      rs.value = localStorage.repoSel || '';
+      rs.onchange = () => { localStorage.repoSel = rs.value; updateComposer(); };
+      rs.dataset.bound = '1';
+    }
+    rs.disabled = workingNow;
+    $('repoNote').textContent = rs.value
+      ? '真實 repo 以 worktree 掛進工作區，成果 commit 在 office/... 分支——驗收後自己合併'
+      : '';
+  }
 }
+
+// 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。載入一次就好：清單變動＝老闆自己加了專案，重新整理合理
+let reposList = [];
+(async () => {
+  try { reposList = (await (await fetch('/office/repos')).json()).repos || []; } catch { reposList = []; }
+  if (selected) updateComposer();
+})();
 
 function pick(id) {
   selected = id;
@@ -1048,7 +1082,8 @@ async function dispatch(text) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN() }),
+    body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
+                           repo: $('repoSel').value || null }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';

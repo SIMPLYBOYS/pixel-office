@@ -5,6 +5,7 @@
 """
 import asyncio
 import json
+import subprocess
 import os
 import time
 from pathlib import Path
@@ -395,6 +396,8 @@ def run() -> None:
     cost_projection()
     steer_dispatch()
     full_stream()
+    repo_binding()
+    schedule_jobs()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -890,6 +893,119 @@ def steer_dispatch() -> None:
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
+
+
+def repo_binding() -> None:
+    """任務綁真實 repo：白名單比對、worktree 掛進頻道工作區、任務文字帶工作說明、
+    二次派工沿用同一個 worktree；控制動詞（/steer 等）不包裝。"""
+    import tempfile
+    sent = []
+
+    class _Rec(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}).get("text"))
+            return _FakeResp()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 造一個真的 git repo 當「你的專案」
+        src = Path(tmp) / "repos" / "demo-app"
+        src.mkdir(parents=True)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                    ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=src, check=True)
+        (src / "app.py").write_text("print('hi')\n")
+        subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=src, check=True)
+
+        old_repos, main.REPOS_DIR = main.REPOS_DIR, str(Path(tmp) / "repos")
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
+        main.COGITO_HTTP = "http://fake"
+        old_client = main.httpx.AsyncClient
+        main.httpx.AsyncClient = lambda **kw: _Rec()
+        try:
+            with TestClient(main.app) as c:
+                assert [r["name"] for r in c.get("/office/repos").json()["repos"]] == ["demo-app"]
+
+                main.busy.discard("p05")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "修掉啟動 crash",
+                                                     "repo": "demo-app"}).json()
+                assert r["ok"], r
+                wt = Path(tmp) / "channels" / "office_p05" / "demo-app"
+                assert (wt / "app.py").exists(), "worktree 沒掛進頻道工作區"
+                # 分支立刻出現在原 repo（worktree 共用物件庫——驗收不必 fetch）
+                br = subprocess.run(["git", "-C", str(src), "branch", "-a"],
+                                    capture_output=True, text=True).stdout
+                assert "office/p05-" in br, br
+                assert "【工作 repo】./demo-app/" in sent[-1], "任務文字沒帶工作說明"
+                assert "不要 push" in sent[-1]
+
+                # 二次派工：沿用，不炸也不多開分支
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "接著加測試",
+                                                     "repo": "demo-app"}).json()
+                assert r["ok"], r
+                n = subprocess.run(["git", "-C", str(src), "branch", "-a"],
+                                   capture_output=True, text=True).stdout.count("office/p05-")
+                assert n == 1, f"同員工同 repo 應沿用分支，開了 {n} 條"
+
+                # 白名單：不認識的名字/路徑一律拒收。
+                # ⚠ 驗【錯誤訊息】而不只是 ok=False——拔掉白名單，越界路徑最後也會因為
+                # 「git worktree 開不出來」回 false，那種綠是假的（封存板 f= 的同一課）。
+                # 判準是「有沒有走到動 git 那一步」。
+                for bad in ("../../etc", "沒這個"):
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "x",
+                                                         "repo": bad}).json()
+                    assert r["ok"] is False and "不認識的 repo" in r["error"], (bad, r)
+                # 控制動詞不包裝：工作中 /steer 帶 repo 也只送原文
+                main.busy.add("p05")
+                c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 別動 schema",
+                                                 "repo": "demo-app"})
+                assert sent[-1] == "/steer 別動 schema", sent[-1]
+        finally:
+            main.REPOS_DIR, main.CHANNELS_DIR = old_repos, old_ch
+            main.httpx.AsyncClient = old_client
+            main.COGITO_HTTP = ""
+            main.busy.discard("p05")
+
+
+def schedule_jobs() -> None:
+    """班表：到點派工（走一般 dispatch，投影免費）、同一小時不重複、人在忙跳過並留痕。"""
+    import tempfile
+    sent = []
+
+    class _Rec(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}).get("text"))
+            return _FakeResp()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = Path(tmp) / "schedule.json"
+        now = time.localtime()
+        sched.write_text(json.dumps([{"name": "巡邏", "weekday": now.tm_wday, "hour": now.tm_hour,
+                                      "agent": "p07", "text": "例行巡檢"}], ensure_ascii=False))
+        old_file, main.SCHEDULE_FILE = main.SCHEDULE_FILE, sched
+        main.sched_last.clear()
+        main.COGITO_HTTP = "http://fake"
+        old_client = main.httpx.AsyncClient
+        main.httpx.AsyncClient = lambda **kw: _Rec()
+        main.busy.discard("p07")
+        # 到點：派一次（run_due_jobs 不需要 HTTP 伺服器——它自己呼叫 dispatch 函式）
+        asyncio.run(main.run_due_jobs(now))
+        assert sent == ["例行巡檢"], sent
+        # 同一小時再查：不重複
+        asyncio.run(main.run_due_jobs(now))
+        assert sent == ["例行巡檢"], f"同一小時重複觸發：{sent}"
+        # 下一小時且人在忙：跳過＋工作串留痕
+        main.sched_last.clear()
+        main.busy.add("p07")
+        asyncio.run(main.run_due_jobs(now))
+        assert sent == ["例行巡檢"], "忙碌時不該派"
+        evs = [e["text"] for e in (main.last_report.get("p07") or {"events": []})["events"]]
+        assert any("這輪跳過" in t for t in evs), evs
+        main.busy.discard("p07")
+        main.httpx.AsyncClient = old_client
+        main.COGITO_HTTP = ""
+        main.SCHEDULE_FILE = old_file
+        main.sched_last.clear()
 
 
 def full_stream() -> None:

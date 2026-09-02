@@ -1819,6 +1819,59 @@ def with_headcount(text: str, people: int) -> str:
             "人選由你判斷，但總數不得超過這個數。")
 
 
+# ── 任務綁定真實 repo（Devin 對照筆記 ①）───────────────────────────────
+# 員工平常在頻道工作區（沙箱）幹活——那不是你的專案。這裡把「這個任務在 repo X 上做」
+# 做成派工的一等參數：真實 repo 以 git worktree 掛進員工的工作區。
+REPOS_DIR = os.environ.get("OFFICE_REPOS_DIR", "")
+
+
+def local_repos() -> list[dict]:
+    """OFFICE_REPOS_DIR 底下的 git 專案。沒設＝功能不存在（入口資料驅動，外殼不畫欄位）。"""
+    if not REPOS_DIR:
+        return []
+    root = Path(REPOS_DIR).expanduser()
+    if not root.is_dir():
+        return []
+    return [{"name": p.name, "path": str(p)}
+            for p in sorted(root.iterdir()) if (p / ".git").exists()]
+
+
+@app.get("/office/repos")
+def office_repos():
+    return {"ok": True, "root": REPOS_DIR, "repos": local_repos()}
+
+
+def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
+    """把真實 repo 以 git worktree 掛進員工的頻道工作區。回 (目錄名, 分支)；str＝錯誤訊息。
+
+    為什麼是 worktree 而不是 clone：worktree 與原 repo 共用物件庫，員工 commit 完，
+    分支【立刻】出現在你的 repo 裡——驗收合併不必 fetch。也刻意不讓員工直接進原目錄：
+    cogito 的檔案工具 rooted 在頻道工作區（越界是工具層硬擋），這條防線不拆。
+    已掛過就沿用同一個 worktree／分支——同一位員工對同一個 repo 的工作是連續的。
+    """
+    if CHANNELS_DIR is None:
+        return "未設 COGITO_CHANNELS，找不到員工的頻道工作區"
+    dst = CHANNELS_DIR / f"office_{aid}" / repo["name"]
+    if dst.exists():
+        r = subprocess.run(["git", "-C", str(dst), "branch", "--show-current"],
+                           capture_output=True, text=True, timeout=10)
+        return repo["name"], (r.stdout.strip() or "（沿用既有 worktree）")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    branch = f"office/{aid}-{time.strftime('%m%d-%H%M')}"
+    r = subprocess.run(["git", "-C", repo["path"], "worktree", "add", "-b", branch, str(dst)],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return f"worktree 開不出來：{(r.stderr or r.stdout).strip()[-120:]}"
+    return repo["name"], branch
+
+
+def with_repo(text: str, name: str, src: str, branch: str) -> str:
+    """跟 with_headcount 同一個道理：repo 是這一次任務的參數，用附加一行講給 agent 聽。"""
+    return (f"{text}\n\n【工作 repo】./{name}/ ——這是真實專案 {src} 的 git worktree"
+            f"（分支 {branch}，與原 repo 共用歷史）。所有讀寫都在 ./{name}/ 底下進行；"
+            "改完 commit 到這個分支即可，【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
+
+
 @app.post("/office/dispatch")
 async def office_dispatch(d: dict):
     """Web 外殼派工/審批 → 轉發 cogito HTTP 入口（token 在橋端，瀏覽器拿不到）。"""
@@ -1848,6 +1901,15 @@ async def office_dispatch(d: dict):
         if not 1 <= people <= len(npcs()):
             return {"ok": False, "error": f"參與人數要在 1–{len(npcs())} 之間"}
         text = with_headcount(text, people)
+    # repo 綁定：白名單比對 /office/repos 的清單，不吃路徑（跟封存板的 f= 同一個安全原則）
+    if (rname := d.get("repo")) and verb not in ("approve", "reject", "/stop", "/steer"):
+        repo = next((r for r in local_repos() if r["name"] == rname), None)
+        if repo is None:
+            return {"ok": False, "error": f"不認識的 repo：{rname}（清單見工作 repo 選單）"}
+        bound = bind_repo(aid, repo)
+        if isinstance(bound, str):
+            return {"ok": False, "error": bound}
+        text = with_repo(text, bound[0], repo["path"], bound[1])
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
             # 中止時若正卡在審批：【先送駁回再送中止】。agent 這時阻塞在等審批，中止指令它根本
@@ -1887,6 +1949,59 @@ async def office_dispatch(d: dict):
             # 寄放著，等 start 開出真的任務卡再掛進去——這行本來就屬於它要開始的那件事。
             pending_note[aid] = f"{NOTE_MARK}{text[:200]}"
     return {"ok": True}
+
+
+# ── 班表（Devin 對照筆記 ③）：辦公室的例行任務——保全每週巡 repo 之類 ──────────
+# 掛在橋而不是 cogito 的 cron：走一般派工路徑，走位/工作串/報告卡全部免費，
+# 而且班表是「辦公室的制度」，不是「大腦的排程」。格式見 schedule.json.example。
+SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
+sched_last: dict[str, str] = {}   # job name -> 上次觸發的 "YYYY-MM-DD HH"（防同一小時重複；隨 state 持久化）
+
+
+def load_schedule() -> list[dict]:
+    if not SCHEDULE_FILE.exists():
+        return []
+    try:
+        jobs = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+        return jobs if isinstance(jobs, list) else []
+    except ValueError as e:
+        print(f"⚠ schedule.json 壞了，班表停用：{e}")
+        return []
+
+
+async def run_due_jobs(now: time.struct_time) -> None:
+    """weekday（0=週一）＋hour 命中、這一小時還沒跑過 → 派工。
+
+    人在忙就【跳過這一輪】而不是排隊——班表任務是例行巡邏，錯過一輪下次照排；
+    排隊反而會在他收工的瞬間搶走老闆正要派的活。跳過有留痕，不是靜默消失。
+    """
+    global _dirty
+    stamp = time.strftime("%Y-%m-%d %H", now)
+    for job in load_schedule():
+        name, aid = str(job.get("name", "")), str(job.get("agent", ""))
+        if not name or aid not in agents or not str(job.get("text", "")).strip():
+            continue
+        if job.get("weekday") != now.tm_wday or job.get("hour") != now.tm_hour:
+            continue
+        if sched_last.get(name) == stamp:
+            continue
+        sched_last[name] = stamp
+        _dirty = True
+        if aid in busy:
+            log_ev(aid, f"🗓 班表任務「{name}」到點，但人在忙——這輪跳過，下次照排")
+            continue
+        r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo")})
+        log_ev(aid, f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）" if r.get("ok")
+               else f"🗓 班表任務「{name}」派不出去：{r.get('error')}")
+
+
+async def schedule_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await run_due_jobs(time.localtime())
+        except Exception as e:  # 班表壞了不能拖垮橋——記一筆，下一分鐘再試
+            print(f"⚠ 班表迴圈出錯：{e}")
 
 
 @app.post("/cmd")
@@ -2049,7 +2164,8 @@ def save_state() -> None:
     data = {"history": {a: list(cards) for a, cards in history.items()},
             "conv_npc": conv_npc, "pending_approval": pending_approval,
             "approval_src": approval_src,
-            "approval_meta": approval_meta, "approval_at": approval_at}
+            "approval_meta": approval_meta, "approval_at": approval_at,
+            "sched_last": sched_last}  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -2079,6 +2195,7 @@ def load_state() -> None:
     approval_src.update(data.get("approval_src", {}))
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
+    sched_last.update(data.get("sched_last", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。
@@ -2134,6 +2251,7 @@ async def _startup() -> None:
     if watchdog is None or watchdog.done():
         watchdog = asyncio.create_task(work_watchdog())
     asyncio.create_task(state_saver())
+    asyncio.create_task(schedule_loop())   # 班表：例行任務（schedule.json，沒檔就整輪 no-op）
 
 
 @app.on_event("shutdown")
