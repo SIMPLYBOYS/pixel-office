@@ -887,7 +887,10 @@ import json, sys
 argv = sys.argv[1:]
 picked = argv[argv.index("--model") + 1] if "--model" in argv else "cli-自己的預設"
 out = [
- {"type":"system","subtype":"init","model":picked,"tools":["Read"],"cwd":"x"},
+ {"type":"system","subtype":"init","model":picked,"cwd":"x",
+  "tools":["Read","Edit","Bash","Task"],
+  "skills":[{"name":"repo-wiki","description":"養 repo 文件"}],
+  "mcp_servers":[{"name":"playwright","status":"connected"}]},
  {"type":"assistant","message":{"content":[
    {"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.py"}}]}},
  {"type":"user","message":{"content":[
@@ -951,6 +954,22 @@ for o in out:
                 assert "p05" not in main.busy, "收工要釋放員工"
                 # CLI 用自己的設定選模型——我們指定不了，但要【講得出來】它用了什麼。
                 # 先前的做法是把模型那排藏掉，看起來像功能不見了（實際回報）。
+                # 【CLI 模式的能力面板】cogito 沒開時，能力來自 CLI 自己的 init 事件。
+                # 先前一律問 cogito，於是純 CLI 用法下面板只剩「取不到能力清單」——
+                # 看起來像這個模式沒有能力，其實它有一大把（實際回報）。
+                old_http, main.COGITO_HTTP = main.COGITO_HTTP, ""
+                main._caps_cache = None
+                try:
+                    caps = c.get("/office/caps").json()
+                    assert caps["ok"], caps
+                    assert [t["name"] for t in caps["tools"]] == ["Read", "Edit", "Bash", "Task"], caps
+                    assert caps["skills"][0]["name"] == "repo-wiki", caps
+                    assert caps["mcp"][0]["name"] == "playwright", caps
+                    # 來源要標出來：cogito 與 CLI 的工具集完全不同，混著看比沒有更誤導
+                    assert "Claude Code CLI" in caps.get("source", ""), caps
+                finally:
+                    main.COGITO_HTTP, main._caps_cache = old_http, None
+
                 # 沒指定模型＝不帶 --model，交回 CLI 自己的設定
                 assert main.cli_model.get("p05") == "cli-自己的預設", main.cli_model
 

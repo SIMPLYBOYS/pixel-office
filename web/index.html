@@ -565,8 +565,11 @@ async function capcard() {
     return;
   }
   const mcp = r.mcp || [];
+  // 來源要標出來：cogito 與 CLI 的工具集完全不同（read_file/bash vs Read/Edit），
+  // 不說清楚的話，看到一份不認得的清單只會更困惑。
   box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}${
-    mcp.length ? '・MCP ' + mcp.length : ''}</small></summary>`;
+    mcp.length ? '・MCP ' + mcp.length : ''}</small></summary>`
+    + (r.source ? `<div class="shint">來源：${esc(r.source)}</div>` : '');
   box.open = localStorage.capsOpen === '1';
   box.appendChild(capGroup('tools', '🛠 工具', r.tools));
   // MCP 單獨列：它們不在 registry 裡（模型透過 mcp_call_tool 呼叫），混在一起會誤導。

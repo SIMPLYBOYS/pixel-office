@@ -1425,13 +1425,31 @@ async def office_chat(ev: dict):
 _caps_cache: dict | None = None
 
 
+def cli_caps_reply() -> dict | None:
+    """CLI 回報過的能力（來自最近一次 system/init）。沒跑過就回 None——不假裝知道。
+
+    刻意標 source＝哪個引擎、什麼時候收到的：cogito 與 CLI 的工具集完全不同
+    （前者是 read_file/bash/spawn_subagent…，後者是 Read/Edit/Task…），
+    混在一起而不說清楚，比沒有更誤導。
+    """
+    if not cli_caps.get("tools"):
+        return None
+    name = agents[cli_caps["agent"]].name if cli_caps.get("agent") in agents else cli_caps.get("agent", "")
+    return {"ok": True, "tools": cli_caps["tools"], "skills": cli_caps.get("skills") or [],
+            "mcp": cli_caps.get("mcp") or [],
+            "source": f"Claude Code CLI（{name} 於 {cli_caps.get('at', '')} 回報）"}
+
+
 @app.get("/office/caps")
 async def office_caps():
     global _caps_cache
     if _caps_cache:
         return _caps_cache
+    # CLI 模式的能力來自 CLI 自己（init 事件帶的工具/技能/MCP）。cogito 沒開時它就是唯一
+    # 的來源——先前一律問 cogito，於是純 CLI 用法下面板只剩「取不到能力清單」，
+    # 看起來像「這個模式沒有能力」，實際上它有 184 個工具。
     if not COGITO_HTTP:
-        return {"ok": False, "error": "未設 COGITO_HTTP——問不到 cogito 的能力清單"}
+        return cli_caps_reply() or {"ok": False, "error": "未設 COGITO_HTTP——問不到 cogito 的能力清單"}
     probe = next(iter(agents), "")   # 清單全員相同，隨便挑一位當探針
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
@@ -1440,7 +1458,8 @@ async def office_caps():
         r.raise_for_status()
         d = r.json()
     except (httpx.HTTPError, ValueError) as e:
-        return {"ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
+        # cogito 連不上：有 CLI 回報過的就給那份（並講清楚來源），不要只丟一句錯誤
+        return cli_caps_reply() or {"ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
     # mcp：外部 MCP 工具不個別註冊（cogito 只掛 mcp_call_tool／mcp_describe_tool 兩個閘道），
     # 所以清單得從 gateway 的目錄另外拿——否則看板上只看得到兩個閘道，看不出實際掛了什麼。
     _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or [],
@@ -2047,6 +2066,7 @@ CLI_TIMEOUT = float(os.environ.get("OFFICE_CLI_TIMEOUT", "1800"))  # 這麼久�
 
 cli_procs: dict[str, asyncio.subprocess.Process] = {}   # aid -> 執行中的 CLI（供中止）
 cli_model: dict[str, str] = {}   # aid -> CLI 上次實際跑的模型（system/init 會報，供介面揭露）
+cli_caps: dict = {}              # CLI 上次回報的能力（工具/技能/MCP）——init 全都帶了
 
 
 def cli_available() -> bool:
@@ -2185,6 +2205,19 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     # 先前的做法是把模型那排整個藏掉，結果看起來像功能不見了（實際回報）。
                     if m := str(d.get("model") or ""):
                         cli_model[aid] = m
+                    # init 連工具/技能/MCP 都帶了。先前整包丟掉，於是 CLI 模式下
+                    # 能力面板只剩「取不到能力清單」——那不是沒有能力，是我沒收下來。
+                    if tools := [t for t in (d.get("tools") or []) if isinstance(t, str)]:
+                        cli_caps.update({
+                            "at": time.strftime("%H:%M"), "agent": aid,
+                            "tools": [{"name": t, "description": ""} for t in tools],
+                            "skills": [{"name": str(x.get("name") or x), "description": str(x.get("description") or "")}
+                                       if isinstance(x, dict) else {"name": str(x), "description": ""}
+                                       for x in (d.get("skills") or [])],
+                            "mcp": [{"name": str(m2.get("name") or ""),
+                                     "description": f"狀態：{m2.get('status') or '未知'}"}
+                                    for m2 in (d.get("mcp_servers") or []) if isinstance(m2, dict)],
+                        })
                     continue
                 if d.get("type") == "result":
                     done_sent = True
