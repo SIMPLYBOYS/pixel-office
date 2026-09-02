@@ -1244,6 +1244,10 @@ async def office_event(ev: dict):
             # 還是 opus 跑兩輪？看不出來。子 agent 各自的模型不在這裡（見協定說明）。
             if card and (mu := ev.get("model")):
                 card["model"] = str(mu)[:60]
+            # 這筆花費的【單價】是估的（該模型沒登記定價）。token 是真的、單價是猜的，
+            # 差幾倍都可能——不標的話，估計值長得跟實價一模一樣。
+            if card and cost and ev.get("cost_est"):
+                card["cost_est"] = True
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）

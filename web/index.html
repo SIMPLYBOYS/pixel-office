@@ -1918,9 +1918,12 @@ function sync(el, t, bodySel, live) {
   // cost/model 都是 cogito 報的【實際】值（協定：未知不送）——有才顯示。
   // 兩個要放一起：花費沒有模型當分母就只是個數字（haiku 跑十輪 vs opus 跑兩輪）。
   const rg = el.querySelector(':scope > summary .trange');
-  rg.textContent = when(t) + (t.cost > 0 ? `｜$${t.cost.toFixed(4)}` : '')
+  // cost_est＝單價是估的（模型未登記定價）：標一個 ~，別讓估計值長得跟實價一樣
+  rg.textContent = when(t) + (t.cost > 0 ? `｜${t.cost_est ? '~' : ''}$${t.cost.toFixed(4)}` : '')
     + (t.model ? `｜${shortModel(t.model)}` : '');
-  rg.title = t.model ? `主 agent 實際跑在 ${t.model}（子 agent 可能各用各的）` : '';
+  rg.title = [t.model && `主 agent 實際跑在 ${t.model}（子 agent 可能各用各的）`,
+              t.cost_est && '⚠ 這個模型沒登記單價，金額是用保守估價換算的——token 數是真的，單價可能差好幾倍']
+             .filter(Boolean).join('\n');
   const pv = el.querySelector(':scope > summary .spreview');
   if (pv) pv.textContent = preview(t);
 

@@ -916,6 +916,15 @@ def model_per_agent() -> None:
             r = c.get("/office/report/p19").json()
             assert r["model"] == "claude-opus-5", r.get("model")
 
+            # 單價是估的要標出來（模型沒登記定價）；實價不標
+            post(c, agent="p19", kind="start", label="用了沒登記的模型")
+            post(c, agent="p19", kind="done", label="ok", cost=0.9, model="某個新模型", cost_est=True)
+            r = c.get("/office/report/p19").json()
+            assert r["cost"] == 0.9 and r["cost_est"] is True, r
+            post(c, agent="p19", kind="start", label="用有登記的")
+            post(c, agent="p19", kind="done", label="ok", cost=0.9, model="claude-opus-5")
+            assert "cost_est" not in c.get("/office/report/p19").json(), "實價不該標成估價"
+
             # 未知就不給——寧可空白，不要編一個 id 讓人以為知道
             post(c, agent="p19", kind="start", label="沒跑到模型就掛了")
             post(c, agent="p19", kind="done", label="error", detail="爆了")
