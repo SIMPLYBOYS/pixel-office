@@ -408,6 +408,11 @@
         </select>
         <span class="note" id="crewNote"></span>
       </div>
+      <div class="crew" id="modelRow" hidden>
+        <label for="modelSel">模型</label>
+        <select id="modelSel"></select>
+        <span class="note" id="modelNote"></span>
+      </div>
       <div class="crew" id="repoRow" hidden>
         <label for="repoSel">工作 repo</label>
         <!-- 用 input+datalist 而不是 select：實測掃得到 288 個 repo，下拉選單在那個量級
@@ -746,6 +751,42 @@ function updateComposer() {
       : hit.bound ? '這位員工已經在這個 repo 上工作過——沿用同一個 worktree 與分支'
       : '會開一個新的 worktree 與 office/… 分支，成果 commit 在那裡——驗收後自己合併';
   }
+  paintModelRow(a, workingNow);
+}
+
+// 模型選單（觀察 ③：外殼要能臨時換模型）。清單與「目前實際會用哪個」都來自橋，前端不寫死
+// 型號——cogito 不驗證 model id，打錯只會讓下個任務報錯燒掉一輪，所以給選單不給自由輸入。
+let modelInfo = { models: [], reset: 'reset', effective: {} };
+async function loadModels() {
+  try { modelInfo = await (await fetch('/office/models')).json(); } catch { /* 拿不到就不畫 */ }
+  if (selected) updateComposer();
+}
+loadModels();
+
+function paintModelRow(a, workingNow) {
+  const row = $('modelRow'), sel = $('modelSel');
+  row.hidden = !(modelInfo.models || []).length;   // 沒有任何人設定過模型＝不畫這排
+  if (row.hidden) return;
+  const eff = modelInfo.effective?.[selected] || '', persona = a.model || '';
+  // 選項每次換人都重建：「跟人設」那行要寫出【這位員工】的人設模型，不同人不一樣
+  const want = [['', persona ? `跟人設（${shortModel(persona)}）` : '跟人設（cogito 預設）']]
+    .concat((modelInfo.models || []).map(m => [m, shortModel(m)]));
+  if (persona || eff) want.push([modelInfo.reset || 'reset', '↺ 還原 cogito 預設']);
+  const sig = selected + '|' + want.map(x => x[0]).join(',');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = want.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    sel.dataset.sig = sig;
+    // 預選【目前實際會用的】而不是一律空白：覆蓋在 cogito 那邊是 session 級持久的，
+    // 畫面不反映它就成了隱形狀態——選一次 opus 之後永遠是 opus，而你看不出來。
+    sel.value = (eff && eff !== persona && want.some(x => x[0] === eff)) ? eff : '';
+  }
+  sel.disabled = workingNow;
+  sel.onchange = () => updateComposer();
+  const pick = sel.value;
+  $('modelNote').textContent =
+    pick === (modelInfo.reset || 'reset') ? '這次派工會把覆蓋收回，還原成 cogito 啟動時的模型'
+    : pick ? `這次派工改用 ${shortModel(pick)}——覆蓋會留著，之後可選「還原」收回`
+    : eff ? `目前會用 ${shortModel(eff)}` : '';
 }
 
 // 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。每次換人都重抓：bound 是【那位員工】有沒有
@@ -1144,11 +1185,12 @@ async function dispatch(text) {
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
-                           repo: $('repoSel').value.trim() || null }),
+                           repo: $('repoSel').value.trim() || null,
+                           model: $('modelSel').value || null }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';
-  if (r.ok) { $('box').value = ''; feed(); }
+  if (r.ok) { $('box').value = ''; loadModels(); feed(); }
 }
 
 // 開啟產出資料夾：路徑不從這裡送，只給卡號讓橋自己查（橋端不做任意路徑開啟器）

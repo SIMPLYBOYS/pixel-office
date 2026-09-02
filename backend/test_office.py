@@ -887,6 +887,29 @@ def model_per_agent() -> None:
             c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
             assert "model" not in sent[-1], sent[-1]
 
+            # 外殼的臨時覆蓋：優先於人設
+            main.busy.discard("p19")
+            c.post("/office/dispatch", json={"agent": "p19", "text": "這次用便宜的",
+                                              "model": "claude-haiku-4-5"})
+            assert sent[-1]["model"] == "claude-haiku-4-5", sent[-1]
+            # 覆蓋【不是隱形狀態】：cogito 那邊是 session 級持久的，所以橋要記著並揭露，
+            # 否則選一次 opus 就永遠是 opus 而畫面上看不出來。
+            eff = c.get("/office/models").json()["effective"]
+            assert eff["p19"] == "claude-haiku-4-5", eff
+            # 沒選就沿用人設，但【目前實際會用的】仍是上次那個覆蓋（誠實反映 cogito 的狀態）
+            main.busy.discard("p19")
+            c.post("/office/dispatch", json={"agent": "p19", "text": "沒選模型"})
+            assert sent[-1]["model"] == "claude-opus-5", sent[-1]
+            # 還原：把覆蓋收回啟動預設（與聊天端 `model reset` 同一個字）
+            main.busy.discard("p19")
+            c.post("/office/dispatch", json={"agent": "p19", "text": "還原",
+                                              "model": main.MODEL_RESET})
+            assert sent[-1]["model"] == main.MODEL_RESET, sent[-1]
+            assert c.get("/office/models").json()["effective"]["p19"] == "claude-opus-5", "還原後回到人設"
+
+            # 清單資料驅動：就是人設裡實際指派過的那些（不寫死一張會過期的型號表）
+            assert c.get("/office/models").json()["models"] == ["claude-haiku-4-5", "claude-opus-5"]
+
             # 揭露：done 帶的是實際跑的模型，進卡片
             post(c, agent="p19", kind="start", label="架構決策")
             post(c, agent="p19", kind="done", label="ok", cost=0.5, model="claude-opus-5")
@@ -901,6 +924,7 @@ def model_per_agent() -> None:
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.busy.discard("p19")
+        main.model_sent.clear()
 
 
 def steer_dispatch() -> None:

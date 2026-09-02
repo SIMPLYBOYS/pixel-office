@@ -2018,9 +2018,36 @@ def with_repo(text: str, name: str, src: str, branch: str) -> str:
             "改完 commit 到這個分支即可，【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
 
 
+# ── 模型選擇（觀察 ③：外殼要能臨時換模型）─────────────────────────────
+# 清單資料驅動：OFFICE_MODELS 有設就用它，否則就是【人設裡實際指派過的那些】——
+# 不在程式裡寫死一張會過期的型號表（cogito 也不驗證 model id，打錯只會讓下個任務
+# 報錯燒掉一輪，所以外殼給選單、不給自由輸入）。
+MODEL_RESET = "reset"   # 與聊天端 `model reset` 同一個字：把臨時覆蓋收回啟動預設
+model_sent: dict[str, str] = {}   # aid -> 橋最後一次告訴 cogito 的模型（隨 state 持久化）
+
+
+def known_models() -> list[str]:
+    if env := os.environ.get("OFFICE_MODELS", "").strip():
+        return [m.strip() for m in env.split(",") if m.strip()]
+    return sorted({a.model for a in agents.values() if a.model})
+
+
+@app.get("/office/models")
+def office_models():
+    """外殼的模型選單。effective：這位員工現在【實際會用】哪個（人設 or 臨時覆蓋）。
+
+    覆蓋是有記憶的（cogito 那邊 session 級持久），所以要把它揭露出來——不然選一次 opus
+    就永遠是 opus，而畫面上看不出來，那就是隱形狀態。
+    ⚠ 只反映【橋送出去的】：有人在 Slack 用 `model` 指令改過，這裡不會知道。
+    """
+    return {"ok": True, "models": known_models(), "reset": MODEL_RESET,
+            "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()}}
+
+
 @app.post("/office/dispatch")
 async def office_dispatch(d: dict):
     """Web 外殼派工/審批 → 轉發 cogito HTTP 入口（token 在橋端，瀏覽器拿不到）。"""
+    global _dirty
     aid, text = d.get("agent", ""), (d.get("text") or "").strip()
     if aid not in agents or not text:
         return {"ok": False, "error": "缺 agent 或 text"}
@@ -2069,8 +2096,12 @@ async def office_dispatch(d: dict):
             # model：員工的屬性（persona 的 model 欄位），跟任務一起送。空＝不動 cogito
             # 那邊現有的設定（可能是聊天端 `model` 指令設的），別無聲覆蓋人家的選擇。
             payload = {"agent": aid, "text": text}
-            if m := agents[aid].model:
+            # 優先序：外殼這次選的 > 人設。都沒有就【不送這個鍵】——送空字串會把
+            # 使用者在聊天端用 `model` 指令選的無聲清掉（要收回覆蓋請明選「還原預設」）。
+            if m := (str(d.get("model") or "").strip() or agents[aid].model):
                 payload["model"] = m
+                model_sent[aid] = "" if m == MODEL_RESET else m
+                _dirty = True
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
     except httpx.HTTPError as e:
@@ -2317,7 +2348,8 @@ def save_state() -> None:
             "conv_npc": conv_npc, "pending_approval": pending_approval,
             "approval_src": approval_src,
             "approval_meta": approval_meta, "approval_at": approval_at,
-            "sched_last": sched_last}  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
+            "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
+            "model_sent": model_sent}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -2348,6 +2380,7 @@ def load_state() -> None:
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
     sched_last.update(data.get("sched_last", {}))
+    model_sent.update(data.get("model_sent", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。
