@@ -44,6 +44,15 @@ async def _no_life(a, tools):  # 生活迴圈替身：測試只看投影指令
 class _FakeResp:
     status_code, text = 202, ""
 
+    def __init__(self, body: dict | None = None):
+        self._body = body or {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        return None
+
 
 class _FakeHTTP:  # cogito 入口替身：dispatch 只驗辦公室投影，不真的送任務
     async def __aenter__(self):
@@ -54,6 +63,11 @@ class _FakeHTTP:  # cogito 入口替身：dispatch 只驗辦公室投影，不�
 
     async def post(self, *a, **k):
         return _FakeResp()
+
+    async def get(self, *a, **k):
+        # 預設「問不到」：模型清單那條路徑的降級行為因此是【預設被驗到】的，
+        # 而不是要另外寫一個測試才會走到。要驗成功路徑的測試自己覆寫這個。
+        raise main.httpx.HTTPError("fake: 這個替身沒有 GET")
 
 
 def _fake_client(**kw):
@@ -907,8 +921,28 @@ def model_per_agent() -> None:
             assert sent[-1]["model"] == main.MODEL_RESET, sent[-1]
             assert c.get("/office/models").json()["effective"]["p19"] == "claude-opus-5", "還原後回到人設"
 
-            # 清單資料驅動：就是人設裡實際指派過的那些（不寫死一張會過期的型號表）
-            assert c.get("/office/models").json()["models"] == ["claude-haiku-4-5", "claude-opus-5"]
+            # 清單優先問 cogito（→ 官方 /v1/models）。這裡的假 cogito 沒有 /models，
+            # 所以走【降級】：用後備清單（人設裡指派過的），而且 source 要講出來——
+            # 降級不能是無聲的，否則使用者以為自己在看官方清單。
+            m = c.get("/office/models").json()
+            assert m["source"] == "local", m["source"]
+            assert [x["id"] for x in m["models"]] == ["claude-haiku-4-5", "claude-opus-5"], m["models"]
+
+            # 成功路徑：cogito 答得出來時【用它的】，不用後備清單。
+            # 官方清單會有本地沒有的型號（那正是重點——手動表必然落後於發布）。
+            class _WithModels(_Rec):
+                async def get(self, url, **kw):
+                    assert url.endswith("/models"), url
+                    return _FakeResp({"models": [{"id": "claude-fable-5-1", "name": "Claude Fable 5.1"},
+                                                 {"id": "claude-opus-5", "name": "Claude Opus 5"}],
+                                      "source": "live"})
+
+            main.httpx.AsyncClient = lambda **kw: _WithModels()
+            m = c.get("/office/models").json()
+            assert m["source"] == "live", m
+            assert [x["id"] for x in m["models"]] == ["claude-fable-5-1", "claude-opus-5"], m
+            assert m["models"][0]["name"] == "Claude Fable 5.1", "顯示名要帶過來（比 id 好認）"
+            main.httpx.AsyncClient = lambda **kw: _Rec()
 
             # 揭露：done 帶的是實際跑的模型，進卡片
             post(c, agent="p19", kind="start", label="架構決策")

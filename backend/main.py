@@ -2030,21 +2030,48 @@ MODEL_RESET = "reset"   # 與聊天端 `model reset` 同一個字：把臨時覆
 model_sent: dict[str, str] = {}   # aid -> 橋最後一次告訴 cogito 的模型（隨 state 持久化）
 
 
-def known_models() -> list[str]:
+def known_models() -> list[dict]:
+    """後備清單：OFFICE_MODELS 有設就用它，否則就是人設裡實際指派過的那些。
+    只有在【問不到 cogito】時才會走到——真正的清單來自官方（見 office_models）。"""
     if env := os.environ.get("OFFICE_MODELS", "").strip():
-        return [m.strip() for m in env.split(",") if m.strip()]
-    return sorted({a.model for a in agents.values() if a.model})
+        ids = [m.strip() for m in env.split(",") if m.strip()]
+    else:
+        ids = sorted({a.model for a in agents.values() if a.model})
+    return [{"id": i, "name": i} for i in ids]
+
+
+async def cogito_models() -> tuple[list[dict], str] | None:
+    """問 cogito「現在真正能用哪些模型」（它再問 Anthropic 的 /v1/models，帶快取）。
+    問不到回 None——清單是加值層，拿不到就降級，不讓選單整個消失。"""
+    if not COGITO_HTTP:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.get(f"{COGITO_HTTP}/models",
+                             headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+        r.raise_for_status()
+        d = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        print(f"⚠ 問不到 cogito 的模型清單（用後備清單）：{type(e).__name__}")
+        return None
+    ms = [m for m in (d.get("models") or []) if isinstance(m, dict) and m.get("id")]
+    return (ms, str(d.get("source") or "live")) if ms else None
 
 
 @app.get("/office/models")
-def office_models():
+async def office_models():
     """外殼的模型選單。effective：這位員工現在【實際會用】哪個（人設 or 臨時覆蓋）。
+
+    清單優先問 cogito（→ 官方 /v1/models）——手動維護的表必然落後於發布。問不到才用
+    後備清單，並用 source 講清楚是哪一種，別讓降級變成無聲的。
 
     覆蓋是有記憶的（cogito 那邊 session 級持久），所以要把它揭露出來——不然選一次 opus
     就永遠是 opus，而畫面上看不出來，那就是隱形狀態。
-    ⚠ 只反映【橋送出去的】：有人在 Slack 用 `model` 指令改過，這裡不會知道。
+    ⚠ effective 只反映【橋送出去的】：有人在 Slack 用 `model` 指令改過，這裡不會知道。
     """
-    return {"ok": True, "models": known_models(), "reset": MODEL_RESET,
+    got = await cogito_models()
+    models, source = got if got else (known_models(), "local")
+    return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET,
             "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()}}
 
 

@@ -769,8 +769,10 @@ function paintModelRow(a, workingNow) {
   if (row.hidden) return;
   const eff = modelInfo.effective?.[selected] || '', persona = a.model || '';
   // 選項每次換人都重建：「跟人設」那行要寫出【這位員工】的人設模型，不同人不一樣
+  // 清單來自 cogito → 官方 /v1/models，所以有正式顯示名（「Claude Opus 5」）可用，
+  // 比縮寫的 id 好認。降級成本地清單時 name 就等於 id，照樣顯示得出來。
   const want = [['', persona ? `跟人設（${shortModel(persona)}）` : '跟人設（cogito 預設）']]
-    .concat((modelInfo.models || []).map(m => [m, shortModel(m)]));
+    .concat((modelInfo.models || []).map(m => [m.id, m.name || shortModel(m.id)]));
   if (persona || eff) want.push([modelInfo.reset || 'reset', '↺ 還原 cogito 預設']);
   const sig = selected + '|' + want.map(x => x[0]).join(',');
   if (sel.dataset.sig !== sig) {
@@ -787,6 +789,11 @@ function paintModelRow(a, workingNow) {
     pick === (modelInfo.reset || 'reset') ? '這次派工會把覆蓋收回，還原成 cogito 啟動時的模型'
     : pick ? `這次派工改用 ${shortModel(pick)}——覆蓋會留著，之後可選「還原」收回`
     : eff ? `目前會用 ${shortModel(eff)}` : '';
+  // 降級要看得見：清單不是官方那份時講出來，否則使用者不知道自己在看一份可能過期的表
+  if (modelInfo.source && modelInfo.source !== 'live') {
+    $('modelNote').textContent +=
+      (($('modelNote').textContent && '　') || '') + '（清單問不到官方，用的是本地後備）';
+  }
 }
 
 // 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。每次換人都重抓：bound 是【那位員工】有沒有
