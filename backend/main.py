@@ -2082,10 +2082,50 @@ def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
                         "label": tool_names.get(str(c.get("tool_use_id", "")), "tool"),
                         "detail": str(body or "")[:400]})
     elif t == "rate_limit_event":
-        # 訂閱制的額度訊號。不講出來的話，畫面上就只是「突然變慢」——那正是
-        # 「假的成功比空白更糟」要防的：看起來在做事，其實在等額度。
-        out.append({"kind": "msg", "label": "⏳ 觸到訂閱額度上限，等待額度恢復中…"})
+        if line := rate_limit_line(d.get("rate_limit_info") or {}):
+            out.append({"kind": "msg", "label": line})
     return out
+
+
+# 額度警戒線：低於這個用量不吵。90% 是「還能做完手上這件、但該知道了」的位置。
+RATE_WARN = 0.9
+
+
+def rate_limit_line(info: dict) -> str:
+    """額度事件 → 要不要講、講什麼。不該講就回空字串。
+
+    【踩過的坑】這個事件是【例行回報】，每次呼叫都可能來一筆，實測內容是
+    status=allowed、utilization=0.05——我原本把每一筆都翻譯成「觸到上限」，
+    等於在畫面上說謊，而且是那種看起來很像真的的謊。
+
+    真正值得講的只有兩種：真的被擋下來（status 不是 allowed），以及快用完了
+    （用量過警戒線）。其餘一律安靜——投影誠實不只是「不要假裝成功」，
+    也包括「不要假裝有事發生」。
+    """
+    if not isinstance(info, dict):
+        return ""
+    when = ""
+    if ts := info.get("resetsAt"):
+        try:
+            when = f"，約 {time.strftime('%H:%M', time.localtime(float(ts)))} 重置"
+        except (TypeError, ValueError, OSError):
+            when = ""
+    kind = {"five_hour": "5 小時", "seven_day": "7 日"}.get(str(info.get("rateLimitType")), "")
+    if str(info.get("status", "allowed")).lower() != "allowed":
+        return f"⏳ 訂閱額度已達上限（{kind or '額度'}窗）{when}——等額度恢復中"
+    # 還能用，但快滿了才提醒。取兩個窗裡用得最兇的那個。
+    worst_name, worst = "", 0.0
+    for name, w in (info.get("unifiedWindows") or {}).items():
+        try:
+            u = float((w or {}).get("utilization", 0))
+        except (TypeError, ValueError):
+            continue
+        if u > worst:
+            worst_name, worst = name, u
+    if worst >= RATE_WARN:
+        label = {"five_hour": "5 小時", "seven_day": "7 日"}.get(worst_name, worst_name)
+        return f"⚠ 訂閱額度已用 {worst:.0%}（{label}窗）{when}"
+    return ""
 
 
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
@@ -2121,6 +2161,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
         return
     cli_procs[aid] = proc
     tool_names: dict[str, str] = {}
+    warned: set[str] = set()
     done_sent = False
     try:
         async def pump() -> None:
@@ -2143,6 +2184,11 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
                                         "detail": str(d.get("result") or "")[:120]})
                     continue
                 for ev in cli_events(d, tool_names):
+                    # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠
+                    if ev["kind"] == "msg" and ev["label"].startswith(("⏳", "⚠")):
+                        if ev["label"] in warned:
+                            continue
+                        warned.add(ev["label"])
                     await office_event({"v": 1, "agent": aid, **ev})
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()

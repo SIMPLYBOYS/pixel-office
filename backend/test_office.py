@@ -409,6 +409,7 @@ def run() -> None:
     board_archive()
     cost_projection()
     steer_dispatch()
+    rate_limit_wording()
     model_per_agent()
     cli_mode()
     full_stream()
@@ -891,7 +892,9 @@ out = [
    {"type":"tool_use","id":"t2","name":"Bash","input":{"command":"go test ./..."}}]}},
  {"type":"user","message":{"content":[
    {"type":"tool_result","tool_use_id":"t2","content":"exit 1: 編譯失敗","is_error":True}]}},
- {"type":"rate_limit_event"},
+ {"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1788384000,
+   "rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.05},
+   "seven_day":{"utilization":0.04}}}},
  {"type":"assistant","message":{"content":[{"type":"text","text":"它印出 hi。"}]}},
  {"type":"result","subtype":"success","is_error":False,"num_turns":2,
   "total_cost_usd":0.2677,"result":"它印出 hi。"},
@@ -934,7 +937,9 @@ for o in out:
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
                 assert any("✗ Bash" in t for t in evs), evs          # 失敗的要標成失敗，不能混為一談
-                assert any("觸到訂閱額度上限" in t for t in evs), evs   # 額度訊號要講出來
+                # 【額度事件是例行回報】status=allowed、用量 5% 時什麼都不該講。
+                # 先前把每一筆都翻譯成「觸到上限」——看起來很像真的的謊（實際回報）。
+                assert not any("額度" in t for t in evs), f"例行的額度回報不該變成警告：{evs}"
                 assert any("它印出 hi" in t for t in evs), evs        # 回話
                 # 【誠實】訂閱制不按次計費：total_cost_usd 是「換算成 API 會是多少」，
                 # 標成花費就是說謊，所以卡片不該有 cost
@@ -980,6 +985,23 @@ for o in out:
             # 後面的 repo_binding 因此走了 CLI 分支，repo 根本沒綁）。
             main.engine_sent.clear()
             main.save_state()
+
+
+def rate_limit_wording() -> None:
+    """額度事件三態：例行安靜、快滿了提醒、真的被擋才說被擋。
+
+    投影誠實不只是「不要假裝成功」，也包括【不要假裝有事發生】。
+    """
+    base = {"status": "allowed", "resetsAt": 1788384000, "rateLimitType": "five_hour",
+            "unifiedWindows": {"five_hour": {"utilization": 0.05},
+                               "seven_day": {"utilization": 0.04}}}
+    assert main.rate_limit_line(base) == "", "例行回報（用量 5%）不該講話"
+    near = dict(base, unifiedWindows={"five_hour": {"utilization": 0.93}})
+    assert "93%" in main.rate_limit_line(near), "快用完了要提醒，數字要是真的"
+    hit = dict(base, status="rejected")
+    line = main.rate_limit_line(hit)
+    assert "已達上限" in line and "重置" in line, line
+    assert main.rate_limit_line({}) == "" and main.rate_limit_line(None) == ""  # 壞資料不亂講
 
 
 def model_per_agent() -> None:
