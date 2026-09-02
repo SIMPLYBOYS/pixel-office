@@ -790,8 +790,16 @@ function paintEngineRow(a, workingNow) {
   $('engineNote').textContent = cli
     ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——沒有審批與插話，中止是直接砍掉行程`
     : '';
-  // CLI 自己決定模型（吃它自己的設定），這裡的模型選單對它無效——別給一個沒作用的旋鈕
-  $('modelRow').hidden = cli || !(modelInfo.models || []).length;
+  // CLI 自己決定模型，這裡選了不生效。但【藏起來】會讓人以為功能不見了（實際回報）——
+  // 改成停用＋講清楚原因，並把 CLI 上次實際跑的那個講出來（揭露 > 隱藏）。
+  const mr = $('modelRow'), ms = $('modelSel');
+  mr.hidden = !(modelInfo.models || []).length;
+  if (!mr.hidden && cli) {
+    ms.disabled = true;
+    const used = modelInfo.cli_models?.[selected];
+    $('modelNote').textContent = 'CLI 用它自己的設定選模型，這裡選了不會生效'
+      + (used ? `——上次實際跑的是 ${shortModel(used)}` : '');
+  }
 }
 
 function paintModelRow(a, workingNow) {
@@ -823,7 +831,7 @@ function paintModelRow(a, workingNow) {
   // 降級要看得見：清單不是官方那份時講出來，否則使用者不知道自己在看一份可能過期的表
   if (modelInfo.source && modelInfo.source !== 'live') {
     $('modelNote').textContent +=
-      (($('modelNote').textContent && '　') || '') + '（清單問不到官方，用的是本地後備）';
+      (($('modelNote').textContent && '　') || '') + '（cogito 沒開，問不到官方清單——這是本地後備）';
   }
 }
 

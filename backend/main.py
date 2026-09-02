@@ -2046,6 +2046,7 @@ CLI_PERMISSION = os.environ.get("OFFICE_CLI_PERMISSION", "acceptEdits")
 CLI_TIMEOUT = float(os.environ.get("OFFICE_CLI_TIMEOUT", "1800"))  # 這麼久沒收工就砍掉
 
 cli_procs: dict[str, asyncio.subprocess.Process] = {}   # aid -> 執行中的 CLI（供中止）
+cli_model: dict[str, str] = {}   # aid -> CLI 上次實際跑的模型（system/init 會報，供介面揭露）
 
 
 def cli_available() -> bool:
@@ -2175,6 +2176,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
                     d = json.loads(line)
                 except ValueError:
                     continue
+                if d.get("type") == "system" and d.get("subtype") == "init":
+                    # CLI 用它【自己的】設定選模型，我們無從指定——但可以【講出來】。
+                    # 先前的做法是把模型那排整個藏掉，結果看起來像功能不見了（實際回報）。
+                    if m := str(d.get("model") or ""):
+                        cli_model[aid] = m
+                    continue
                 if d.get("type") == "result":
                     done_sent = True
                     # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
@@ -2281,7 +2288,8 @@ async def office_models():
             "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()},
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
             "cli": cli_available(), "cli_cmd": CLI_CMD,
-            "engines": {aid: engine_of(aid) for aid in agents}}
+            "engines": {aid: engine_of(aid) for aid in agents},
+            "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
 
 @app.post("/office/dispatch")

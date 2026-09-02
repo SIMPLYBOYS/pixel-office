@@ -945,6 +945,10 @@ for o in out:
                 # 標成花費就是說謊，所以卡片不該有 cost
                 assert "cost" not in card, card.get("cost")
                 assert "p05" not in main.busy, "收工要釋放員工"
+                # CLI 用自己的設定選模型——我們指定不了，但要【講得出來】它用了什麼。
+                # 先前的做法是把模型那排藏掉，看起來像功能不見了（實際回報）。
+                assert main.cli_model.get("p05") == "claude-opus-5", main.cli_model
+
                 # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
                 # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
                 # cogito-agent（實際回報的症狀）。這條把「兩件事要能同時成立」釘住。
