@@ -929,6 +929,18 @@ def repo_binding() -> None:
                 # 帶 agent：還沒掛過 → bound=False
                 assert c.get("/office/repos", params={"agent": "p05"}).json()["repos"][0]["bound"] is False
 
+                # 排序：名稱 vs 最近動過。造第二個 repo，讓兩種排法答案【相反】——
+                # 不相反的話測試等於沒測（兩種排序碰巧同序，拔掉排序也不會紅）。
+                older = Path(tmp) / "repos" / "zzz-newer"
+                older.mkdir(parents=True)
+                subprocess.run(["git", "init", "-q"], cwd=older, check=True)
+                os.utime(older / ".git", (time.time() + 500, time.time() + 500))  # 它「最近動過」
+                by_name = [r["name"] for r in c.get("/office/repos", params={"sort": "name"}).json()["repos"]]
+                by_time = [r["name"] for r in c.get("/office/repos", params={"sort": "recent"}).json()["repos"]]
+                assert by_name == ["demo-app", "zzz-newer"], by_name
+                assert by_time == ["zzz-newer", "demo-app"], by_time
+                assert all(r["mtime"] > 0 for r in c.get("/office/repos").json()["repos"])
+
                 main.busy.discard("p05")
                 r = c.post("/office/dispatch", json={"agent": "p05", "text": "修掉啟動 crash",
                                                      "repo": "demo-app"}).json()
@@ -956,9 +968,13 @@ def repo_binding() -> None:
                 other = Path(tmp) / "repos" / "aaa-other"
                 other.mkdir(parents=True)
                 subprocess.run(["git", "init", "-q"], cwd=other, check=True)
-                rs = c.get("/office/repos", params={"agent": "p05"}).json()["repos"]
-                assert [r["name"] for r in rs] == ["demo-app", "aaa-other"], \
-                    f"掛過的要排最前面（bound 優先於字母序）：{[r['name'] for r in rs]}"
+                # 「進行中」是相關性、不是排序——兩種排法下都要置頂（連最近動過的 zzz 也壓得住）
+                for mode in ("name", "recent"):
+                    rs = c.get("/office/repos", params={"agent": "p05", "sort": mode}).json()["repos"]
+                    assert rs[0]["name"] == "demo-app", f"{mode} 排序下進行中的沒置頂：{[r['name'] for r in rs]}"
+                rs = c.get("/office/repos", params={"agent": "p05", "sort": "name"}).json()["repos"]
+                assert [r["name"] for r in rs][:2] == ["demo-app", "aaa-other"], \
+                    f"置頂之後其餘要照選的排序：{[r['name'] for r in rs]}"
                 assert rs[0]["bound"] is True and rs[1]["bound"] is False
                 # 沒帶 agent 就沒有 bound 欄位（那是「對誰而言」的事實，沒指定人就答不出來）
                 assert "bound" not in c.get("/office/repos").json()["repos"][0]

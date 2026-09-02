@@ -415,6 +415,10 @@
              過濾，打 "unity" 就出來，而且退化成純文字輸入框也還能用。 -->
         <input id="repoSel" list="repoList" placeholder="不綁定（沙箱作業）—— 打幾個字搜尋" autocomplete="off">
         <datalist id="repoList"></datalist>
+        <select id="repoSort" title="候選的排列順序（進行中的一律置頂）">
+          <option value="recent">最近動過</option>
+          <option value="name">名稱</option>
+        </select>
         <span class="note" id="repoNote"></span>
       </div>
       <div class="inputrow">
@@ -748,14 +752,23 @@ function updateComposer() {
 // 掛過這個 repo 的 worktree，人不同答案就不同。
 let reposList = [];
 async function loadRepos(aid) {
+  const sel = $('repoSort');
+  if (!sel.dataset.bound) {                       // 排序偏好記住：多數人只會選一次
+    sel.value = localStorage.repoSort || 'recent';
+    sel.onchange = () => { localStorage.repoSort = sel.value; loadRepos(selected); };
+    sel.dataset.bound = '1';
+  }
   try {
-    const q = aid ? '?agent=' + encodeURIComponent(aid) : '';
-    reposList = (await (await fetch('/office/repos' + q)).json()).repos || [];
+    const q = new URLSearchParams({ sort: sel.value });
+    if (aid) q.set('agent', aid);
+    reposList = (await (await fetch('/office/repos?' + q)).json()).repos || [];
   } catch { reposList = []; }
-  // 已經在上面工作過的排最前面（後端已排序）——datalist 依文件順序顯示，
-  // 所以「還沒打字就看得到常用的那幾個」是免費的。
-  $('repoList').innerHTML = reposList
-    .map(r => `<option value="${esc(r.name)}">${r.bound ? '進行中' : ''}</option>`).join('');
+  // 後端排好序（進行中置頂、其餘依選擇）——datalist 依文件順序顯示，所以「還沒打字
+  // 就看得到相關的那幾個」是免費的。標籤帶上狀態與時間：288 個同名前綴的專案裡，
+  // 「哪個是我上週在動的」要有依據，不能靠記憶。
+  $('repoList').innerHTML = reposList.map(r =>
+    `<option value="${esc(r.name)}">${[r.bound ? '進行中' : '', r.mtime ? fileTime(r.mtime) : '']
+      .filter(Boolean).join(' · ')}</option>`).join('');
   if (selected) updateComposer();
 }
 loadRepos('');

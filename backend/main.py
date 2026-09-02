@@ -1923,6 +1923,20 @@ def with_headcount(text: str, people: int) -> str:
 REPOS_DIR = os.environ.get("OFFICE_REPOS_DIR", "")
 
 
+def repo_touched(p: Path) -> int:
+    """這個 repo 最近一次「有事發生」的時間。
+
+    取 .git 的目錄 mtime：commit／add／checkout／fetch 都會改寫裡面的 index 或 refs
+    （git 一律走臨時檔 + rename，所以目錄本身的 mtime 會動），一次 stat 就問得到。
+    量過幾個真實 repo：它總是 ≥ 最後一次 commit 的時間，而且反映得到「拉了但沒 commit」。
+    跑 `git log` 才準，但 288 個 repo 等於 288 次 subprocess——不值得。
+    """
+    try:
+        return int(max(p.stat().st_mtime, (p / ".git").stat().st_mtime))
+    except OSError:
+        return 0
+
+
 def local_repos() -> list[dict]:
     """OFFICE_REPOS_DIR 底下的 git 專案。沒設＝功能不存在（入口資料驅動，外殼不畫欄位）。"""
     if not REPOS_DIR:
@@ -1930,7 +1944,7 @@ def local_repos() -> list[dict]:
     root = Path(REPOS_DIR).expanduser()
     if not root.is_dir():
         return []
-    return [{"name": p.name, "path": str(p)}
+    return [{"name": p.name, "path": str(p), "mtime": repo_touched(p)}
             for p in sorted(root.iterdir()) if (p / ".git").exists()]
 
 
@@ -1940,19 +1954,26 @@ def worktree_path(aid: str, name: str) -> Path | None:
 
 
 @app.get("/office/repos")
-def office_repos(agent: str = ""):
+def office_repos(agent: str = "", sort: str = "recent"):
     """可派工的 repo 清單。帶 agent 時，這位員工【已經在上面工作過的】（worktree 還在）排最前面。
 
-    「最近使用」不記在瀏覽器：磁碟上的 worktree 就是真實狀態——換瀏覽器、清快取、
+    「這位員工在做的」不記在瀏覽器：磁碟上的 worktree 就是真實狀態——換瀏覽器、清快取、
     重灌都還在，而且天生 per-員工（老徐養文件的 repo 跟小葵改前端的本來就不同）。
+
+    sort：`recent`（預設，最近動過的在前）或 `name`。兩百多個 repo 時，字母序等於要你
+    先知道名字才找得到；預設用時間，是因為多數時候你要派的就是手上正在動的那個。
+    【進行中的一律置頂】，那是另一個維度（相關性），不受排序選擇影響。
     """
     repos = local_repos()
+    order = (lambda r: r["name"].lower()) if sort == "name" else (lambda r: -r["mtime"])
     if agent in agents:
         for r in repos:
             wt = worktree_path(agent, r["name"])
             r["bound"] = bool(wt and wt.exists())
-        repos.sort(key=lambda r: (not r["bound"], r["name"]))
-    return {"ok": True, "root": REPOS_DIR, "repos": repos}
+        repos.sort(key=lambda r: (not r["bound"], order(r)))
+    else:
+        repos.sort(key=order)
+    return {"ok": True, "root": REPOS_DIR, "repos": repos, "sort": sort}
 
 
 def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
