@@ -1169,6 +1169,10 @@ function jumpWs() {
 // Esc 綁在 document 而不是輸入框上：反悔窗期間輸入框是 disabled 的，鍵盤事件到不了它身上。
 addEventListener('keydown', e => { if (e.key === 'Escape') cancelSend(); });
 
+// 模型 id 太長會把時間欄擠爆（claude-opus-5 / claude-haiku-4-5-20251001…），
+// 取後面認得出來的那截。完整 id 放 title，滑過去看得到——縮寫不能變成猜謎。
+const shortModel = id => String(id).replace(/^(claude|gpt|gemini)-/, '').replace(/-\d{8}$/, '');
+
 const BADGE = { working: '⏳ 進行中', ok: '✔ 已完成', error: '✗ 失敗', lost: '⚠ 失聯',
                 superseded: '↻ 已由續跑接手', note: '· 雜記' };
 
@@ -1869,9 +1873,12 @@ function sync(el, t, bodySel, live) {
   const b = el.querySelector(':scope > summary .badge');
   b.className = 'badge ' + t.status;
   b.textContent = BADGE[t.status] || t.status;
-  // cost 是 cogito 報的【真實】花費（協定：0/未知不送）——有才顯示，絕不畫 $0 假裝免費
-  el.querySelector(':scope > summary .trange').textContent =
-    when(t) + (t.cost > 0 ? `｜$${t.cost.toFixed(4)}` : '');
+  // cost/model 都是 cogito 報的【實際】值（協定：未知不送）——有才顯示。
+  // 兩個要放一起：花費沒有模型當分母就只是個數字（haiku 跑十輪 vs opus 跑兩輪）。
+  const rg = el.querySelector(':scope > summary .trange');
+  rg.textContent = when(t) + (t.cost > 0 ? `｜$${t.cost.toFixed(4)}` : '')
+    + (t.model ? `｜${shortModel(t.model)}` : '');
+  rg.title = t.model ? `主 agent 實際跑在 ${t.model}（子 agent 可能各用各的）` : '';
   const pv = el.querySelector(':scope > summary .spreview');
   if (pv) pv.textContent = preview(t);
 

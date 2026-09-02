@@ -112,6 +112,16 @@ class Agent:
         return self.persona.get("name", self.id)
 
     @property
+    def model(self) -> str:
+        """這位員工跑哪個模型（persona 的 `model:`）。空＝用 cogito 的啟動預設。
+
+        模型是【員工的屬性】而不是每次派工的參數：老徐做架構判斷、小樺做資料彙整，
+        本來就該是不同等級的模型，而且那是他們的長期特性。放 persona 才會跟著人走
+        （改一行 yaml，不動程式），也才在重啟後還在。
+        """
+        return str(self.persona.get("model") or "").strip()
+
+    @property
     def persona_prompt(self) -> str:
         p = self.persona
         if not p:

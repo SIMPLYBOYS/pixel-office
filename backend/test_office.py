@@ -395,6 +395,7 @@ def run() -> None:
     board_archive()
     cost_projection()
     steer_dispatch()
+    model_per_agent()
     full_stream()
     repo_binding()
     git_lens()
@@ -855,6 +856,51 @@ def stop_clears_approval() -> None:
         main.httpx.AsyncClient = old
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
+
+
+def model_per_agent() -> None:
+    """模型是【員工的屬性】：persona 有 model 就隨派工送給 cogito；沒有就不送
+    （不能無聲覆蓋使用者用 `model` 指令選的）。收工揭露的是【實際跑的】那個。"""
+    sent = []
+
+    class _Rec(_FakeHTTP):
+        async def post(self, url, **kw):
+            sent.append(kw.get("json", {}))
+            return _FakeResp()
+
+    main.COGITO_HTTP = "http://fake"
+    old_client = main.httpx.AsyncClient
+    main.httpx.AsyncClient = lambda **kw: _Rec()
+    try:
+        with TestClient(main.app) as c:
+            # 名冊要揭露設定值（外殼才畫得出「這位員工跑什麼」）
+            roster = c.get("/agents").json()
+            assert roster["p19"]["model"] == "claude-opus-5", roster["p19"]
+            assert roster["p01"]["model"] == "", roster["p01"]
+
+            main.busy.discard("p19")
+            c.post("/office/dispatch", json={"agent": "p19", "text": "做架構決策"})
+            assert sent[-1].get("model") == "claude-opus-5", sent[-1]
+
+            # 沒設 model 的員工：payload 裡【不該有】這個鍵——帶空字串會把對面設定清掉
+            main.busy.discard("p01")
+            c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
+            assert "model" not in sent[-1], sent[-1]
+
+            # 揭露：done 帶的是實際跑的模型，進卡片
+            post(c, agent="p19", kind="start", label="架構決策")
+            post(c, agent="p19", kind="done", label="ok", cost=0.5, model="claude-opus-5")
+            r = c.get("/office/report/p19").json()
+            assert r["model"] == "claude-opus-5", r.get("model")
+
+            # 未知就不給——寧可空白，不要編一個 id 讓人以為知道
+            post(c, agent="p19", kind="start", label="沒跑到模型就掛了")
+            post(c, agent="p19", kind="done", label="error", detail="爆了")
+            assert "model" not in c.get("/office/report/p19").json()
+    finally:
+        main.httpx.AsyncClient = old_client
+        main.COGITO_HTTP = ""
+        main.busy.discard("p19")
 
 
 def steer_dispatch() -> None:

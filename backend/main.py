@@ -1240,6 +1240,10 @@ async def office_event(ev: dict):
                 card["report"] = card["report"] or ev["detail"]
             if card and cost:
                 card["cost"] = cost  # **card 攤平：report / history 自動帶到外殼
+            # 主 agent 實際跑的模型。沒有它，花費就沒有分母——$0.0231 是 haiku 跑十輪
+            # 還是 opus 跑兩輪？看不出來。子 agent 各自的模型不在這裡（見協定說明）。
+            if card and (mu := ev.get("model")):
+                card["model"] = str(mu)[:60]
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
@@ -2062,7 +2066,12 @@ async def office_dispatch(d: dict):
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
                 clear_approval(aid)
                 log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
-            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": text},
+            # model：員工的屬性（persona 的 model 欄位），跟任務一起送。空＝不動 cogito
+            # 那邊現有的設定（可能是聊天端 `model` 指令設的），別無聲覆蓋人家的選擇。
+            payload = {"agent": aid, "text": text}
+            if m := agents[aid].model:
+                payload["model"] = m
+            r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
     except httpx.HTTPError as e:
         return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
@@ -2166,6 +2175,7 @@ def get_agents():
               "location": a.location, "busy": aid in busy,
               "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
               "npc": aid != KANBAN,   # False＝這張卡沒有身體（看板），前端不畫走位/位置
+            "model": a.model,      # 設定值（空＝跟 cogito 啟動預設）；實際跑的那個看卡片
               "memory": list(a.memory)}
         for aid, a in agents.items()
     }
