@@ -940,6 +940,38 @@ for o in out:
                 # 標成花費就是說謊，所以卡片不該有 cost
                 assert "cost" not in card, card.get("cost")
                 assert "p05" not in main.busy, "收工要釋放員工"
+                # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
+                # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
+                # cogito-agent（實際回報的症狀）。這條把「兩件事要能同時成立」釘住。
+                src = Path(tmp) / "repos" / "demo-app"
+                src.mkdir(parents=True)
+                for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                            ["git", "config", "user.name", "t"]):
+                    subprocess.run(cmd, cwd=src, check=True)
+                (src / "app.py").write_text("x = 1\n")
+                subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+                subprocess.run(["git", "commit", "-qm", "init"], cwd=src, check=True)
+                old_repos, main.REPOS_DIR = main.REPOS_DIR, str(Path(tmp) / "repos")
+                try:
+                    main.busy.discard("p05")
+                    before2 = (main.last_report.get("p05") or {}).get("id")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "看一下這個專案",
+                                                         "engine": "cli", "repo": "demo-app"}).json()
+                    assert r["ok"] and r.get("repo") is True, r
+                    wt = main.CHANNELS_DIR / "office_p05" / "demo-app"
+                    assert (wt / "app.py").exists(), "CLI 模式也要真的把 worktree 掛出來"
+                    for _ in range(100):
+                        time.sleep(0.05)
+                        cur = main.last_report.get("p05")
+                        if cur and cur.get("id") != before2 and cur["status"] != "working":
+                            break
+                    # CLI 要跑在【worktree 裡】而不是頻道工作區——那是它判斷「我在哪個專案」
+                    # 的依據（會往上找 CLAUDE.md、用 git 找 repo 根）
+                    card = main.last_report.get("p05")
+                    assert card and card.get("workdir", "").endswith("/demo-app"), \
+                        f"CLI 應在 worktree 裡跑，實際 workdir={card.get('workdir')!r}"
+                finally:
+                    main.REPOS_DIR = old_repos
         finally:
             main.CLI_CMD, main.CHANNELS_DIR = old_cmd, old_ch
             main.busy.discard("p05")

@@ -2088,13 +2088,19 @@ def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
     return out
 
 
-async def run_cli_task(aid: str, text: str) -> None:
-    """在員工的頻道工作區跑 CLI，把它的事件流轉成 office 事件。
+async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
+    """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
     人設也是免費的——AGENTS.md 已經同步在那個工作區，Claude Code 自己會讀。
+
+    cwd：綁了工作 repo 時直接【進到 worktree 裡】跑，而不是待在頻道工作區靠一句話
+    叫它 cd 進去。理由是 Claude Code 會【自己判斷處境】——往上找 CLAUDE.md/AGENTS.md、
+    用 git rev-parse 找 repo 根。頻道工作區在 cogito 的 workspace 底下（那本身是個
+    git repo、還有自己的 AGENTS.md），所以待在那裡的 CLI 會合理地認定「我在 cogito-agent」
+    ——實際回報過。把它放進 worktree，那些訊號就全部指向正確的專案。
     """
-    base = agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
+    base = cwd or agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
     if base is None:
         await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80]})
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
@@ -2257,11 +2263,28 @@ async def office_dispatch(d: dict):
     # 轉成 office 事件（走位/泡泡/工作串/卡片全部共用同一條投影路徑）。
     cli_mode = engine_of(aid, str(d.get("engine") or "")) == ENGINE_CLI
     if cli_mode and verb not in ("approve", "reject", "/stop", "/steer"):
-        if (eng := str(d.get("engine") or "")) :
+        if eng := str(d.get("engine") or ""):
             engine_sent[aid] = eng
             _dirty = True
-        asyncio.create_task(run_cli_task(aid, text))
-        return {"ok": True, "engine": ENGINE_CLI}
+        # repo 綁定要在【分流之前】做——先前這裡直接 return，於是 CLI 模式選了 repo
+        # 等於沒選：worktree 沒開、任務文字沒帶說明，CLI 就在頻道工作區裡跑，
+        # 然後合理地認定自己在 cogito-agent（實際回報過的症狀）。
+        wt = None
+        if rname := str(d.get("repo") or ""):
+            repo = next((r for r in local_repos() if r["name"] == rname), None)
+            if repo is None:
+                return {"ok": False, "error": f"不認識的 repo：{rname}（清單見工作 repo 選單）"}
+            bound = bind_repo(aid, repo)
+            if isinstance(bound, str):
+                return {"ok": False, "error": bound}
+            wt = worktree_path(aid, bound[0])
+            # CLI 直接在 worktree 裡跑，所以措辭與 cogito 版不同：不必叫它 cd 進去，
+            # 但「不要 push、不要碰原目錄」這條對誰都一樣。
+            text = (f"{text}\n\n【工作 repo】你現在就在 {repo['path']} 的 git worktree 裡"
+                    f"（分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
+                    "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
+        asyncio.create_task(run_cli_task(aid, text, wt))
+        return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt)}
     if cli_mode and verb == "/stop":
         if proc := cli_procs.get(aid):
             proc.kill()   # CLI 沒有「優雅中止」的入口，砍掉就是砍掉——done 由 finally 補
