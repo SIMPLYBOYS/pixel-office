@@ -882,8 +882,12 @@ def cli_mode() -> None:
     import tempfile
     fake = """#!/usr/bin/env python3
 import json, sys
+# 把收到的 --model 原樣回報成 init 的 model——沒傳就報一個假的預設，
+# 這樣測試才分得出「有指定」與「用 CLI 自己的設定」
+argv = sys.argv[1:]
+picked = argv[argv.index("--model") + 1] if "--model" in argv else "cli-自己的預設"
 out = [
- {"type":"system","subtype":"init","model":"claude-opus-5","tools":["Read"],"cwd":"x"},
+ {"type":"system","subtype":"init","model":picked,"tools":["Read"],"cwd":"x"},
  {"type":"assistant","message":{"content":[
    {"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.py"}}]}},
  {"type":"user","message":{"content":[
@@ -947,7 +951,24 @@ for o in out:
                 assert "p05" not in main.busy, "收工要釋放員工"
                 # CLI 用自己的設定選模型——我們指定不了，但要【講得出來】它用了什麼。
                 # 先前的做法是把模型那排藏掉，看起來像功能不見了（實際回報）。
-                assert main.cli_model.get("p05") == "claude-opus-5", main.cli_model
+                # 沒指定模型＝不帶 --model，交回 CLI 自己的設定
+                assert main.cli_model.get("p05") == "cli-自己的預設", main.cli_model
+
+                # 【CLI 也能指定模型】--model 要真的傳下去（先前完全沒接，是實際回報的缺口）
+                main.busy.discard("p05")
+                b3 = (main.last_report.get("p05") or {}).get("id")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "換個模型跑",
+                                                     "engine": "cli", "model": "claude-haiku-4-5"}).json()
+                assert r["ok"] and r.get("model") == "claude-haiku-4-5", r
+                for _ in range(100):
+                    time.sleep(0.05)
+                    cur = main.last_report.get("p05")
+                    if cur and cur.get("id") != b3 and cur["status"] != "working":
+                        break
+                assert main.cli_model.get("p05") == "claude-haiku-4-5", \
+                    f"--model 沒傳到 CLI：{main.cli_model.get('p05')!r}"
+                # 選了會記住（與 cogito 那條共用 model_sent，語意一致）
+                assert main.model_sent.get("p05") == "claude-haiku-4-5", main.model_sent
 
                 # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
                 # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
@@ -988,6 +1009,7 @@ for o in out:
             # 下一個測試的 TestClient 啟動時 load_state 又把它讀回來（踩過：
             # 後面的 repo_binding 因此走了 CLI 分支，repo 根本沒綁）。
             main.engine_sent.clear()
+            main.model_sent.pop("p05", None)
             main.save_state()
 
 

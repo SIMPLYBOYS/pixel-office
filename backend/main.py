@@ -2129,7 +2129,7 @@ def rate_limit_line(info: dict) -> str:
     return ""
 
 
-async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
+async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "") -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
@@ -2150,6 +2150,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None) -> None:
     base.mkdir(parents=True, exist_ok=True)
     argv = [CLI_CMD, "-p", text, "--output-format", "stream-json", "--verbose",
             "--permission-mode", CLI_PERMISSION]
+    # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
+    # 那是它的預設，不是我們該替它決定的事。
+    if model:
+        argv += ["--model", model]
     await office_event({"v": 1, "agent": aid, "kind": "start",
                         "label": text[:80], "detail": str(base)})
     try:
@@ -2337,8 +2341,15 @@ async def office_dispatch(d: dict):
             text = (f"{text}\n\n【工作 repo】你現在就在 {repo['path']} 的 git worktree 裡"
                     f"（分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
                     "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
-        asyncio.create_task(run_cli_task(aid, text, wt))
-        return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt)}
+        # 模型：與 cogito 同一套優先序（外殼選的 > 人設）。「還原預設」＝不帶 --model，
+        # 交回 CLI 自己的設定。選了就記下來（跟 cogito 那條共用 model_sent，兩邊語意一致）。
+        pick = str(d.get("model") or "").strip()
+        if pick:
+            model_sent[aid] = "" if pick == MODEL_RESET else pick
+            _dirty = True
+        cli_want = "" if pick == MODEL_RESET else (pick or model_sent.get(aid) or agents[aid].model)
+        asyncio.create_task(run_cli_task(aid, text, wt, cli_want))
+        return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
     if cli_mode and verb == "/stop":
         if proc := cli_procs.get(aid):
             proc.kill()   # CLI 沒有「優雅中止」的入口，砍掉就是砍掉——done 由 finally 補

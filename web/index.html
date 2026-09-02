@@ -792,13 +792,17 @@ function paintEngineRow(a, workingNow) {
     : '';
   // CLI 自己決定模型，這裡選了不生效。但【藏起來】會讓人以為功能不見了（實際回報）——
   // 改成停用＋講清楚原因，並把 CLI 上次實際跑的那個講出來（揭露 > 隱藏）。
-  const mr = $('modelRow'), ms = $('modelSel');
+  const mr = $('modelRow');
   mr.hidden = !(modelInfo.models || []).length;
   if (!mr.hidden && cli) {
-    ms.disabled = true;
+    // CLI 也吃 --model，所以照樣可選。附上「上次實際跑的那個」——指定值與事實
+    // 不一定相同（別名、CLI 自己的覆蓋），兩個都給才看得出有沒有生效。
     const used = modelInfo.cli_models?.[selected];
-    $('modelNote').textContent = 'CLI 用它自己的設定選模型，這裡選了不會生效'
-      + (used ? `——上次實際跑的是 ${shortModel(used)}` : '');
+    const pick = $('modelSel').value;
+    $('modelNote').textContent =
+      (pick === (modelInfo.reset || 'reset') ? '這次不指定模型，交回 CLI 自己的設定'
+       : pick ? `這次用 ${shortModel(pick)} 跑` : '沒指定＝用 CLI 自己的設定')
+      + (used ? `　（上次實際跑的是 ${shortModel(used)}）` : '');
   }
 }
 
