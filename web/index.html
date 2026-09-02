@@ -833,9 +833,11 @@ function paintModelRow(a, workingNow) {
     : pick ? `這次派工改用 ${shortModel(pick)}——覆蓋會留著，之後可選「還原」收回`
     : eff ? `目前會用 ${shortModel(eff)}` : '';
   // 降級要看得見：清單不是官方那份時講出來，否則使用者不知道自己在看一份可能過期的表
-  if (modelInfo.source && modelInfo.source !== 'live') {
+  // 只有真的退到本地後備才要解釋——橋自己問到官方（source=api）那份是完整的，
+  // 沒必要因為 cogito 沒開就說清單有問題。
+  if (modelInfo.source === 'local') {
     $('modelNote').textContent +=
-      (($('modelNote').textContent && '　') || '') + '（cogito 沒開，問不到官方清單——這是本地後備）';
+      (($('modelNote').textContent && '　') || '') + '（問不到官方清單，這是本地後備）';
   }
 }
 

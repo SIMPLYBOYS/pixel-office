@@ -1086,6 +1086,33 @@ def model_per_agent() -> None:
             assert m["source"] == "local", m["source"]
             assert [x["id"] for x in m["models"]] == ["claude-haiku-4-5", "claude-opus-5"], m["models"]
 
+            # 【橋自己問官方】cogito 沒開時不該掉到只剩人設那兩個——CLI 模式根本不經過
+            # cogito，清單卻綁著它開不開，那是實際回報的問題。
+            class _M:
+                def __init__(self, i, n): self.id, self.display_name = i, n
+
+            class _Page:
+                data = [_M("claude-opus-5", "Claude Opus 5"),
+                        _M("claude-sonnet-5", "Claude Sonnet 5"),
+                        _M("claude-haiku-4-5-20251001", "Claude Haiku 4.5")]
+
+            class _Models:
+                async def list(self, **kw):
+                    return _Page()
+
+            class _Client:
+                models = _Models()
+
+            old_client2, main.client = main.client, _Client()
+            main._api_models = ([], 0.0)
+            try:
+                m = c.get("/office/models").json()
+                assert m["source"] == "api", m["source"]
+                assert len(m["models"]) == 3 and m["models"][0]["name"] == "Claude Opus 5", m
+            finally:
+                main.client = old_client2
+                main._api_models = ([], 0.0)
+
             # 成功路徑：cogito 答得出來時【用它的】，不用後備清單。
             # 官方清單會有本地沒有的型號（那正是重點——手動表必然落後於發布）。
             class _WithModels(_Rec):

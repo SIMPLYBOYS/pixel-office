@@ -2257,6 +2257,36 @@ def known_models() -> list[dict]:
     return [{"id": i, "name": i} for i in ids]
 
 
+_api_models: tuple[list[dict], float] = ([], 0.0)   # (清單, 抓到的時間)；6 小時內沿用
+
+
+async def api_models() -> list[dict] | None:
+    """橋【自己】問 Anthropic 的 /v1/models。
+
+    為什麼需要這條：CLI 模式根本不經過 cogito，清單卻綁著 cogito 開不開——實際回報過
+    「可以選的模型不只 haiku/opus」。橋本來就有 API key（意圖判斷在用），而列模型是
+    免費的 GET（不耗 token），沒有理由不自己問。
+
+    快取 6 小時：模型發布是以週計的事。抓失敗就沿用舊的——一份稍舊的清單，
+    遠比因為網路抖一下就少掉一半選項有用。
+    """
+    global _api_models
+    if client is None:
+        return None
+    cached, at = _api_models
+    if cached and time.time() - at < 6 * 3600:
+        return cached
+    try:
+        page = await client.models.list(limit=100)
+    except Exception as e:      # SDK 的錯誤型別不只一種，這裡不值得逐一列舉
+        print(f"⚠ 問不到官方模型清單（{type(e).__name__}）")
+        return cached or None
+    got = [{"id": m.id, "name": getattr(m, "display_name", "") or m.id} for m in page.data]
+    if got:
+        _api_models = (got, time.time())
+    return got or cached or None
+
+
 async def cogito_models() -> tuple[list[dict], str] | None:
     """問 cogito「現在真正能用哪些模型」（它再問 Anthropic 的 /v1/models，帶快取）。
     問不到回 None——清單是加值層，拿不到就降級，不讓選單整個消失。"""
@@ -2286,8 +2316,14 @@ async def office_models():
     就永遠是 opus，而畫面上看不出來，那就是隱形狀態。
     ⚠ effective 只反映【橋送出去的】：有人在 Slack 用 `model` 指令改過，這裡不會知道。
     """
-    got = await cogito_models()
-    models, source = got if got else (known_models(), "local")
+    # 三段來源，由準到粗：cogito（它知道自己的 provider 支援什麼）→ 橋自己問官方
+    # → 本地後備。source 一路講出來，降級不能是無聲的。
+    if got := await cogito_models():
+        models, source = got
+    elif mine := await api_models():
+        models, source = mine, "api"
+    else:
+        models, source = known_models(), "local"
     return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET,
             "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()},
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
