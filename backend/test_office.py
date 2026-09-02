@@ -410,6 +410,7 @@ def run() -> None:
     cost_projection()
     steer_dispatch()
     model_per_agent()
+    cli_mode()
     full_stream()
     repo_binding()
     git_lens()
@@ -870,6 +871,83 @@ def stop_clears_approval() -> None:
         main.httpx.AsyncClient = old
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
+
+
+def cli_mode() -> None:
+    """CLI 模式：Claude Code 的事件流 → 一模一樣的 office 投影（走位/泡泡/卡片全共用）。
+
+    用假 CLI 吐【實測抓到的真實形狀】，不燒訂閱額度也不依賴網路。
+    """
+    import tempfile
+    fake = """#!/usr/bin/env python3
+import json, sys
+out = [
+ {"type":"system","subtype":"init","model":"claude-opus-5","tools":["Read"],"cwd":"x"},
+ {"type":"assistant","message":{"content":[
+   {"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.py"}}]}},
+ {"type":"user","message":{"content":[
+   {"type":"tool_result","tool_use_id":"t1","content":"1\tprint('hi')","is_error":False}]}},
+ {"type":"assistant","message":{"content":[
+   {"type":"tool_use","id":"t2","name":"Bash","input":{"command":"go test ./..."}}]}},
+ {"type":"user","message":{"content":[
+   {"type":"tool_result","tool_use_id":"t2","content":"exit 1: 編譯失敗","is_error":True}]}},
+ {"type":"rate_limit_event"},
+ {"type":"assistant","message":{"content":[{"type":"text","text":"它印出 hi。"}]}},
+ {"type":"result","subtype":"success","is_error":False,"num_turns":2,
+  "total_cost_usd":0.2677,"result":"它印出 hi。"},
+]
+for o in out:
+    print(json.dumps(o, ensure_ascii=False), flush=True)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakeclaude"
+        bin_.write_text(fake.replace("False", "false").replace("'", "'"), encoding="utf-8")
+        # 上面那行只是避免 Python bool 混入 JSON 字面；實際用 json.dumps 產生，安全
+        bin_.write_text(fake, encoding="utf-8")
+        bin_.chmod(0o755)
+        old_cmd, main.CLI_CMD = main.CLI_CMD, str(bin_)
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
+        main.engine_sent.clear()   # 這個是會持久化的：先前跑測試留下的殘值會讓斷言錯亂
+        try:
+            with TestClient(main.app) as c:
+                assert main.cli_available(), "假 CLI 應該被視為可用"
+                # 引擎選擇：外殼覆蓋 > 人設 > 預設
+                assert main.engine_of("p05") == main.ENGINE_COGITO
+                assert main.engine_of("p05", "cli") == main.ENGINE_CLI
+
+                main.busy.discard("p05")
+                # 記下「現在最新的卡是哪張」：state 檔裡本來就有舊卡，不比對的話
+                # 輪詢會立刻拿到一張早就完成的卡，整個測試對著錯的對象斷言（踩過）。
+                before = (main.last_report.get("p05") or {}).get("id")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "看一下 a.py",
+                                                     "engine": "cli"}).json()
+                assert r["ok"] and r.get("engine") == "cli", r
+                card = None
+                for _ in range(100):       # 等背景任務開新卡並跑完
+                    time.sleep(0.05)
+                    cur = main.last_report.get("p05")
+                    if cur and cur.get("id") != before and cur["status"] != "working":
+                        card = cur
+                        break
+                assert card and card["status"] == "ok", card
+                evs = [e["text"] for e in card["events"]]
+                assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
+                assert any("✓ Read" in t for t in evs), evs          # 成功的結果
+                assert any("✗ Bash" in t for t in evs), evs          # 失敗的要標成失敗，不能混為一談
+                assert any("觸到訂閱額度上限" in t for t in evs), evs   # 額度訊號要講出來
+                assert any("它印出 hi" in t for t in evs), evs        # 回話
+                # 【誠實】訂閱制不按次計費：total_cost_usd 是「換算成 API 會是多少」，
+                # 標成花費就是說謊，所以卡片不該有 cost
+                assert "cost" not in card, card.get("cost")
+                assert "p05" not in main.busy, "收工要釋放員工"
+        finally:
+            main.CLI_CMD, main.CHANNELS_DIR = old_cmd, old_ch
+            main.busy.discard("p05")
+            # engine_sent 會【持久化】：不 flush 的話，殘值留在 state 檔裡，
+            # 下一個測試的 TestClient 啟動時 load_state 又把它讀回來（踩過：
+            # 後面的 repo_binding 因此走了 CLI 分支，repo 根本沒綁）。
+            main.engine_sent.clear()
+            main.save_state()
 
 
 def model_per_agent() -> None:

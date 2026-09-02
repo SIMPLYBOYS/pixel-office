@@ -112,6 +112,13 @@ class Agent:
         return self.persona.get("name", self.id)
 
     @property
+    def engine(self) -> str:
+        """這位員工用哪個引擎跑（persona 的 `engine:`）：cogito（API 計費）或 cli
+        （Claude Code，用訂閱額度）。空＝cogito。與 model 同一個道理——引擎是員工的
+        長期屬性（研究型的人可以走訂閱省錢、關鍵決策的人走 API），不是每次派工的參數。"""
+        return str(self.persona.get("engine") or "").strip().lower()
+
+    @property
     def model(self) -> str:
         """這位員工跑哪個模型（persona 的 `model:`）。空＝用 cogito 的啟動預設。
 

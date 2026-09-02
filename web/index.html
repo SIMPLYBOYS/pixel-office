@@ -408,6 +408,14 @@
         </select>
         <span class="note" id="crewNote"></span>
       </div>
+      <div class="crew" id="engineRow" hidden>
+        <label for="engineSel">引擎</label>
+        <select id="engineSel">
+          <option value="cogito">cogito（API 計費）</option>
+          <option value="cli">Claude Code（訂閱額度）</option>
+        </select>
+        <span class="note" id="engineNote"></span>
+      </div>
       <div class="crew" id="modelRow" hidden>
         <label for="modelSel">模型</label>
         <select id="modelSel"></select>
@@ -752,6 +760,7 @@ function updateComposer() {
       : '會開一個新的 worktree 與 office/… 分支，成果 commit 在那裡——驗收後自己合併';
   }
   paintModelRow(a, workingNow);
+  paintEngineRow(a, workingNow);
 }
 
 // 模型選單（觀察 ③：外殼要能臨時換模型）。清單與「目前實際會用哪個」都來自橋，前端不寫死
@@ -762,6 +771,28 @@ async function loadModels() {
   if (selected) updateComposer();
 }
 loadModels();
+
+function paintEngineRow(a, workingNow) {
+  const row = $('engineRow'), sel = $('engineSel');
+  row.hidden = !modelInfo.cli;   // CLI 找不到就一個像素都不多（入口資料驅動）
+  if (row.hidden) return;
+  if (!sel.dataset.bound) {
+    sel.onchange = () => updateComposer();
+    sel.dataset.bound = '1';
+  }
+  const eff = modelInfo.engines?.[selected] || 'cogito';
+  if (sel.dataset.for !== selected) {   // 換人就跟著那個人目前生效的引擎
+    sel.value = eff;
+    sel.dataset.for = selected;
+  }
+  sel.disabled = workingNow;
+  const cli = sel.value === 'cli';
+  $('engineNote').textContent = cli
+    ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——沒有審批與插話，中止是直接砍掉行程`
+    : '';
+  // CLI 自己決定模型（吃它自己的設定），這裡的模型選單對它無效——別給一個沒作用的旋鈕
+  $('modelRow').hidden = cli || !(modelInfo.models || []).length;
+}
 
 function paintModelRow(a, workingNow) {
   const row = $('modelRow'), sel = $('modelSel');
@@ -1193,7 +1224,8 @@ async function dispatch(text) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
                            repo: $('repoSel').value.trim() || null,
-                           model: $('modelSel').value || null }),
+                           model: $('modelSel').value || null,
+                           engine: $('engineSel').value || null }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';

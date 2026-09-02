@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -2022,11 +2023,164 @@ def with_repo(text: str, name: str, src: str, branch: str) -> str:
             "改完 commit 到這個分支即可，【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
 
 
+# ── CLI 模式（munder-difflin 的核心賣點：用你已經在付的訂閱，而不是按次計費的 API）──
+#
+# 【為什麼可行】cogito 與 Claude Code CLI 產生的是同一種東西——一串「思考／用工具／
+# 拿到結果／回報／收工」的事件。辦公室要的就只有這串事件。所以 CLI 模式不是另一套系統，
+# 是【另一個 office 事件的產生者】：走位、泡泡、工作串、報告卡、git 鏡頭全部零改動。
+#
+# 【實測確認過的形狀】claude -p --output-format stream-json --verbose 吐 NDJSON：
+#   system/init          → 開場（模型、工具數、cwd）
+#   assistant.tool_use   → 要用某個工具
+#   user.tool_result     → 那個工具的結果（is_error 標成敗）
+#   assistant.text       → 對人說的話
+#   result               → 收工（is_error / num_turns / total_cost_usd）
+#   rate_limit_event     → 訂閱額度的訊號（munder 說的「on their hourly limits」）
+#
+# 【刻意不用 --bare】它會讓 CLI 變成未登入（實測回 "Not logged in · Please run /login"）。
+CLI_CMD = os.environ.get("OFFICE_CLI_CMD", "claude")
+# 權限模式：-p 模式沒有人可以回答提問，所以必須先講好。預設 acceptEdits（可改檔、
+# 但高風險操作會被拒而不是卡住）；要完全放手自己設 bypassPermissions——那等於把這台機器
+# 交給 agent，與 cogito 跑 host 模式 bash 是同一級的信任決定。
+CLI_PERMISSION = os.environ.get("OFFICE_CLI_PERMISSION", "acceptEdits")
+CLI_TIMEOUT = float(os.environ.get("OFFICE_CLI_TIMEOUT", "1800"))  # 這麼久沒收工就砍掉
+
+cli_procs: dict[str, asyncio.subprocess.Process] = {}   # aid -> 執行中的 CLI（供中止）
+
+
+def cli_available() -> bool:
+    """CLI 找得到才在介面上給這個選項——入口資料驅動，跟 repo 那排同一個原則。"""
+    return shutil.which(CLI_CMD) is not None
+
+
+def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
+    """一筆 CLI 事件 → 零到多筆 office 事件。tool_names 記 tool_use_id → 工具名，
+    因為結果事件只帶 id，而辦公室要顯示「哪個工具回來了」。"""
+    out: list[dict] = []
+    t = d.get("type")
+    if t == "assistant":
+        for c in (d.get("message") or {}).get("content") or []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "text" and str(c.get("text", "")).strip():
+                out.append({"kind": "msg", "label": c["text"]})
+            elif c.get("type") == "thinking":
+                out.append({"kind": "think", "label": ""})
+            elif c.get("type") == "tool_use":
+                name = str(c.get("name", "tool"))
+                tool_names[str(c.get("id", ""))] = name
+                out.append({"kind": "tool", "label": name,
+                            "detail": json.dumps(c.get("input"), ensure_ascii=False)})
+    elif t == "user":
+        for c in (d.get("message") or {}).get("content") or []:
+            if not isinstance(c, dict) or c.get("type") != "tool_result":
+                continue
+            body = c.get("content")
+            if isinstance(body, list):   # 內容可能分段（文字＋圖片）
+                body = " ".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
+            out.append({"kind": "error" if c.get("is_error") else "result",
+                        "label": tool_names.get(str(c.get("tool_use_id", "")), "tool"),
+                        "detail": str(body or "")[:400]})
+    elif t == "rate_limit_event":
+        # 訂閱制的額度訊號。不講出來的話，畫面上就只是「突然變慢」——那正是
+        # 「假的成功比空白更糟」要防的：看起來在做事，其實在等額度。
+        out.append({"kind": "msg", "label": "⏳ 觸到訂閱額度上限，等待額度恢復中…"})
+    return out
+
+
+async def run_cli_task(aid: str, text: str) -> None:
+    """在員工的頻道工作區跑 CLI，把它的事件流轉成 office 事件。
+
+    刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
+    人設也是免費的——AGENTS.md 已經同步在那個工作區，Claude Code 自己會讀。
+    """
+    base = agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
+    if base is None:
+        await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80]})
+        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                            "detail": "未設 COGITO_CHANNELS，沒有工作區可跑"})
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    argv = [CLI_CMD, "-p", text, "--output-format", "stream-json", "--verbose",
+            "--permission-mode", CLI_PERMISSION]
+    await office_event({"v": 1, "agent": aid, "kind": "start",
+                        "label": text[:80], "detail": str(base)})
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=str(base), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, limit=1 << 22)   # 單行可能很長（工具參數）
+    except OSError as e:
+        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                            "detail": f"起不了 CLI（{CLI_CMD}）：{e}"})
+        return
+    cli_procs[aid] = proc
+    tool_names: dict[str, str] = {}
+    done_sent = False
+    try:
+        async def pump() -> None:
+            nonlocal done_sent
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") == "result":
+                    done_sent = True
+                    # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
+                    # 標成花費就是說謊，所以不送 cost——額度用量另外講（見 msg）。
+                    await office_event({"v": 1, "agent": aid, "kind": "done",
+                                        "label": "error" if d.get("is_error") else "ok",
+                                        "detail": str(d.get("result") or "")[:120]})
+                    continue
+                for ev in cli_events(d, tool_names):
+                    await office_event({"v": 1, "agent": aid, **ev})
+        await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
+        await proc.wait()
+    except asyncio.TimeoutError:
+        proc.kill()
+        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                            "detail": f"CLI 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
+        done_sent = True
+    except asyncio.CancelledError:
+        proc.kill()                      # 老闆按了中止
+        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                            "detail": "老闆中止了這個任務"})
+        done_sent = True
+        raise
+    finally:
+        cli_procs.pop(aid, None)
+        if not done_sent:
+            # CLI 沒吐 result 就死了（崩潰、被殺、輸出壞掉）。不補這一筆的話，
+            # 卡片會永遠停在「進行中」、NPC 永遠不回座位——watchdog 五分鐘後才兜底。
+            err = ""
+            if proc.stderr is not None:
+                err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
+            await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                                "detail": f"CLI 異常結束（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
+
+
 # ── 模型選擇（觀察 ③：外殼要能臨時換模型）─────────────────────────────
 # 清單資料驅動：OFFICE_MODELS 有設就用它，否則就是【人設裡實際指派過的那些】——
 # 不在程式裡寫死一張會過期的型號表（cogito 也不驗證 model id，打錯只會讓下個任務
 # 報錯燒掉一輪，所以外殼給選單、不給自由輸入）。
 MODEL_RESET = "reset"   # 與聊天端 `model reset` 同一個字：把臨時覆蓋收回啟動預設
+
+# 引擎：cogito（API 計費）or cli（Claude Code，用你已經在付的訂閱）。
+# 與 model 同一個設計——是【員工的屬性】（persona 的 engine 欄位），外殼可臨時覆蓋。
+ENGINE_COGITO, ENGINE_CLI = "cogito", "cli"
+engine_sent: dict[str, str] = {}   # aid -> 外殼最後選的引擎（隨 state 持久化）
+
+
+def engine_of(aid: str, override: str = "") -> str:
+    """這次要用哪個引擎：外殼的選擇 > 人設 > 預設 cogito。CLI 不可用時一律退回 cogito
+    ——選單本來就不會給那個選項，但 API 直呼進來也不能讓它炸。"""
+    want = (override or engine_sent.get(aid) or
+            (agents[aid].engine if aid in agents else "") or ENGINE_COGITO)
+    return ENGINE_CLI if (want == ENGINE_CLI and cli_available()) else ENGINE_COGITO
 model_sent: dict[str, str] = {}   # aid -> 橋最後一次告訴 cogito 的模型（隨 state 持久化）
 
 
@@ -2072,7 +2226,10 @@ async def office_models():
     got = await cogito_models()
     models, source = got if got else (known_models(), "local")
     return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET,
-            "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()}}
+            "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()},
+            # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
+            "cli": cli_available(), "cli_cmd": CLI_CMD,
+            "engines": {aid: engine_of(aid) for aid in agents}}
 
 
 @app.post("/office/dispatch")
@@ -2096,6 +2253,23 @@ async def office_dispatch(d: dict):
             return {"ok": False, "error": f"{agents[aid].name} 沒在工作中，插不了話——直接派任務就好"}
         if not text[len("/steer"):].strip():
             return {"ok": False, "error": "插話是空的——/steer 後面要接要補的那句話"}
+    # 引擎分流：CLI 模式不經過 cogito——它自己就是完整的 agent，橋只負責把它的事件
+    # 轉成 office 事件（走位/泡泡/工作串/卡片全部共用同一條投影路徑）。
+    cli_mode = engine_of(aid, str(d.get("engine") or "")) == ENGINE_CLI
+    if cli_mode and verb not in ("approve", "reject", "/stop", "/steer"):
+        if (eng := str(d.get("engine") or "")) :
+            engine_sent[aid] = eng
+            _dirty = True
+        asyncio.create_task(run_cli_task(aid, text))
+        return {"ok": True, "engine": ENGINE_CLI}
+    if cli_mode and verb == "/stop":
+        if proc := cli_procs.get(aid):
+            proc.kill()   # CLI 沒有「優雅中止」的入口，砍掉就是砍掉——done 由 finally 補
+            log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
+            return {"ok": True, "engine": ENGINE_CLI}
+        return {"ok": False, "error": "這位員工沒有進行中的 CLI 任務"}
+    if cli_mode:
+        return {"ok": False, "error": f"CLI 模式不支援「{verb}」——審批與插話是 cogito 的機制"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
     # 人數上限只對看板有意義（其他人本來就是一個人做），而且不能套在 approve/reject//stop
@@ -2380,7 +2554,8 @@ def save_state() -> None:
             "approval_src": approval_src,
             "approval_meta": approval_meta, "approval_at": approval_at,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
-            "model_sent": model_sent}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
+            "model_sent": model_sent,
+            "engine_sent": engine_sent}  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -2412,6 +2587,7 @@ def load_state() -> None:
     approval_at.update(data.get("approval_at", {}))
     sched_last.update(data.get("sched_last", {}))
     model_sent.update(data.get("model_sent", {}))
+    engine_sent.update(data.get("engine_sent", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。
