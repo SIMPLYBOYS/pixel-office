@@ -2208,6 +2208,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     # init 連工具/技能/MCP 都帶了。先前整包丟掉，於是 CLI 模式下
                     # 能力面板只剩「取不到能力清單」——那不是沒有能力，是我沒收下來。
                     if tools := [t for t in (d.get("tools") or []) if isinstance(t, str)]:
+                        globals()["_dirty"] = True   # 讓存檔器把它寫下來（跨重啟要留著）
                         cli_caps.update({
                             "at": time.strftime("%H:%M"), "agent": aid,
                             "tools": [{"name": t, "description": ""} for t in tools],
@@ -2712,7 +2713,10 @@ def save_state() -> None:
             "approval_meta": approval_meta, "approval_at": approval_at,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
             "model_sent": model_sent,
-            "engine_sent": engine_sent}  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
+            "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
+            # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
+            # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
+            "cli_caps": cli_caps, "cli_model": cli_model}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -2745,6 +2749,9 @@ def load_state() -> None:
     sched_last.update(data.get("sched_last", {}))
     model_sent.update(data.get("model_sent", {}))
     engine_sent.update(data.get("engine_sent", {}))
+    if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
+        cli_caps.update(saved)
+    cli_model.update(data.get("cli_model", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。

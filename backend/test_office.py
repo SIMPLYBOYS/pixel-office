@@ -967,6 +967,17 @@ for o in out:
                     assert caps["mcp"][0]["name"] == "playwright", caps
                     # 來源要標出來：cogito 與 CLI 的工具集完全不同，混著看比沒有更誤導
                     assert "Claude Code CLI" in caps.get("source", ""), caps
+                    # 【跨重啟要留著】能力只在跑過 CLI 任務時才拿得到。不持久化的話，
+                    # 每次開 unity_demo 面板都是空的、要先派一次工才看得到（實際回報）。
+                    main.save_state()
+                    snap = json.loads(main.STATE_FILE.read_text(encoding="utf-8"))
+                    assert snap.get("cli_caps", {}).get("tools"), "能力沒被存下來"
+                    main.cli_caps.clear()          # 模擬重啟：記憶體清空
+                    main._caps_cache = None
+                    assert c.get("/office/caps").json()["ok"] is False, "前置條件：清空後應拿不到"
+                    main.load_state()              # 重新載入
+                    caps2 = c.get("/office/caps").json()
+                    assert caps2["ok"] and len(caps2["tools"]) == 4, caps2
                 finally:
                     main.COGITO_HTTP, main._caps_cache = old_http, None
 
@@ -1029,6 +1040,8 @@ for o in out:
             # 後面的 repo_binding 因此走了 CLI 分支，repo 根本沒綁）。
             main.engine_sent.clear()
             main.model_sent.pop("p05", None)
+            main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
+            main.cli_model.pop("p05", None)
             main.save_state()
 
 
