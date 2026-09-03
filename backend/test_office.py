@@ -409,6 +409,7 @@ def run() -> None:
     board_archive()
     cost_projection()
     steer_dispatch()
+    caps_refresh()
     rate_limit_wording()
     model_per_agent()
     cli_mode()
@@ -1043,6 +1044,45 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def caps_refresh() -> None:
+    """能力清單會過期重抓：cogito 加掛 MCP／換技能之後，不該非得重啟整個橋才看得到。
+    抓失敗時沿用上一份好的——稍舊的清單遠比空白有用。"""
+    calls = []
+
+    class _Caps(_FakeHTTP):
+        async def get(self, url, **kw):
+            calls.append(url)
+            n = len(calls)
+            if n == 3:                     # 第三次故意失敗，驗「沿用舊的」
+                raise main.httpx.HTTPError("fake down")
+            return _FakeResp({"tools": [{"name": f"tool{n}", "description": ""}],
+                              "skills": [], "mcp": []})
+
+    main.COGITO_HTTP = "http://fake"
+    old_client = main.httpx.AsyncClient
+    main.httpx.AsyncClient = lambda **kw: _Caps()
+    main._caps_cache, main._caps_at = None, 0.0
+    try:
+        with TestClient(main.app) as c:
+            first = c.get("/office/caps").json()
+            assert first["tools"][0]["name"] == "tool1", first
+            assert "cogito" in first.get("source", ""), "來源要標出來（與 CLI 那份分得開）"
+            # TTL 內不重抓
+            assert c.get("/office/caps").json()["tools"][0]["name"] == "tool1"
+            assert len(calls) == 1, f"TTL 內不該重問，問了 {len(calls)} 次"
+            # 過期就重抓
+            main._caps_at -= main.CAPS_TTL + 1
+            assert c.get("/office/caps").json()["tools"][0]["name"] == "tool2", "過期要重抓"
+            # 重抓失敗：沿用上一份好的，不要變空白
+            main._caps_at -= main.CAPS_TTL + 1
+            again = c.get("/office/caps").json()
+            assert again["ok"] and again["tools"][0]["name"] == "tool2", f"失敗時要沿用舊的：{again}"
+    finally:
+        main.httpx.AsyncClient = old_client
+        main.COGITO_HTTP = ""
+        main._caps_cache, main._caps_at = None, 0.0
 
 
 def rate_limit_wording() -> None:

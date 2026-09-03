@@ -1423,6 +1423,11 @@ async def office_chat(ev: dict):
 # 但掛上的是同一組；技能更是全 bot 讀同一份 .claw/skills。所以挑任一位員工去問即可。
 # 快取到行程結束：同一個 bot 跑著的期間清單不會變。
 _caps_cache: dict | None = None
+_caps_at: float = 0.0
+# 能力會變（cogito 加掛 MCP、換技能）。永久快取的話，改了設定卻要重啟整個橋才看得到
+# ——那正是「畫面說的跟事實不同」。五分鐘：夠短到改完泡杯咖啡回來就對了，
+# 又不會讓每次開頁都打一次 cogito。
+CAPS_TTL = 300.0
 
 
 def cli_caps_reply() -> dict | None:
@@ -1442,8 +1447,8 @@ def cli_caps_reply() -> dict | None:
 
 @app.get("/office/caps")
 async def office_caps():
-    global _caps_cache
-    if _caps_cache:
+    global _caps_cache, _caps_at
+    if _caps_cache and time.time() - _caps_at < CAPS_TTL:
         return _caps_cache
     # CLI 模式的能力來自 CLI 自己（init 事件帶的工具/技能/MCP）。cogito 沒開時它就是唯一
     # 的來源——先前一律問 cogito，於是純 CLI 用法下面板只剩「取不到能力清單」，
@@ -1458,12 +1463,15 @@ async def office_caps():
         r.raise_for_status()
         d = r.json()
     except (httpx.HTTPError, ValueError) as e:
-        # cogito 連不上：有 CLI 回報過的就給那份（並講清楚來源），不要只丟一句錯誤
-        return cli_caps_reply() or {"ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
+        # cogito 連不上：先給上一份好的（過期也照給——稍舊的清單遠比空白有用），
+        # 再退到 CLI 回報的，最後才是一句錯誤。
+        return _caps_cache or cli_caps_reply() or {
+            "ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
     # mcp：外部 MCP 工具不個別註冊（cogito 只掛 mcp_call_tool／mcp_describe_tool 兩個閘道），
     # 所以清單得從 gateway 的目錄另外拿——否則看板上只看得到兩個閘道，看不出實際掛了什麼。
     _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or [],
-                   "mcp": d.get("mcp") or []}
+                   "mcp": d.get("mcp") or [], "source": f"cogito（{time.strftime('%H:%M')} 更新）"}
+    _caps_at = time.time()
     return _caps_cache
 
 

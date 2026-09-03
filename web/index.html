@@ -559,6 +559,13 @@ fetch('/unity/index.html', { method: 'HEAD' }).then(r => {
 async function capcard() {
   const box = $('capcard');
   const r = await (await fetch('/office/caps')).json();
+  // 只在【內容真的變了】才重畫：這個面板會被輪詢，而重畫會清掉使用者展開的項目
+  // 與搜尋框裡打到一半的字。同一份資料就別動 DOM（跟看板/工作區同一個做法）。
+  const sig = r.ok ? [r.source || '', r.tools.length, r.skills.length, (r.mcp || []).length,
+                      (r.tools[0] || {}).name, (r.tools[r.tools.length - 1] || {}).name].join('|')
+                   : 'err:' + (r.error || '');
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
   if (!r.ok) {
     box.innerHTML = `<summary>🛠 全員能力</summary><div class="err">${esc(r.error || '取不到')}</div>`;
     box.open = localStorage.capsOpen === '1';
@@ -2153,6 +2160,9 @@ openStream();
 
 roster();
 capcard();
+// 能力也會變（cogito 加掛 MCP、換技能；CLI 跑完會回報它自己那份）。輪得比名冊慢——
+// 這種事以分鐘計，而且橋端本來就有五分鐘快取，問太勤只是白跑。
+setInterval(capcard, 30000);
 setInterval(roster, 10000);
 setInterval(feed, 8000);
 </script>
