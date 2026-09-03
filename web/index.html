@@ -558,23 +558,29 @@ fetch('/unity/index.html', { method: 'HEAD' }).then(r => {
 // 清單來自 cogito 本人（橋只轉發＋快取），不是寫死的表——工具是條件式掛載的。
 async function capcard() {
   const box = $('capcard');
-  const r = await (await fetch('/office/caps')).json();
+  // 帶上選中的員工：兩個引擎的工具集完全不同，而引擎是逐人設定的——
+  // 給一份「全員」清單，對正在跑 CLI 的那位就是錯的。
+  const who = selected || '';
+  const title = who && agentsData[who] ? `${esc(agentsData[who].name)}的能力` : '全員能力';
+  const r = await (await fetch('/office/caps' + (who ? '?agent=' + encodeURIComponent(who) : ''))).json();
   // 只在【內容真的變了】才重畫：這個面板會被輪詢，而重畫會清掉使用者展開的項目
   // 與搜尋框裡打到一半的字。同一份資料就別動 DOM（跟看板/工作區同一個做法）。
-  const sig = r.ok ? [r.source || '', r.tools.length, r.skills.length, (r.mcp || []).length,
-                      (r.tools[0] || {}).name, (r.tools[r.tools.length - 1] || {}).name].join('|')
-                   : 'err:' + (r.error || '');
+  const sig = (r.ok ? [r.source || '', r.tools.length, r.skills.length, (r.mcp || []).length,
+                       (r.tools[0] || {}).name, (r.tools[r.tools.length - 1] || {}).name].join('|')
+                    : 'err:' + (r.error || '')) + '|' + who;
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   if (!r.ok) {
-    box.innerHTML = `<summary>🛠 全員能力</summary><div class="err">${esc(r.error || '取不到')}</div>`;
+    // 「還沒跑過 CLI」不是錯誤，是還不知道——用不同的語氣講（err 是紅的，太嚇人）
+    box.innerHTML = `<summary>🛠 ${title}</summary>`
+      + `<div class="${r.engine === 'cli' ? 'shint' : 'err'}">${esc(r.error || '取不到')}</div>`;
     box.open = localStorage.capsOpen === '1';
     return;
   }
   const mcp = r.mcp || [];
   // 來源要標出來：cogito 與 CLI 的工具集完全不同（read_file/bash vs Read/Edit），
   // 不說清楚的話，看到一份不認得的清單只會更困惑。
-  box.innerHTML = `<summary>🛠 全員能力<small>工具 ${r.tools.length}・技能 ${r.skills.length}${
+  box.innerHTML = `<summary>🛠 ${title}<small>工具 ${r.tools.length}・技能 ${r.skills.length}${
     mcp.length ? '・MCP ' + mcp.length : ''}</small></summary>`
     + (r.source ? `<div class="shint">來源：${esc(r.source)}</div>` : '');
   box.open = localStorage.capsOpen === '1';
@@ -888,6 +894,7 @@ function pick(id) {
   roster();
   updateComposer();
   loadRepos(id);   // 換人＝「已在進行中」的那組會變（worktree 是 per-員工 的）
+  capcard();       // 能力也是 per-員工（引擎不同，工具集就完全不同）
   // 順序有意義：上方三塊面板【先】定位，工作串最後畫。
   // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
   // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→

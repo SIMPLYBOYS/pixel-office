@@ -972,13 +972,44 @@ for o in out:
                     # 每次開 unity_demo 面板都是空的、要先派一次工才看得到（實際回報）。
                     main.save_state()
                     snap = json.loads(main.STATE_FILE.read_text(encoding="utf-8"))
-                    assert snap.get("cli_caps", {}).get("tools"), "能力沒被存下來"
+                    assert snap.get("cli_caps", {}).get("p05", {}).get("tools"), "能力沒被存下來"
                     main.cli_caps.clear()          # 模擬重啟：記憶體清空
                     main._caps_cache = None
                     assert c.get("/office/caps").json()["ok"] is False, "前置條件：清空後應拿不到"
                     main.load_state()              # 重新載入
                     caps2 = c.get("/office/caps").json()
                     assert caps2["ok"] and len(caps2["tools"]) == 4, caps2
+
+                    # 【能力是 per-員工的】工具/技能/MCP 跟工作目錄走，同一台機器上
+                    # 不同員工實測是 88／174／222 個。存成一份共用的話後跑的會蓋掉先跑的，
+                    # 面板數字看起來像在亂跳，而且對正在看的那個人是錯的（實際回報）。
+                    p05 = c.get("/office/caps", params={"agent": "p05"}).json()
+                    assert p05["ok"] and len(p05["tools"]) == 4, p05
+                    assert "阿海" in p05.get("source", ""), f"要標出是誰回報的：{p05.get('source')!r}"
+                    # 同事還沒跑過 CLI → 明說「還不知道」，不要拿別人的清單頂替
+                    main.engine_sent["p17"] = main.ENGINE_CLI
+                    other = c.get("/office/caps", params={"agent": "p17"}).json()
+                    assert other["ok"] is False and other.get("engine") == "cli", other
+                    assert "還沒跑過" in other.get("error", ""), other
+                    # 他自己跑過之後，兩份各是各的（不互相覆蓋）
+                    main.cli_caps["p17"] = {"at": "09:00", "agent": "p17",
+                                            "tools": [{"name": "Glob", "description": ""}],
+                                            "skills": [], "mcp": []}
+                    a = c.get("/office/caps", params={"agent": "p05"}).json()
+                    b = c.get("/office/caps", params={"agent": "p17"}).json()
+                    assert len(a["tools"]) == 4 and len(b["tools"]) == 1, (a, b)
+                    assert a["source"] != b["source"], "來源要標出是誰回報的"
+                    main.engine_sent.pop("p17", None)
+
+                    # 【舊格式要能載入】升級前存的是全域單一份（扁平、帶 agent 鍵）。
+                    # 不處理的話那份資料靜默消失，使用者只會看到面板又空了。
+                    main.cli_caps.clear()
+                    snap["cli_caps"] = {"at": "08:00", "agent": "p05", "skills": [], "mcp": [],
+                                        "tools": [{"name": "Read", "description": ""}]}
+                    main.STATE_FILE.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+                    main.load_state()
+                    assert main.cli_caps.get("p05", {}).get("tools"), \
+                        f"舊格式沒被搬過來，資料就這樣不見了：{main.cli_caps}"
                 finally:
                     main.COGITO_HTTP, main._caps_cache = old_http, None
 
