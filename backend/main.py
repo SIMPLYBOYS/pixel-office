@@ -1430,45 +1430,31 @@ _caps_at: float = 0.0
 CAPS_TTL = 300.0
 
 
-def cli_caps_reply(aid: str = "") -> dict | None:
-    """某位員工的 CLI 能力（來自他最近一次 system/init）。沒跑過就回 None——不假裝知道。
+def cli_caps_reply() -> dict | None:
+    """CLI 回報過的能力（來自最近一次 system/init）。沒跑過就回 None——不假裝知道。
 
-    aid 留空＝拿任何一份有的（給「還沒選人」的情況）。刻意標 source＝哪個引擎、
-    誰在什麼時候回報的：cogito 與 CLI 的工具集完全不同（前者 read_file/bash/
-    spawn_subagent…，後者 Read/Edit/Task…），混在一起而不說清楚，比沒有更誤導。
+    刻意標 source＝哪個引擎、什麼時候收到的：cogito 與 CLI 的工具集完全不同
+    （前者是 read_file/bash/spawn_subagent…，後者是 Read/Edit/Task…），
+    混在一起而不說清楚，比沒有更誤導。
     """
-    got = cli_caps.get(aid) if aid else next(
-        (v for v in cli_caps.values() if isinstance(v, dict) and v.get("tools")), None)
-    if not (got and got.get("tools")):
+    if not cli_caps.get("tools"):
         return None
-    who = got.get("agent", aid)
-    name = agents[who].name if who in agents else who
-    return {"ok": True, "tools": got["tools"], "skills": got.get("skills") or [],
-            "mcp": got.get("mcp") or [],
-            "source": f"Claude Code CLI（{name} 於 {got.get('at', '')} 回報）"}
+    name = agents[cli_caps["agent"]].name if cli_caps.get("agent") in agents else cli_caps.get("agent", "")
+    return {"ok": True, "tools": cli_caps["tools"], "skills": cli_caps.get("skills") or [],
+            "mcp": cli_caps.get("mcp") or [],
+            "source": f"Claude Code CLI（{name} 於 {cli_caps.get('at', '')} 回報）"}
 
 
 @app.get("/office/caps")
-async def office_caps(agent: str = ""):
-    """某位員工【實際會用】的能力。agent 留空＝辦公室整體（沿用舊行為）。
-
-    為什麼要 per-員工：兩個引擎的工具集完全不同（cogito 是 read_file/bash/
-    spawn_subagent…，CLI 是 Read/Edit/Task…），而引擎是可以逐人設定的。給一份
-    「全員」清單，對正在跑 CLI 的那位就是錯的——他根本沒有那些工具。
-    """
+async def office_caps():
     global _caps_cache, _caps_at
-    # 這位員工跑 CLI → 就給 CLI 那份（cogito 開著也一樣，那不是他會用的工具）
-    if agent and engine_of(agent) == ENGINE_CLI:
-        return cli_caps_reply(agent) or {
-            "ok": False, "engine": ENGINE_CLI,
-            "error": f"{agents[agent].name if agent in agents else agent}還沒跑過 CLI 任務——"
-                     "派一次工就知道他有哪些能力了"}
     if _caps_cache and time.time() - _caps_at < CAPS_TTL:
         return _caps_cache
+    # CLI 模式的能力來自 CLI 自己（init 事件帶的工具/技能/MCP）。cogito 沒開時它就是唯一
+    # 的來源——先前一律問 cogito，於是純 CLI 用法下面板只剩「取不到能力清單」，
+    # 看起來像「這個模式沒有能力」，實際上它有 184 個工具。
     if not COGITO_HTTP:
-        # 有指定人時只回他自己那份：拿別人的清單頂替，會被放在寫著他名字的標題底下。
-        return cli_caps_reply(agent) or {"ok": False,
-                                         "error": "未設 COGITO_HTTP——問不到 cogito 的能力清單"}
+        return cli_caps_reply() or {"ok": False, "error": "未設 COGITO_HTTP——問不到 cogito 的能力清單"}
     probe = next(iter(agents), "")   # 清單全員相同，隨便挑一位當探針
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
@@ -1479,8 +1465,8 @@ async def office_caps(agent: str = ""):
     except (httpx.HTTPError, ValueError) as e:
         # cogito 連不上：先給上一份好的（過期也照給——稍舊的清單遠比空白有用），
         # 再退到 CLI 回報的，最後才是一句錯誤。
-        return _caps_cache or cli_caps_reply(agent) or {
-            "ok": False, "error": f"連不上 cogito（{type(e).__name__}）——它沒在跑的話這裡就是空的"}
+        return _caps_cache or cli_caps_reply() or {
+            "ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
     # mcp：外部 MCP 工具不個別註冊（cogito 只掛 mcp_call_tool／mcp_describe_tool 兩個閘道），
     # 所以清單得從 gateway 的目錄另外拿——否則看板上只看得到兩個閘道，看不出實際掛了什麼。
     _caps_cache = {"ok": True, "tools": d.get("tools") or [], "skills": d.get("skills") or [],
@@ -2088,10 +2074,7 @@ CLI_TIMEOUT = float(os.environ.get("OFFICE_CLI_TIMEOUT", "1800"))  # 這麼久�
 
 cli_procs: dict[str, asyncio.subprocess.Process] = {}   # aid -> 執行中的 CLI（供中止）
 cli_model: dict[str, str] = {}   # aid -> CLI 上次實際跑的模型（system/init 會報，供介面揭露）
-# aid -> 那位員工的 CLI 能力（init 全都帶了）。【per-員工】而不是一份共用的：
-# 工具/技能/MCP 跟工作目錄走，實測同一台機器上不同員工是 88／174／222 個——
-# 存成一份的話後跑的會蓋掉先跑的，面板數字看起來像在亂跳。
-cli_caps: dict[str, dict] = {}
+cli_caps: dict = {}              # CLI 上次回報的能力（工具/技能/MCP）——init 全都帶了
 
 
 def cli_available() -> bool:
@@ -2234,7 +2217,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     # 能力面板只剩「取不到能力清單」——那不是沒有能力，是我沒收下來。
                     if tools := [t for t in (d.get("tools") or []) if isinstance(t, str)]:
                         globals()["_dirty"] = True   # 讓存檔器把它寫下來（跨重啟要留著）
-                        cli_caps[aid] = ({
+                        cli_caps.update({
                             "at": time.strftime("%H:%M"), "agent": aid,
                             "tools": [{"name": t, "description": ""} for t in tools],
                             "skills": [{"name": str(x.get("name") or x), "description": str(x.get("description") or "")}
@@ -2774,13 +2757,8 @@ def load_state() -> None:
     sched_last.update(data.get("sched_last", {}))
     model_sent.update(data.get("model_sent", {}))
     engine_sent.update(data.get("engine_sent", {}))
-    if isinstance(saved := data.get("cli_caps"), dict):
-        if saved.get("tools"):
-            # 舊格式：全域單一份。搬到它自己回報時的那位員工底下，別讓資料靜默消失。
-            if who := saved.get("agent"):
-                cli_caps[who] = saved
-        else:
-            cli_caps.update({k: v for k, v in saved.items() if isinstance(v, dict)})
+    if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
+        cli_caps.update(saved)
     cli_model.update(data.get("cli_model", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
