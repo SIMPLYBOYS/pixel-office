@@ -14,8 +14,8 @@ import main
 from fastapi.testclient import TestClient
 
 
-def recv(ws, aid: str | None = None) -> dict:
-    """收一則投影指令。帶 aid 就跳過【其他人】的指令再回傳。
+def recv(ws, aid: str | None = None, emote: bool = False) -> dict:
+    """收一則投影指令。帶 aid 就跳過【其他人】的指令再回傳。emote=True 才收徽章指令。
 
     握手之後生活迴圈就開始跑，會不定時對閒著的人發隨機走位——那對「工作投影」的斷言是雜訊。
     先前每則都嚴格比對「下一則訊息」，測試一慢就撞上去，變成間歇性失敗（實際踩到：掏手機
@@ -26,6 +26,10 @@ def recv(ws, aid: str | None = None) -> dict:
         # 鏡頭指令（focus）不是對某個 NPC 的投影，是對【相機】下的——一律跳過。
         # 它會插在任何位置（出錯時鏡頭先過去、再冒泡），拿它去比對「下一則」必然錯。
         if cmd.get("action") == "focus":
+            continue
+        # 狀態徽章同理：它是背景頻道（等審批、額度、空轉），跟著狀態變化插在任何位置，
+        # 拿它去比對「下一則」一樣會撞。要驗徽章的測試自己帶 emote=True。
+        if cmd.get("action") == "emote" and not emote:
             continue
         if aid is None or cmd.get("agent_id") == aid:
             return cmd
@@ -413,6 +417,7 @@ def run() -> None:
     board_archive()
     cost_projection()
     steer_dispatch()
+    status_emote()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1188,6 +1193,77 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def status_emote() -> None:
+    """頭邊的狀態徽章：掛得上、收得掉，而且【不會留殘影】。
+
+    為什麼要有它：泡泡是轉瞬的（2.5-7 秒消失），講「剛剛發生什麼」；徽章持續掛著，
+    講「他現在卡在什麼狀態」——掃一眼就知道誰動不了。額度那條更是先前【完全沒有】
+    身體投影的狀態，工作串印一行字，畫面上跟正常工作一模一樣。
+
+    最重要的斷言是最後一段：狀態沒了徽章一定要下來。假投影裡最糟的一種就是
+    「事情早就過了，畫面還說他卡著」。
+    """
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [],
+                                 "list": main.waypoint_list or ["chair_1"]}))
+        aid = "p07"
+        main.emote_now.clear()
+        main.rate_state.clear()
+        main.watering.discard(aid)
+        main.pending_approval.pop(aid, None)
+        try:
+            # ① 等審批 → 藍問號（在等【你】回答，唯一需要人動手的狀態）
+            assert main.want_emote(aid) == "", "前置條件：什麼事都沒有就不該掛徽章"
+            main.pending_approval[aid] = "rm -rf /tmp/x"
+            assert main.want_emote(aid) == "wait", main.want_emote(aid)
+            asyncio.run(main.sync_emote(aid))
+            m = recv(ws, aid, emote=True)
+            assert (m["action"], m["target"]) == ("emote", "wait"), m
+
+            # ② 同狀態不重發（工具事件很密，每筆都送會把指令流洗掉）
+            asyncio.run(main.sync_emote(aid))
+            asyncio.run(main.sync_emote(aid))
+
+            # ③ 額度被擋比「空轉」更該講，但【等人回答】又比額度優先——
+            # 兩件事同時成立時只掛一個，掛最阻塞的那個。
+            main.rate_state[aid] = "alert"
+            main.watering.add(aid)
+            assert main.want_emote(aid) == "wait", "等審批要壓過額度與空轉"
+            main.pending_approval.pop(aid, None)
+            assert main.want_emote(aid) == "alert", "額度被擋要壓過空轉"
+            main.rate_state.pop(aid, None)
+            assert main.want_emote(aid) == "think", "只剩空轉"
+
+            # ④ 【狀態沒了就要收掉】——這條是整組測試的重點
+            main.watering.discard(aid)
+            assert main.want_emote(aid) == ""
+            asyncio.run(main.sync_emote(aid))
+            m = recv(ws, aid, emote=True)
+            assert (m["action"], m["target"]) == ("emote", ""), \
+                f"狀態過了徽章沒收——這是最糟的一種假投影：{m}"
+
+            # ⑤ 看板沒有身體，掛不上去（不能對著空氣送指令）
+            asyncio.run(main.emote(main.KANBAN, "wait"))
+            assert main.KANBAN not in main.emote_now, "看板不該有徽章"
+
+            # ⑥ 新畫面上線要能重掛：去重的記憶得清掉，否則重整分頁後徽章全不見
+            main.pending_approval[aid] = "x"
+            asyncio.run(main.sync_emote(aid))
+            recv(ws, aid, emote=True)
+            ws.send_text(json.dumps({"type": "waypoints", "agents": [],
+                                     "list": main.waypoint_list or ["chair_1"]}))
+            for _ in range(50):
+                time.sleep(0.02)
+                if not main.emote_now:
+                    break
+            assert not main.emote_now, "握手後沒清掉去重記憶，重整分頁徽章就回不來"
+        finally:
+            main.pending_approval.pop(aid, None)
+            main.rate_state.clear()
+            main.watering.discard(aid)
+            main.emote_now.clear()
 
 
 def caps_refresh() -> None:

@@ -117,6 +117,9 @@ async def handle_event(evt: dict) -> None:
         notify("roster")
     kind = evt.get("type")
     if kind == "waypoints":
+        # 新畫面上線＝它什麼都不知道。清掉「送過了」的記憶，讓 sweep 把徽章重掛上去，
+        # 否則重整分頁之後所有徽章都不見（去重會擋住重送）。
+        emote_now.clear()
         start_agents(evt.get("agents", []), evt.get("list", []))
     elif kind == "arrived":
         aid = evt.get("agent_id", "")
@@ -410,6 +413,46 @@ async def pose(aid: str, action: str) -> None:
     await send_cmd({"agent_id": aid, "action": "use", "target": action})
 
 
+# ── 頭邊的狀態徽章 ────────────────────────────────────────────────────────────
+# 跟泡泡分工：泡泡是轉瞬的（2.5-7 秒消失），講「剛剛發生什麼」；徽章持續掛著，
+# 講「他【現在】卡在什麼狀態」——掃一眼辦公室就知道誰動不了，泡泡給不了這個。
+emote_now: dict[str, str] = {}    # aid -> 目前掛著的徽章（同狀態不重發）
+rate_state: dict[str, str] = {}   # aid -> "alert"（額度真被擋）/"warn"（快滿了）/無
+
+
+def want_emote(aid: str) -> str:
+    """這個人【現在】該掛什麼徽章。
+
+    刻意做成【宣告式】而不是四處 set/clear：配對式只要漏掉一個清除點，徽章就永遠
+    掛在頭上——那正是最糟的一種假投影（狀態早就過了，畫面還說他卡著）。
+    這裡從真實狀態算出答案，漏呼叫最多只是晚一輪 sweep 才更新，不會留下殘影。
+
+    順序＝阻塞程度：等人決定 > 額度被擋 > 額度快滿 > 自己在空轉。
+    """
+    if aid in pending_approval:
+        return "wait"       # 藍問號：在等【你】回答，這是唯一需要人動手的狀態
+    if r := rate_state.get(aid):
+        return r            # alert 紅驚嘆號／warn 黃驚嘆號
+    if aid in watering:
+        return "think"      # 空白思考泡：卡住空轉中（人已經走去飲水機了）
+    return ""
+
+
+async def emote(aid: str, name: str) -> None:
+    """掛徽章。空字串＝收起來。只有【變了】才送——工具事件很密。"""
+    if aid == KANBAN:       # 看板沒有身體，沒有頭可以掛
+        return
+    if emote_now.get(aid, "") == name:
+        return
+    emote_now[aid] = name
+    await send_cmd({"agent_id": aid, "action": "emote", "target": name})
+
+
+async def sync_emote(aid: str) -> None:
+    """把徽章對齊真實狀態。冪等，隨便呼叫幾次都行。"""
+    await emote(aid, want_emote(aid))
+
+
 async def goto_then_pose(aid: str, target: str, action: str) -> None:
     """走過去，【等真的走到】再擺姿勢。
 
@@ -527,6 +570,12 @@ async def sweep_work() -> None:
             watering.add(aid)
             await goto(aid, COOLER)
             await bubble(aid, "● 思考中…")
+            await sync_emote(aid)
+
+    # 徽章對帳：上面那些轉換點都會即時送，這裡是保險——宣告式的好處就是重算一次
+    # 永遠安全，漏掉的轉換點最多晚一輪，不會留下「狀態過了徽章還在」的殘影。
+    for aid in list(agents):
+        await sync_emote(aid)
 
     # 子 agent 的釋放事件掉了：主 agent 可能還活得好好的（work_last 一直在刷新），
     # 所以上面那條失聯規則救不到。這裡按【徵用時間】強制放人，否則那個 NPC 永遠不回座位。
@@ -739,6 +788,8 @@ async def force_stop(aid: str, how: str) -> None:
     log_ev(aid, f"🧑‍💼 老闆中止了任務{how}")
     close_card(aid, "stopped")
     clear_approval(aid)
+    rate_state.pop(aid, None)
+    await sync_emote(aid)      # 卡收了，頭上的問號／額度警示也要跟著下來
     await adjourn(aid)
     reading.discard(aid)
     release_work(aid)          # busy、委派、失聯計時一起收
@@ -1200,10 +1251,16 @@ async def office_event(ev: dict):
         task_start[aid] = time.time()       # 牆鐘：要跟檔案 mtime 比
     last_work[aid] = time.monotonic()  # 有事件＝這位還在做事，重新計算「閒多久」
     sleeping.discard(aid)              # 睡著的被叫醒（下一輪就恢復正常走動）
+    # 額度警示：有實質進展就表示不再卡著額度了，收掉紅燈（warn 留到收工——「快滿了」還是真的）
+    if kind in ("tool", "result") and rate_state.get(aid) == "alert":
+        rate_state.pop(aid, None)
+        await sync_emote(aid)
+
     if kind in ("start", "tool", "result", "error"):   # 有實質進展（think/turn 不算）
         last_tool[aid] = time.monotonic()
         if aid in watering:            # 卡住的人有進展了：回位子繼續
             watering.discard(aid)
+            await sync_emote(aid)
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
 
@@ -1319,6 +1376,8 @@ async def office_event(ev: dict):
             if card and cost and ev.get("cost_est"):
                 card["cost_est"] = True
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
+        rate_state.pop(aid, None)
+        await sync_emote(aid)
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
             reading.discard(aid)
@@ -1469,6 +1528,7 @@ async def office_chat(ev: dict):
         busy.add(aid)
         work_last[aid] = time.monotonic()
         notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
+        await sync_emote(aid)                    # 頭上掛問號：站在老闆房門口的人在等【你】
         await focus([aid], CAM_DECISION)          # 也是鏡頭的最高非手動級：球在老闆手上
         # 走到老闆房門口站著等（門口真的有人在等就原地等，不擠）。
         # 球在別人手上：講電話，不是站著發呆——但姿勢必須【走到之後】才擺，否則被走路動畫蓋掉。
@@ -2309,6 +2369,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                 for ev in cli_events(d, tool_names):
                     # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠
                     if ev["kind"] == "msg" and ev["label"].startswith(("⏳", "⚠")):
+                        # 頭上掛額度警示。這是目前【唯一】完全沒有身體投影的狀態：
+                        # 先前只有工作串一行字，畫面上跟正常工作一模一樣。
+                        rate_state[aid] = "alert" if ev["label"].startswith("⏳") else "warn"
+                        await sync_emote(aid)
                         if ev["label"] in warned:
                             continue
                         warned.add(ev["label"])
@@ -2560,6 +2624,7 @@ async def office_dispatch(d: dict):
         await bubble(aid, "📨 插話")
     elif verb in ("approve", "reject"):
         clear_approval(aid)  # cogito 確認收到才收卡
+        await sync_emote(aid)                # 決定做了，頭上的問號立刻收（不等 sweep）
         notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
         await bubble(aid, "✓ 放行" if verb == "approve" else "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆{'核准' if verb == 'approve' else '駁回'}了這個操作")

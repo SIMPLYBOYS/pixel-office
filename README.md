@@ -102,7 +102,9 @@ Unity 只是渲染面。
      ```bash
      python3 tools/extract_design.py limezu/Modern_Office_Revamped_v1.2/6_Office_Designs/Office_Design_2.aseprite
      for n in 17 1 7 5 12 8 19; do python3 tools/make_character.py $n; done   # 七位員工（含一次性動作列）
-     # 產物在 limezu/_extracted/，複製到 unity/Assets/Sprites/LimeZu/（Design/ 與 Characters/p*/）
+     python3 tools/make_emotes.py                                              # 頭邊的狀態徽章
+     # 產物在 limezu/_extracted/，複製到 unity/Assets/Sprites/LimeZu/
+     # （Design/、Characters/p*/、Emotes/）
      python3 tools/trim_props.py    # ⚠ 複製【之後】才跑：它直接改 Unity 底下的 Design/
      ```
    - `trim_props.py` 把下排長桌 `obj_24` 裁短。抽取工具依「相連像素」切元件，把第 4 組

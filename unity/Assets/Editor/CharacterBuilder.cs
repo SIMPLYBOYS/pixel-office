@@ -6,6 +6,7 @@ using UnityEngine;
 public static class CharacterBuilder
 {
     const string CharRoot = "Assets/Sprites/LimeZu/Characters";
+    const string EmoteRoot = "Assets/Sprites/LimeZu/Emotes";
 
     // 與 backend/personas/*.yaml 一一對應（多一個 persona 就在這加一行再 Build Characters）。
     //
@@ -88,6 +89,36 @@ public static class CharacterBuilder
         go.transform.position = ReceptionPost;
     }
 
+    // 徽章素材【全員共用】（不像角色幀是每人一套），掃一次快取起來。
+    // 檔名格式 <name>_<幀號>.png，見 tools/make_emotes.py。
+    static NPCEmote.Set[] emoteCache;
+
+    static NPCEmote.Set[] LoadEmotes()
+    {
+        if (emoteCache != null) return emoteCache;
+        if (!AssetDatabase.IsValidFolder(EmoteRoot)) return emoteCache = new NPCEmote.Set[0];
+        var byName = new System.Collections.Generic.SortedDictionary<string,
+            System.Collections.Generic.List<Sprite>>();
+        foreach (var guid in AssetDatabase.FindAssets("t:Sprite", new[] { EmoteRoot }))
+        {
+            var sp = AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(guid));
+            if (sp == null) continue;
+            int u = sp.name.LastIndexOf('_');            // 砍掉尾巴的幀號
+            if (u <= 0) continue;
+            string key = sp.name.Substring(0, u);
+            if (!byName.TryGetValue(key, out var list))
+                byName[key] = list = new System.Collections.Generic.List<Sprite>();
+            list.Add(sp);
+        }
+        var sets = new System.Collections.Generic.List<NPCEmote.Set>();
+        foreach (var kv in byName)
+        {
+            kv.Value.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
+            sets.Add(new NPCEmote.Set { name = kv.Key, frames = kv.Value.ToArray() });
+        }
+        return emoteCache = sets.ToArray();
+    }
+
     static void BuildOne(string prefix, Vector3 spawn)
     {
         string folder = $"{CharRoot}/{prefix}";
@@ -156,6 +187,20 @@ public static class CharacterBuilder
         if (anim.clips.Length < OneShots.Length * 4)
             Debug.LogWarning($"CharacterBuilder: {prefix} 一次性動作只有 {anim.clips.Length}/{OneShots.Length * 4} 段——" +
                              "重跑 tools/make_character.py 再複製 hurt/pick_up/lift/throw 的幀進來");
+
+        // 頭邊的狀態徽章（持續顯示；跟泡泡分工見 NPCEmote 的說明）。
+        // 位置在右上角、略疊住頭：泡泡在正上方 2.15、對話框在 2.55，錯開才不會互相蓋。
+        // emote 的 pivot 是左下（路徑含 /LimeZu/ 但不含 /Characters/），所以這是左下角座標。
+        var emoteGo = new GameObject("Emote");
+        emoteGo.transform.SetParent(go.transform, false);
+        emoteGo.transform.localPosition = new Vector3(0.25f, 1.5f, 0);
+        var emoteSr = emoteGo.AddComponent<SpriteRenderer>();
+        emoteSr.sortingOrder = 55;          // 泡泡 50 之上、對話框 59 之下
+        var emote = emoteGo.AddComponent<NPCEmote>();
+        emote.sets = LoadEmotes();
+        if (emote.sets.Length == 0)
+            Debug.LogWarning("CharacterBuilder: 沒有情緒徽章素材——先跑 tools/make_emotes.py，"
+                             + "再把 limezu/_extracted/emotes 複製到 " + EmoteRoot);
 
         // 頭上泡泡
         var bubbleGo = new GameObject("Bubble");

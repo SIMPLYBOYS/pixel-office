@@ -10,12 +10,14 @@ public class NPCAgent : MonoBehaviour
     NPCMover mover;
     NPCSprite sprite;
     NPCMeeting meeting;
+    NPCEmote emote;
 
     void Awake()
     {
         mover = GetComponent<NPCMover>();
         sprite = GetComponent<NPCSprite>();
         meeting = GetComponent<NPCMeeting>();
+        emote = GetComponentInChildren<NPCEmote>(true);   // 徽章掛在子物件上
     }
 
     public IEnumerator Execute(AgentCommand cmd)
@@ -38,6 +40,12 @@ public class NPCAgent : MonoBehaviour
 
             case "use": // target = 動作名（sit_up / sit_left / sit_right）
                 sprite.SetAction(cmd.target);
+                break;
+
+            case "emote": // target = 徽章名（wait / think / warn / alert），空＝收起來。
+                // 【不是】身體姿勢：它跟走位、坐姿完全獨立，所以 move_to 不會清掉它。
+                // 狀態還在，人走去飲水機的路上徽章也該還在。
+                if (emote != null) emote.Show(cmd.target);
                 break;
 
             case "say": // 有文字顯示文字框，沒文字退回「...」泡泡
