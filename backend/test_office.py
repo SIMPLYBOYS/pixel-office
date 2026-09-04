@@ -83,6 +83,7 @@ def run() -> None:
     main.STATE_FILE.unlink(missing_ok=True)
     main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
     main.GIFT_HOLD = 0         # 遞交停留是演出節奏，合約只驗指令有沒有出
+    main.HURT_HOLD = 0
     main.WATCH_TICK = 0.2      # watchdog 巡快一點
     main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
     with TestClient(main.app) as c:
@@ -129,6 +130,9 @@ def run() -> None:
             # error → ✗；msg → 內容泡
             post(c, agent="p17", kind="result", label="bash")  # 不投影
             post(c, agent="p17", kind="error", label="bash")
+            # 出錯先閃紅（一次性動作，Unity 自己退掉），再冒 ✗ 泡。方向跟坐姿：sit_up → hurt_up
+            m = recv(ws)
+            assert (m.get("action"), m.get("target")) == ("use", "hurt_up"), f"出錯要先閃紅：{m}"
             assert recv(ws)["text"] == "⚠ bash"
             post(c, agent="p17", kind="msg", label="TODO 共 3 處，已列清單")
             assert recv(ws)["text"] == "→ 回報"
@@ -428,9 +432,56 @@ def run() -> None:
     board()
     camera()
     sub_release_fallback()
+    hurt_projection()
     turn_in_stream()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
+
+
+def hurt_projection() -> None:
+    """出錯 → 整身閃紅一下（LimeZu hurt 列）。先前 error 只有鏡頭推過去，身體毫無反應。
+
+    方向跟坐姿走：老徐（p19）坐 sit_left → hurt_left。支援者失敗也閃（與「成功→遞交」對稱）。
+    Unity 端把它當一次性動作自己退掉，所以合約只驗「哪一下送了什麼」，不驗還原。"""
+    def until(ws, aid, pred):
+        for _ in range(40):
+            m = recv(ws, aid)
+            if pred(m):
+                return m
+        raise AssertionError(f"{aid} 一直沒送出預期的指令")
+
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [],
+                                 "list": main.waypoint_list or ["chair_1"]}))
+        for _ in range(50):
+            if main.agents:
+                break
+            time.sleep(0.1)
+        for aid in ("p19", "p17", "p01"):
+            main.busy.discard(aid)
+        post(c, agent="p19", kind="start", label="架構評估")
+        post(c, agent="p19", kind="error", label="go build")
+        # 哨兵：出錯之後補一則回報，保證後面一定還有訊息——閃紅缺了是乾淨的斷言紅，不是卡死
+        post(c, agent="p19", kind="msg", label="哨兵")
+        m = until(ws, "p19", lambda m: m.get("action") == "use" or m.get("text") == "→ 回報")
+        assert (m.get("action"), m.get("target")) == ("use", "hurt_left"), \
+            f"老徐坐 sit_left，出錯該從左側閃紅：{m}"
+        # 沒在上工的人出錯（殭屍事件）不閃——那不是他手上的任務
+        post(c, agent="p19", kind="done", label="error")
+        main.busy.discard("p19")
+
+        # 支援者失敗：委派收件失敗 → 支援者閃紅（成功是遞交）
+        post(c, agent="p17", kind="start", label="整合")
+        post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
+             detail='{"agent_type":"code-reviewer"}')
+        until(ws, "p01", lambda m: m.get("text") == "★ 支援中")
+        post(c, agent="p17", kind="error", label="spawn_subagent:code-reviewer", detail="炸了")
+        # 失敗後支援者一定會被叫回座位（move_to）——拿它當哨兵，閃紅要在它之前
+        m = until(ws, "p01", lambda m: m.get("action") in ("use", "move_to"))
+        assert (m["action"], m.get("target")) == ("use", "hurt_up"), f"支援者失敗要閃紅：{m}"
+        post(c, agent="p17", kind="done", label="ok")
+        for aid in ("p19", "p17", "p01"):
+            main.busy.discard(aid)
 
 
 def sub_release_fallback() -> None:

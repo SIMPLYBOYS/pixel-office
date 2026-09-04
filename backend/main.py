@@ -372,7 +372,15 @@ SIT_AT = {"p19": "sit_left"}   # 放下書要坐回去的姿勢；其餘工位�
 # 從支援者工位看向那個站位：chair_1-3 的站位在東、chair_4/5 在西、老闆房門在西。
 GIFT_TOWARD = {"p05": "gift_left", "p12": "gift_left", "p19": "gift_left"}   # 其餘 gift_right
 GIFT_HOLD = 1.3   # 遞交停留秒數（10 幀 8fps 一輪 1.25s，演一輪整）；測試設 0
+# 受傷投影：出錯的那一下整身閃紅（LimeZu hurt 列，3 幀）。Unity 端當一次性動作疊在目前姿勢上、
+# 自己退掉——橋只負責「哪一下」，不管時間、不還原。方向跟坐姿走：背對鏡頭坐的人就從背後閃紅。
+HURT_HOLD = 1.0   # 支援者失敗後、被叫回座位前停留（move_to 會清掉一次性動作）；測試設 0
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
+
+
+def hurt_of(aid: str) -> str:
+    """出錯時的受傷方向＝他坐著面向的方向（sit_up → hurt_up、sit_left → hurt_left）。"""
+    return "hurt_" + SIT_AT.get(aid, "sit_up").removeprefix("sit_")
 
 
 def say(aid: str, text: str) -> dict:
@@ -792,6 +800,10 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
     if ok and parent != KANBAN and not in_meeting(parent):
         await pose(npc, GIFT_TOWARD.get(npc, "gift_right"))
         await asyncio.sleep(GIFT_HOLD)
+    elif not ok:
+        # 失敗沒有東西可交——但也不能什麼都沒發生：支援者閃紅一下，再被叫回座位
+        await pose(npc, hurt_of(npc))
+        await asyncio.sleep(HURT_HOLD)
     if desk := WORK_DESK.get(parent):   # 交接完主 agent 回自己位子繼續
         await goto(parent, desk)
     # 支援者也要回位子——但【開會中不散會】。
@@ -1161,6 +1173,11 @@ async def office_event(ev: dict):
     if kind == "tool" and aid not in pending_approval and occupied.get(aid) == BOSS_DOOR:
         if desk := WORK_DESK.get(aid):
             await goto(aid, desk)
+
+    # 出錯投影：整身閃紅一下。先前 error 只有鏡頭推過去，身體毫無反應——出錯是任務裡
+    # 最該看得見的一刻。只認主 agent 自己的事件（子 agent 失敗在 finish_sub 那條演）。
+    if kind == "error" and aid in busy and not SUB_RE.match(label):
+        await pose(aid, hurt_of(aid))
 
     # 閱讀投影：讀類工具 → 低頭看書；換到非讀類工具（或出錯）→ 放下書坐回去。
     # 只認主 agent 自己的事件（[Subagent:…] 前綴是別人的手，project_sub 沒接走的才會到這）。

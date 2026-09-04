@@ -9,7 +9,8 @@ sheet 格局（16x16 版，官方 GUIDE）：每幀 16×32，
   python3 tools/make_character.py 17                    # premade 17 號
   python3 tools/make_character.py path/to/sheet.png me  # 任意 sheet（如自組合成的輸出），命名前綴 me
 
-輸出 limezu/_extracted/characters/<prefix>/<prefix>_idle_down_0.png …（共 48 張，衍生物不進 git）
+輸出 limezu/_extracted/characters/<prefix>/<prefix>_idle_down_0.png …（衍生物不進 git）
+幀序號不補零（idle_down_0 … pick_up_left_11）：CharacterBuilder 依序號數值排序，不靠字串序。
 """
 import os
 import sys
@@ -31,11 +32,16 @@ SITS = [("sit_right", 128, 0), ("sit_left", 128, 6)]
 #   phone＝拿著手機低頭看（等外部回應）、sleep＝趴著（長時間沒事做）、
 #   book＝低頭看書（連續讀檔/查資料的投影；y=224 列只有正面單向，GUIDE 標 1-6 循環）
 ACTIONS = [("phone", 192, 4), ("sleep", 96, 0), ("book", 224, 1)]
-# gift（遞交，y=320 列）：42 幀＝4 向 × 10 幀 + 2 幀禮盒 prop。方向順序【量出來的】——
-# 對每組首幀算臉像素的數量與左右偏移、跟 idle 四向的簽名比對：right(0)/up(10)/left(20)/down(30)，
-# 跟 idle/walk 的欄序一致。10 幀是完整的「遞出去」弧線，抽 6 幀會斷在一半。
-GIFTS = [("gift_right", 320, 0), ("gift_up", 320, 10),
-         ("gift_left", 320, 20), ("gift_down", 320, 30)]
+# 四向的一次性動作：(名稱, 列 y, 每向幀數)。四組依序 right/up/left/down、每組 n 幀，
+# 跟 idle/walk 的欄序一致。方向序與幀數都是【量出來的】（膚色重心簽名比對 idle 四向，
+# 再把各組首幀拼成對照圖用眼睛確認）——不是看 GUIDE 猜的；GUIDE 沒標方向。
+#   gift    遞交（y=320）：4×10 ＋ 2 幀禮盒 prop（不抽）。10 幀是完整的「遞出去」弧線，抽 6 會斷一半
+#   hurt    受傷（y=608）：4×3 ＋ 1 格紅色道具（不抽）。三幀＝正常／整身泛紅／正常的閃爍
+#   pick_up 撿起（y=288）：4×12　lift 舉起（y=352）：4×14　throw 丟出（y=384）：4×14
+# 尚未接線的動作（pick_up／lift／throw）先切進來：貴的是重建 prefab 與 WebGL，一次做完；
+# 接線本身是橋端一行（見 backend/main.py 的 hurt_of）。
+DIRECTIONAL = [("gift", 320, 10), ("hurt", 608, 3),
+               ("pick_up", 288, 12), ("lift", 352, 14), ("throw", 384, 14)]
 FW, FH, N = 16, 32, 6
 
 
@@ -61,11 +67,12 @@ def main():
             frame = crop(px, (col + i) * FW, y, FW, FH)
             write_png(f"{out}/{prefix}_{anim}_{i}.png", frame)
             count += 1
-    for anim, y, col in GIFTS:
-        for i in range(10):
-            frame = crop(px, (col + i) * FW, y, FW, FH)
-            write_png(f"{out}/{prefix}_{anim}_{i}.png", frame)
-            count += 1
+    for anim, y, n in DIRECTIONAL:
+        for d, (dname, _) in enumerate(DIRS):        # DIRS 已是 right/up/left/down 序
+            for i in range(n):
+                frame = crop(px, (d * n + i) * FW, y, FW, FH)
+                write_png(f"{out}/{prefix}_{anim}_{dname}_{i}.png", frame)
+                count += 1
     print(f"{prefix}: {count} 幀 → {out}/")
 
 

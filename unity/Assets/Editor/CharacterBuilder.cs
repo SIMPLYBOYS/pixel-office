@@ -70,7 +70,7 @@ public static class CharacterBuilder
             .Select(g => AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(g)))
             .Where(s => s != null).ToArray();
         Sprite[] Frames(string key) => all.Where(s => s.name.Contains(key))
-                                          .OrderBy(s => s.name).ToArray();
+                                          .OrderBy(FrameNo).ToArray();
         var idle = Frames("_idle_down_");
         if (idle.Length == 0)
         {
@@ -95,7 +95,7 @@ public static class CharacterBuilder
             .Select(g => AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(g)))
             .Where(s => s != null).ToArray();
         Sprite[] Load(string key) =>
-            all.Where(s => s.name.Contains($"_{key}_")).OrderBy(s => s.name).ToArray();
+            all.Where(s => s.name.Contains($"_{key}_")).OrderBy(FrameNo).ToArray();
 
         var idleDown = Load("idle_down");
         if (idleDown.Length == 0)
@@ -148,6 +148,14 @@ public static class CharacterBuilder
         anim.giftDown = Load("gift_down");
         anim.giftRight = Load("gift_right");
         anim.giftLeft = Load("gift_left");
+        // 一次性動作四向各一段，名稱就是檔名段（hurt_up…）——橋端送什麼字串，這裡就找什麼
+        anim.clips = OneShots
+            .SelectMany(a => new[] { "up", "down", "left", "right" }.Select(d => $"{a}_{d}"))
+            .Select(k => new NPCSprite.Clip { name = k, frames = Load(k) })
+            .Where(c => c.frames.Length > 0).ToArray();
+        if (anim.clips.Length < OneShots.Length * 4)
+            Debug.LogWarning($"CharacterBuilder: {prefix} 一次性動作只有 {anim.clips.Length}/{OneShots.Length * 4} 段——" +
+                             "重跑 tools/make_character.py 再複製 hurt/pick_up/lift/throw 的幀進來");
 
         // 頭上泡泡
         var bubbleGo = new GameObject("Bubble");
@@ -204,6 +212,13 @@ public static class CharacterBuilder
         var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
         inst.transform.position = spawn;
     }
+
+    // 只切了還沒接線的（pick_up／lift／throw）也先裝進 prefab：貴的是重建 prefab 與 WebGL，一次做完。
+    static readonly string[] OneShots = { "hurt", "pick_up", "lift", "throw" };
+
+    // 幀序號在檔名最後一段（p01_lift_up_13）；序號兩位數的動作靠字串排會亂。
+    static int FrameNo(Sprite s) =>
+        int.TryParse(s.name.Substring(s.name.LastIndexOf('_') + 1), out var n) ? n : 0;
 
     static PhysicsMaterial2D GetSlipperyMaterial()
     {

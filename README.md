@@ -101,7 +101,7 @@ Unity 只是渲染面。
    - 跑管線重生素材，複製產物進 Unity：
      ```bash
      python3 tools/extract_design.py limezu/Modern_Office_Revamped_v1.2/6_Office_Designs/Office_Design_2.aseprite
-     for n in 17 1 7 5 12 19; do python3 tools/make_character.py $n; done   # 六位員工
+     for n in 17 1 7 5 12 8 19; do python3 tools/make_character.py $n; done   # 七位員工（含一次性動作列）
      # 產物在 limezu/_extracted/，複製到 unity/Assets/Sprites/LimeZu/（Design/ 與 Characters/p*/）
      python3 tools/trim_props.py    # ⚠ 複製【之後】才跑：它直接改 Unity 底下的 Design/
      ```
