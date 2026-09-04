@@ -418,6 +418,7 @@ def run() -> None:
     cost_projection()
     steer_dispatch()
     status_emote()
+    proposed_memory_badge()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1264,6 +1265,64 @@ def status_emote() -> None:
             main.rate_state.clear()
             main.watering.discard(aid)
             main.emote_now.clear()
+
+
+def proposed_memory_badge() -> None:
+    """待審的記憶提案 → 頭上掛寶石。
+
+    為什麼需要：cogito 的 consolidate 會把「這次學到什麼」寫成提案，但【刻意不自動套用】，
+    等人 review 才進長期記憶。安全，代價是沒人看就永遠堆著——接這條的當下實測四位員工
+    身上已經有 55 條沒人知道的提案。這是最典型的徽章形狀：持續存在、等你處理。
+
+    計數刻意跟 cogito 的 parseProposedMemory 對齊（"- " 開頭且有內容才算）——
+    數字跟他們的 review 畫面對不上，比沒有數字更糟。
+    """
+    import tempfile
+    aid = "p12"
+    with tempfile.TemporaryDirectory() as tmp:
+        ch = Path(tmp) / "channels"
+        (ch / f"office_{aid}" / ".claw").mkdir(parents=True)
+        f = ch / f"office_{aid}" / ".claw" / main.PROPOSED_FILE.split("/")[-1]
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, ch
+        main.memo_pending.clear()
+        main.pending_approval.pop(aid, None)
+        try:
+            # 沒有檔案＝還沒產生過提案，不是錯誤
+            assert main.count_proposed(aid) == 0, "沒檔案就該回 0，不該炸"
+
+            f.write_text(
+                "<!-- ⚠️ 自動生成的『提案記憶』。\n- 這行在註解裡，不算 -->\n"
+                "\n## [user] 來自任務「寫個 md」（2026-09-04T10:00:00+08:00）\n"
+                "- 傾向要求輸出成 md 文件\n"
+                "- 關心系統性的流程而非單點修補\n"
+                "-   \n"                                    # 空 bullet 不算
+                "## [style] 來自任務「另一件事」\n"
+                "- 說話喜歡先給結論\n", encoding="utf-8")
+            n = main.count_proposed(aid)
+            assert n == 3, f"該數 3 條（註解內、空 bullet、## 標題都不算），實際 {n}"
+
+            # 刷新 → 掛徽章
+            main.refresh_proposed(aid)
+            assert main.want_emote(aid) == "idea", main.want_emote(aid)
+
+            # 【優先序】有人在等你決定，比「他學到東西」急得多
+            main.pending_approval[aid] = "rm -rf /"
+            assert main.want_emote(aid) == "wait", "等審批要壓過待審提案"
+            main.pending_approval.pop(aid, None)
+
+            # review 完（cogito 那邊 apply 會清掉條目）→ 徽章要跟著收
+            f.write_text("<!-- 只剩表頭 -->\n", encoding="utf-8")
+            main.refresh_proposed(aid)
+            assert main.want_emote(aid) == "", "提案清掉了徽章沒收——事情過了畫面還說有事"
+
+            # 沒設 COGITO_CHANNELS：整條功能靜默關閉，不是報錯
+            f.write_text("- 又有一條了\n", encoding="utf-8")
+            main.CHANNELS_DIR = None
+            assert main.count_proposed(aid) == 0, "沒設頻道目錄就該安靜關掉"
+        finally:
+            main.CHANNELS_DIR = old_ch
+            main.memo_pending.clear()
+            main.pending_approval.pop(aid, None)
 
 
 def caps_refresh() -> None:

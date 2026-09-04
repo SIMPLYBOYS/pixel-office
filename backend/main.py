@@ -420,6 +420,39 @@ emote_now: dict[str, str] = {}    # aid -> 目前掛著的徽章（同狀態不�
 rate_state: dict[str, str] = {}   # aid -> "alert"（額度真被擋）/"warn"（快滿了）/無
 
 
+# ── 待審的記憶提案 ──────────────────────────────────────────────────────────
+# cogito 的 consolidate 工具會把「這次學到什麼」寫成提案，放進頻道工作區的
+# .claw/AGENTS.proposed.md，等人 review（聊天端 `apply memory`）才進長期記憶。
+# 它【刻意不自動套用】——好處是安全，代價是沒人看就永遠堆著：接這條的當下，
+# 四位員工身上已經有 55 條沒有人知道的提案。這正是徽章的形狀：持續、等你處理。
+PROPOSED_FILE = ".claw/AGENTS.proposed.md"
+memo_pending: dict[str, int] = {}   # aid -> 待審條數（收工與 sweep 時刷新）
+
+
+def count_proposed(aid: str) -> int:
+    """數這位員工有幾條待審提案。讀不到一律當 0——沒設 COGITO_CHANNELS 就整條靜默關閉。
+
+    數法跟 cogito 的 parseProposedMemory 對齊：剝掉 HTML 註解後，每個 "- " 開頭
+    且有內容的行算一條（`## ` 是任務標題不算）。刻意不自己發明格式——
+    數字跟他們的 review 畫面對不上，比沒有數字更糟。
+    """
+    if not CHANNELS_DIR:
+        return 0
+    try:
+        raw = (CHANNELS_DIR / f"office_{aid}" / PROPOSED_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return 0            # 沒這個檔＝這位員工還沒產生過提案，不是錯誤
+    raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S)
+    return sum(1 for ln in raw.splitlines()
+               if (b := ln.strip()).startswith("- ") and b[2:].strip())
+
+
+def refresh_proposed(aid: str = "") -> None:
+    """刷新待審條數。帶 aid 只刷一個（剛收工的那位），空＝全刷（sweep 的保險）。"""
+    for a in ([aid] if aid else list(agents)):
+        memo_pending[a] = count_proposed(a)
+
+
 def want_emote(aid: str) -> str:
     """這個人【現在】該掛什麼徽章。
 
@@ -435,6 +468,10 @@ def want_emote(aid: str) -> str:
         return r            # alert 紅驚嘆號／warn 黃驚嘆號
     if aid in watering:
         return "think"      # 空白思考泡：卡住空轉中（人已經走去飲水機了）
+    if memo_pending.get(aid, 0):
+        # 黃寶石：他學到的東西還擺在那沒人收。放最後——這件事不急，
+        # 壓過「有人在等你決定」或「額度被擋」就是排錯輕重。
+        return "idea"
     return ""
 
 
@@ -572,6 +609,7 @@ async def sweep_work() -> None:
             await bubble(aid, "● 思考中…")
             await sync_emote(aid)
 
+    refresh_proposed()      # 提案是 consolidate 工具寫的，任務中就可能多出來
     # 徽章對帳：上面那些轉換點都會即時送，這裡是保險——宣告式的好處就是重算一次
     # 永遠安全，漏掉的轉換點最多晚一輪，不會留下「狀態過了徽章還在」的殘影。
     for aid in list(agents):
@@ -1377,6 +1415,7 @@ async def office_event(ev: dict):
                 card["cost_est"] = True
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         rate_state.pop(aid, None)
+        refresh_proposed(aid)   # 這一刻剛跑完 consolidate 的話，提案就是現在多出來的
         await sync_emote(aid)
         await adjourn(aid)               # 散會：把還站在白板前的人請回位子
         if aid in reading:               # 收工放下書（done 不一定伴隨走位，姿勢要顯式還原）
