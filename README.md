@@ -98,6 +98,7 @@ Unity 只是渲染面。
    ```
 3. **素材重建**（僅 fresh clone 需要——limezu/ 不進版控）：
    - 到 itch.io 購買 LimeZu《Modern Interiors 完整版》與《Modern Office》，解壓到 `limezu/`
+   - **素材授權與 credit**：像素素材 © [LimeZu](https://limezu.itch.io)（Modern Interiors／Modern Office），授權可用於任何專案、**不可散布素材本身**——因此 `limezu/` 與 `unity/Assets/Sprites/LimeZu/` 一律不進版控，fresh clone 沒有它們也能跑橋與外殼（辦公室 3D 畫面需自行購買後重生）。Modern Interiors 要求標示 credit：limezu.itch.io
    - 跑管線重生素材，複製產物進 Unity：
      ```bash
      python3 tools/extract_design.py limezu/Modern_Office_Revamped_v1.2/6_Office_Designs/Office_Design_2.aseprite
