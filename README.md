@@ -118,7 +118,14 @@ curl localhost:8123/events     # 最近事件（arrived 等）
 # 跳過大腦直接下指令：
 curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
      -d '{"agent_id":"p17","action":"move_to","target":"cooler_1"}'
+# 直接擺一個姿勢（驗收動畫最快的方式，不必等 agent 真的跑）：
+curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
+     -d '{"agent_id":"p05","action":"use","target":"hurt_down"}'
 ```
+
+姿勢名稱：`sit_up`／`sit_left`／`sit_right`、`phone`、`sleep`、`book`、
+`face_*`、`gift_*`、`hurt_*`（`pick_up_*`／`lift_*`／`throw_*` 已在 prefab 裡，還沒接事件）。
+`hurt_*` 是一次性動作——**演一秒就自己退掉**，眨眼會錯過；截圖驗收要連續重送才拍得到。
 
 三種運行模式：
 | 模式 | 條件 | 行為 |
