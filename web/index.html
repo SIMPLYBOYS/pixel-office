@@ -136,6 +136,21 @@
   .memo .say { padding: 6px 16px 8px; font-size: 11px; color: var(--dim); }
   .memo .say.bad { color: #e07070; }
   .memo .say.busy { opacity: .7; }
+  /* 請購單：欄位排版。金額要大——那是要簽的數字 */
+  .po { padding: 6px 16px 4px; font-size: 12px; }
+  .po-row { display: flex; gap: 10px; padding: 2px 0; }
+  .po-row span { color: var(--dim); min-width: 32px; }
+  .po-row .amt { font-size: 15px; color: #d9b44a; }
+  .po-row .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; word-break: break-all; }
+  .po-why { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  /* 稽核帳：一筆一列。被拒的也在——那是攻擊偵測的證據，不是可以藏起來的失敗 */
+  .audit .row { display: flex; gap: 8px; align-items: baseline; padding: 5px 16px;
+                border-top: 1px solid var(--line); font-size: 11.5px; line-height: 1.45; }
+  .audit .act { flex: none; min-width: 42px; font-weight: 600; }
+  .audit .act.allow { color: #6fbf73; } .audit .act.ask { color: #d9b44a; } .audit .act.deny { color: #e07070; }
+  .audit .who { color: var(--dim); flex: none; }
+  .audit .sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .audit .tx { color: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; flex: none; }
   .prof { border-bottom: 1px solid var(--line); }
   .prof[hidden] { display: none; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
@@ -425,6 +440,7 @@
     <details class="prof ws" id="ws" hidden></details>
     <details class="prof board" id="board" hidden></details>
     <details class="prof memo" id="memo" hidden></details>
+    <details class="prof audit" id="audit" hidden></details>
     <details class="prof" id="profile" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
@@ -770,6 +786,31 @@ async function memoAct(id, verb, nums) {
   for (const ms of [2500, 8000]) setTimeout(() => { memocard(id); roster(); }, ms);
 }
 
+// 金流稽核面板：這位員工的每一張請購單——放行的、找人的、【被拒的】——與結算結果。
+// 帳是 cogito 記的（.claw/audit/payments.jsonl），這裡只讀。被拒的一筆都不藏：
+// 「被拒絕的 intent 保持可觀測」是稽核與攻擊偵測的證據面。
+async function auditcard(id) {
+  const box = $('audit');
+  if (!id) { box.hidden = true; return; }
+  const r = await (await fetch(`/office/audit?agent=${encodeURIComponent(id)}&limit=30`)).json();
+  if (!r.ok || !r.items.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const rows = r.items.map(e => {
+    const d = e.decision || {}, i = e.intent || {};
+    const act = (d.action || '').toLowerCase();
+    const who = e.approver ? (e.approver === 'policy' ? '政策' : '人') : (e.error ? '—' : '');
+    const outcome = e.settled ? `✓ ${(e.tx_ref || '').slice(0, 14)}` : (e.error ? `✗ ${e.error}` : '');
+    return `<div class="row" title="${esc(d.reason || '')}">
+      <span class="act ${act}">${esc((d.action || '?').toUpperCase())}</span>
+      <span class="who">${esc(who)}</span>
+      <span class="sum">$${esc(i.max_amount || '?')} → ${esc(i.merchant || '?')}　<small>${esc(d.rule || '')}</small></span>
+      <span class="tx">${esc(outcome)}</span>
+    </div>`;
+  }).join('');
+  const denied = r.items.filter(e => (e.decision || {}).action === 'deny').length;
+  box.innerHTML = `<summary>💳 金流稽核<small>${r.items.length} 筆${denied ? `・被拒 ${denied}` : ''}</small></summary>` + rows;
+}
+
 // 名冊列右側那格：他在做什麼 ＋ 有什麼在等你。
 //
 // 兩條軸【刻意分開】：頭上的徽章一次只掛得下一件事（有優先序），名冊有位子並排——
@@ -1030,7 +1071,7 @@ function pick(id) {
   // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
   // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→
   // 573→245），看起來就是閃爍。讓面板先settle，feed 只需要重排一次。
-  Promise.all([profile(id), board(id), workspace(id, ''), memocard(id)]).then(feed);
+  Promise.all([profile(id), board(id), workspace(id, ''), memocard(id), auditcard(id)]).then(feed);
 }
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。
@@ -2209,9 +2250,21 @@ async function feed() {
       const m = r.approval_meta;
       if (m) {
         // 結構化版面：橋已把 approval.go 的樣板拆好欄位，這裡只負責排，不再靠 markdown
-        card.innerHTML = `<div class="ahead"><b>⚠️ 高危操作審批</b><span class="tool">${esc(m.tool)}</span>`
+        // 請購單：給核准的人看的是【policy 要簽的確切參數】，不是模型的理由（OWASP ASI09）。
+        // 欄位化＋理由附在下面，蓋章蓋的是欄位。解不出欄位就退回原文——看得到優先於排得漂亮。
+        const pay = m.payment;
+        const body = pay
+          ? `<div class="po">
+               <div class="po-row"><span>任務</span><b>${esc(pay.task)}</b></div>
+               <div class="po-row"><span>商家</span><b>${esc(pay.merchant)}</b></div>
+               <div class="po-row"><span>金額</span><b class="amt">$${esc(pay.amount)} ${esc(pay.asset)}</b></div>
+               <div class="po-row"><span>資源</span><b class="mono">${esc(pay.resource)}</b></div>
+               ${pay.rule ? `<div class="po-why">裁決 <code>${esc(pay.rule)}</code> — ${esc(pay.reason)}</div>` : ''}
+             </div>`
+          : `<pre class="code wrap"><code>${esc(apprParams(m.params))}</code></pre>`;
+        card.innerHTML = `<div class="ahead"><b>${pay ? '💳 請購單核准' : '⚠️ 高危操作審批'}</b><span class="tool">${esc(m.tool)}</span>`
           + `<span class="left" id="apprLeft"></span></div>`
-          + `<pre class="code wrap"><code>${esc(apprParams(m.params))}</code></pre>`
+          + body
           + `<div class="tid">任務 ID：${esc(m.task_id)}</div>` + btns;
         apprDeadline = r.approval_left == null ? null : Date.now() + r.approval_left * 1000;
         tickAppr();

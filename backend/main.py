@@ -916,7 +916,7 @@ async def tell_cogito_stop(aid: str) -> str:
             # 要等逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
             if aid in pending_approval:
                 await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
-                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+                              headers=cogito_headers("reject"))
                 log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
             r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "/stop"},
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
@@ -947,7 +947,7 @@ async def tell_cogito_reject(aid: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
             r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
-                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+                              headers=cogito_headers("reject"))
     except httpx.HTTPError as e:
         return f"（cogito 連不上：{type(e).__name__}——agent 那邊會等到逾時自動拒絕，結果一樣）"
     if r.status_code != 202:
@@ -1583,6 +1583,19 @@ def with_subcards(card: dict) -> dict:
 # ── Web 派工與回訊（cogito 的 office 平台，cmd/claw 設 COGITO_HTTP_ADDR/TOKEN 開啟）────
 COGITO_HTTP = os.environ.get("COGITO_HTTP", "")          # cogito HTTP 入口，如 http://localhost:8787
 COGITO_HTTP_TOKEN = os.environ.get("COGITO_HTTP_TOKEN", "")
+# 審批用的【第二把】鑰匙。cogito 把派工權與審批權分開：approve/reject 要帶 X-Approver-Token 才以
+# 審批身分進去，否則以派工者身分送進去會被 isAdmin 擋下。沒設就等於這個外殼沒有審批權——
+# 按核准會得到 cogito 的「🚫 只有管理員可以 approve/reject」，那是真話，不是 bug。
+COGITO_HTTP_APPROVER_TOKEN = os.environ.get("COGITO_HTTP_APPROVER_TOKEN", "")
+
+
+def cogito_headers(text: str = "") -> dict:
+    """送 cogito 的標頭。approve/reject 才帶審批鑰匙——派工不帶，兩把鑰匙各開一扇門。"""
+    h = {"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"}
+    verb = text.strip().split()[0].lower() if text.strip() else ""
+    if verb in ("approve", "reject") and COGITO_HTTP_APPROVER_TOKEN:
+        h["X-Approver-Token"] = COGITO_HTTP_APPROVER_TOKEN
+    return h
 APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot approval.go 的卡片開頭
 RESUME_NUDGE_PREFIX = "[系統] 先前因暫時性錯誤"            # core.go resumeNudge：斷點續跑的系統提示
 PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
@@ -1601,8 +1614,61 @@ def parse_approval(text: str) -> dict | None:
     if not m:
         return None
     t = APPROVAL_TIMEOUT_RE.search(text)
-    return {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
+    meta = {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
             "timeout_s": int(t.group(1)) * 60 if t else 300}
+    if pay := parse_payment_card(meta["params"]):
+        meta["payment"] = pay   # 外殼據此把卡排成請購單，而不是一段 JSON
+    return meta
+
+
+PAYMENT_CARD_RE = re.compile(
+    r"💳 請購單｜任務 (?P<task>[^｜]+)｜(?P<merchant>[^｜]+)｜\$(?P<amount>[\d.]+) (?P<asset>\S+)｜(?P<resource>\S+)"
+    r"(?:\s*裁決：(?P<rule>[^（(]+)[（(](?P<reason>.*?)[）)])?", re.S)
+
+
+def parse_payment_card(params: str) -> dict | None:
+    """把 request_payment 的請購單一行解成欄位。解不出來回 None——退回原文渲染，看得到永遠優先於排得漂亮。
+
+    給核准的人看的必須是【policy 要簽的確切參數】（任務／商家／金額／資源），不是模型的自然語言理由
+    ——OWASP ASI09「誤導性支付摘要誘導不安全核准」的解法就是欄位化。理由附在下面，蓋章蓋的是欄位。
+    """
+    m = PAYMENT_CARD_RE.search(params or "")
+    if not m:
+        return None
+    d = {k: (v or "").strip() for k, v in m.groupdict().items()}
+    return d
+
+
+# ── 金流稽核帳（read-only 投影）：cogito 每筆請購單的裁決都落在 <workspace>/.claw/audit/payments.jsonl，
+# 【含被拒的】。外殼只讀不寫——帳是 cogito 記的，橋若能改就不是稽核了。
+def audit_path() -> Path | None:
+    if not CHANNELS_DIR:
+        return None
+    return CHANNELS_DIR.parent / ".claw" / "audit" / "payments.jsonl"
+
+
+@app.get("/office/audit")
+def office_audit(agent: str = "", limit: int = 50):
+    """最近的支付稽核記錄（新的在前）。agent 留空＝全辦公室。"""
+    p = audit_path()
+    if p is None:
+        return {"ok": False, "error": "未設 COGITO_CHANNELS——不知道帳本在哪"}
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"ok": True, "items": [], "path": str(p)}   # 還沒有任何一筆：不是錯誤
+    items = []
+    for ln in reversed(lines):
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue            # 一行寫壞不擋整本
+        if agent and e.get("agent") not in (agent, f"office:{agent}"):
+            continue
+        items.append(e)
+        if len(items) >= max(1, min(limit, 500)):
+            break
+    return {"ok": True, "items": items, "path": str(p)}
 
 
 def clear_approval(aid: str) -> None:
@@ -2855,7 +2921,7 @@ async def office_dispatch(d: dict):
                 model_sent[aid] = "" if m == MODEL_RESET else m
                 _dirty = True
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
-                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+                              headers=cogito_headers(text))
     except httpx.HTTPError as e:
         return {"ok": False, "error": approve_hint(verb, f"cogito 入口連不上：{type(e).__name__}")}
     if r.status_code != 202:
