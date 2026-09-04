@@ -131,6 +131,11 @@
   .memo .acts button:hover { border-color: #6b7686; }
   .memo .bulk { padding: 8px 16px; display: flex; gap: 8px; align-items: center; }
   .memo .bulk .warn { color: var(--dim); font-size: 11px; margin-left: auto; }
+  /* 動作的回饋要出現在【按鈕旁邊】。先前只寫到 composer 的 hint——那在右欄最底下，
+     使用者在面板頂端按完根本看不到，失敗看起來就跟「按鈕沒反應」一模一樣（實際回報）。 */
+  .memo .say { padding: 6px 16px 8px; font-size: 11px; color: var(--dim); }
+  .memo .say.bad { color: #e07070; }
+  .memo .say.busy { opacity: .7; }
   .prof { border-bottom: 1px solid var(--line); }
   .prof[hidden] { display: none; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
@@ -702,7 +707,9 @@ async function roster() {
 // 這件事要在按之前就講，不要按了才發現。
 async function memocard(id) {
   const box = $('memo');
-  if (!id || !(agentsData[id]?.memo)) { box.hidden = true; return; }
+  if (!id) { box.hidden = true; return; }
+  // 以端點為準，不看 agentsData.memo：那份計數是 sweep 更新的，放行之後還會停在舊數字，
+  // 用它當守門會讓面板在「已經清空」時仍舊顯示、或在剛歸零時提早關掉。
   const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`)).json();
   if (!r.ok || !r.items.length) { box.hidden = true; return; }
   box.hidden = false;
@@ -717,6 +724,7 @@ async function memocard(id) {
       </span>` : ''}
     </div>`).join('');
   box.innerHTML = `<summary>💡 待審記憶提案<small>${r.items.length} 條</small></summary>`
+    + `<div class="say" id="memoSay"></div>`
     + (r.can_apply
         ? `<div class="bulk">
              <button onclick="memoAct('${id}', 'apply', [])">全部放行</button>
@@ -732,15 +740,34 @@ async function memoAct(id, verb, nums) {
   // 整批操作要先問一聲：33 條一次丟掉是回不來的。逐條就不問——那是使用者一條一條看過的判斷。
   if (!nums.length && !confirm(`確定要${verb === 'apply' ? '放行' : '丟棄'}全部提案嗎？`
                                + (verb === 'reject' ? '\n丟棄之後救不回來。' : ''))) return;
-  const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ verb, nums }),
-  })).json();
-  // cogito 是【非同步】收下的：這一刻檔案還沒改完，立刻重抓會拿到舊清單，
-  // 看起來像沒生效。所以只回報「送出去了」，數字等下一輪 sweep 自己對齊。
-  $('hint').textContent = r.ok
-    ? `已送出：${r.sent}——cogito 處理完清單就會更新`
-    : `送不出去：${r.error}`;
+  // 回饋一律寫在面板【自己】的狀態列。先前只寫 composer 的 hint（右欄最底下），
+  // 使用者在面板頂端按完看不到，於是失敗看起來就是「按鈕沒反應」（實際回報）。
+  const say = (text, cls = '') => {
+    const el = $('memoSay');
+    if (el) { el.textContent = text; el.className = 'say ' + cls; }
+    $('hint').textContent = text;    // 底下那行也留著：正在看下面的人一樣看得到
+  };
+  const btns = $('memo').querySelectorAll('button');
+  btns.forEach(b => b.disabled = true);      // 送出中別讓人連按——每按一次都是一道真的指令
+  say('送出中…', 'busy');
+  let r;
+  try {
+    r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verb, nums }),
+    })).json();
+  } catch (e) {
+    btns.forEach(b => b.disabled = false);
+    return say(`送不出去：${e}`, 'bad');
+  }
+  if (!r.ok) {
+    btns.forEach(b => b.disabled = false);
+    return say(`✗ ${r.error}`, 'bad');       // 失敗要顯眼：一條都沒動，別讓人以為成功了
+  }
+  // cogito 是【非同步】收下的（202）：這一刻檔案還沒改完，立刻重抓會拿到舊清單。
+  // 所以先講「處理中」，再排兩次重抓——真的改完了清單自己會少，不必猜要等多久。
+  say(`已送出 ${r.sent}——cogito 處理中，清單稍後更新`);
+  for (const ms of [2500, 8000]) setTimeout(() => { memocard(id); roster(); }, ms);
 }
 
 // 名冊列右側那格：他在做什麼 ＋ 有什麼在等你。
