@@ -453,6 +453,50 @@ def refresh_proposed(aid: str = "") -> None:
         memo_pending[a] = count_proposed(a)
 
 
+TIMER_STEPS = 8          # 素材是 8 格的餅圖（綠→黃→橘→紅），見 tools/make_emotes.py
+APPROVAL_DEFAULT_S = 300  # 沒解析到期限時的假設，與 office_report 的倒數同一個數字
+
+
+def approval_step(aid: str) -> int | None:
+    """審批倒數走到第幾格（0＝剛送來、7＝快逾時了）。沒在等審批就回 None。
+
+    格數【在橋算】而不是讓 Unity 自己倒數：這跟 office_report 的剩餘秒數是同一個
+    決定（見那裡的註解）——瀏覽器跟橋的時鐘不一定同步，倒數基準只能有一份。
+    兩邊各算一次的話，卡片上寫「剩 30 秒」而頭上的餅還是半滿，誰也不知道該信哪個。
+    """
+    if aid not in approval_at:
+        return None
+    total = approval_meta.get(aid, {}).get("timeout_s") or APPROVAL_DEFAULT_S
+    frac = (time.time() - approval_at[aid]) / total
+    return max(0, min(TIMER_STEPS - 1, int(frac * TIMER_STEPS)))
+
+
+approval_tick: dict[str, asyncio.Task] = {}   # aid -> 正在推倒數的那個任務
+
+
+async def tick_approval(aid: str) -> None:
+    """審批期間推著倒數徽章往前走。
+
+    一次性任務而不是丟進全域輪詢：格子的邊界時間算得出來，就睡到邊界再更新——
+    比每 N 秒醒來看一次準，也不會因為 sweep 週期（30 秒）比格寬（37 秒）接近而跳格。
+    審批一收（做了決定／逾時自動拒絕）迴圈條件就不成立，自己結束，不需要另一個清理者。
+    """
+    if (old := approval_tick.get(aid)) and not old.done():
+        return            # 同一個人重複收到審批訊息時，別養出第二個推倒數的任務
+    approval_tick[aid] = asyncio.current_task()
+    while (step := approval_step(aid)) is not None:
+        await sync_emote(aid)
+        if step >= TIMER_STEPS - 1:
+            await asyncio.sleep(15.0)   # 餅已經滿了，畫面不會再變——等收卡就好
+            continue
+        total = approval_meta.get(aid, {}).get("timeout_s") or APPROVAL_DEFAULT_S
+        nxt = approval_at[aid] + total * (step + 1) / TIMER_STEPS
+        # 下限只是防空轉，不該粗到把格子壓掉：期限短的審批（cogito 可以送「1 分鐘內無響應」）
+        # 一格才 7.5 秒，訂 1 秒沒事，但訂得再粗一點就會整段跳過。
+        await asyncio.sleep(max(0.05, nxt - time.time()))
+    approval_tick.pop(aid, None)
+
+
 def want_emote(aid: str) -> str:
     """這個人【現在】該掛什麼徽章。
 
@@ -463,7 +507,11 @@ def want_emote(aid: str) -> str:
     順序＝阻塞程度：等人決定 > 額度被擋 > 額度快滿 > 自己在空轉。
     """
     if aid in pending_approval:
-        return "wait"       # 藍問號：在等【你】回答，這是唯一需要人動手的狀態
+        # 等審批有期限（逾時自動拒絕），所以徽章講的不只是「在等你」，還有「剩多久」——
+        # 餅圖填滿＋轉紅同時編碼了進度與急迫。算不出期限才退回靜態的藍問號：
+        # 不知道剩多久就別畫一個看起來很確定的倒數。
+        step = approval_step(aid)
+        return f"timer_{step}" if step is not None else "wait"
     if r := rate_state.get(aid):
         return r            # alert 紅驚嘆號／warn 黃驚嘆號
     if aid in watering:
@@ -1567,7 +1615,8 @@ async def office_chat(ev: dict):
         busy.add(aid)
         work_last[aid] = time.monotonic()
         notify("roster", aid, alert="approval")   # 最需要抬頭的一件事：有人在等你決定
-        await sync_emote(aid)                    # 頭上掛問號：站在老闆房門口的人在等【你】
+        await sync_emote(aid)                    # 頭上掛倒數：站在老闆房門口的人在等【你】
+        asyncio.create_task(tick_approval(aid))  # 之後每過一格自己往前推
         await focus([aid], CAM_DECISION)          # 也是鏡頭的最高非手動級：球在老闆手上
         # 走到老闆房門口站著等（門口真的有人在等就原地等，不擠）。
         # 球在別人手上：講電話，不是站著發呆——但姿勢必須【走到之後】才擺，否則被走路動畫蓋掉。

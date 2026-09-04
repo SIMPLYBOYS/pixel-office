@@ -300,6 +300,15 @@ def run() -> None:
                     "• 參數: `{\"command\":\"rm -rf /tmp/x\"}`\n任務 ID: `T1`\n"
                     "👉 直接回復 `approve` / `reject` 即可。5 分鐘內無響應將自動拒絕。")
             c.post("/office/chat", json={"agent": "office:p07", "text": appr})
+            # 【倒數要真的被啟動】：光有 tick_approval 沒人叫它，徽章就會停在第 0 格
+            # 整整五分鐘——看起來像個靜態圖示，倒數的意義整個沒了。
+            for _ in range(50):
+                time.sleep(0.02)
+                if "p07" in main.approval_tick:
+                    break
+            assert "p07" in main.approval_tick, "審批開了卻沒人推倒數"
+            assert main.want_emote("p07").startswith("timer_"), main.want_emote("p07")
+
             # 「門口有人」的判斷要看【現在誰在等審批】，不是查 occupied——那張表從不釋放，
             # 只要有人曾經走到門口再也沒移動過，後面的人就永遠被幽靈擋住（實際踩到）。
             main.occupied["p19"] = main.BOSS_DOOR   # 老徐上次走到門口就沒再動過，但他沒在等審批
@@ -419,6 +428,7 @@ def run() -> None:
     steer_dispatch()
     status_emote()
     proposed_memory_badge()
+    approval_countdown_walks()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1215,7 +1225,7 @@ def status_emote() -> None:
         main.watering.discard(aid)
         main.pending_approval.pop(aid, None)
         try:
-            # ① 等審批 → 藍問號（在等【你】回答，唯一需要人動手的狀態）
+            # ① 等審批 → 靜態藍問號（【不知道期限】的情況：算不出剩多久就別畫倒數）
             assert main.want_emote(aid) == "", "前置條件：什麼事都沒有就不該掛徽章"
             main.pending_approval[aid] = "rm -rf /tmp/x"
             assert main.want_emote(aid) == "wait", main.want_emote(aid)
@@ -1245,6 +1255,27 @@ def status_emote() -> None:
             assert (m["action"], m["target"]) == ("emote", ""), \
                 f"狀態過了徽章沒收——這是最糟的一種假投影：{m}"
 
+            # ④-b 【知道期限就畫倒數】：餅圖填滿＋轉紅，同時講進度與急迫。
+            # 格數在橋算（跟 office_report 的剩餘秒數同一個基準）——兩邊各算一次，
+            # 就會出現「卡片說剩 30 秒、頭上的餅才半滿」這種誰也不能信的畫面。
+            main.pending_approval[aid] = "rm -rf /tmp/x"   # ③ 把它 pop 掉了，重新放回來
+            main.approval_at[aid] = time.time()
+            main.approval_meta[aid] = {"timeout_s": 800}
+            assert main.approval_step(aid) == 0, "剛送來要在第 0 格"
+            assert main.want_emote(aid) == "timer_0", main.want_emote(aid)
+            main.approval_at[aid] = time.time() - 400        # 走了一半
+            assert main.approval_step(aid) == 4, main.approval_step(aid)
+            main.approval_at[aid] = time.time() - 799        # 快逾時
+            assert main.approval_step(aid) == 7, main.approval_step(aid)
+            main.approval_at[aid] = time.time() - 9999       # 早就過期也不該爆出範圍
+            assert main.approval_step(aid) == 7, "超時要夾在最後一格，不能索引到不存在的圖"
+            main.approval_at.pop(aid, None)
+            main.approval_meta.pop(aid, None)
+            assert main.want_emote(aid) == "wait", "沒有期限資訊就退回靜態問號"
+            main.pending_approval.pop(aid, None)
+            # 這一段是純算式（want_emote/approval_step），不送指令——徽章早在 ④ 就收了，
+            # 去重會擋掉重送，在這裡等指令會直接卡死。
+
             # ⑤ 看板沒有身體，掛不上去（不能對著空氣送指令）
             asyncio.run(main.emote(main.KANBAN, "wait"))
             assert main.KANBAN not in main.emote_now, "看板不該有徽章"
@@ -1262,6 +1293,8 @@ def status_emote() -> None:
             assert not main.emote_now, "握手後沒清掉去重記憶，重整分頁徽章就回不來"
         finally:
             main.pending_approval.pop(aid, None)
+            main.approval_at.pop(aid, None)
+            main.approval_meta.pop(aid, None)
             main.rate_state.clear()
             main.watering.discard(aid)
             main.emote_now.clear()
@@ -1323,6 +1356,54 @@ def proposed_memory_badge() -> None:
             main.CHANNELS_DIR = old_ch
             main.memo_pending.clear()
             main.pending_approval.pop(aid, None)
+
+
+def approval_countdown_walks() -> None:
+    """倒數會【自己往前走】：格子邊界到了就換一格。
+
+    這條驗的是排程（tick_approval），不是算式（status_emote 已經驗過 approval_step）。
+    沒有它，徽章只會在開審批那一刻掛上去、然後整整五分鐘停在第 0 格——
+    看起來像個靜態圖示，倒數的意義整個沒了。全域 sweep 是 30 秒一輪，也比格寬還粗。
+
+    期限壓成 1.6 秒（8 格 × 0.2 秒），不然跑一輪要五分鐘。
+    """
+    sent: list[dict] = []
+
+    async def fake_send(cmd):
+        sent.append(cmd)
+        return True
+
+    async def drive():
+        aid = "p01"
+        main.pending_approval[aid] = "x"
+        main.approval_at[aid] = time.time()
+        main.approval_meta[aid] = {"timeout_s": 1.6}
+        main.emote_now.pop(aid, None)
+        t = asyncio.create_task(main.tick_approval(aid))
+        await asyncio.sleep(1.0)
+        # 收卡：迴圈條件不成立，任務自己結束（不需要另一個清理者——這也是這裡要驗的）
+        main.approval_at.pop(aid, None)
+        main.pending_approval.pop(aid, None)
+        await asyncio.wait_for(t, timeout=3)
+
+    old_send = main.send_cmd
+    main.send_cmd = fake_send
+    try:
+        asyncio.run(drive())
+    finally:
+        main.send_cmd = old_send
+        main.pending_approval.pop("p01", None)
+        main.approval_at.pop("p01", None)
+        main.approval_meta.pop("p01", None)
+        main.emote_now.pop("p01", None)
+
+    steps = [c["target"] for c in sent if c.get("action") == "emote"]
+    assert len(steps) >= 3, f"倒數沒有自己往前走，只送了 {steps}"
+    nums = [int(t.split("_")[1]) for t in steps if t.startswith("timer_")]
+    assert len(nums) == len(steps), f"送出的不全是倒數格：{steps}"
+    assert nums[0] == 0, f"要從第 0 格起：{nums}"
+    assert nums == sorted(nums), f"格數只能往前走，不能倒退：{nums}"
+    assert len(set(nums)) == len(nums), f"同一格不該重送（去重壞了）：{nums}"
 
 
 def caps_refresh() -> None:

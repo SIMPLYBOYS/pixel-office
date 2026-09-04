@@ -962,6 +962,30 @@ MonoBehaviour:
     frames:
     - {fileID: 21300000, guid: 2ac5c1b717dc5459f929bf1f8ea7ce60, type: 3}
     - {fileID: 21300000, guid: 19f1d22ea9b264478925b4d4d6628e0a, type: 3}
+  - name: timer_0
+    frames:
+    - {fileID: 21300000, guid: 3834b8e6244cc413a87ad5a046c0ebb5, type: 3}
+  - name: timer_1
+    frames:
+    - {fileID: 21300000, guid: fe0eeffd3364d4933951a7f81f3eb33a, type: 3}
+  - name: timer_2
+    frames:
+    - {fileID: 21300000, guid: b78a5e64af18f483f8b73aa1a0ea3379, type: 3}
+  - name: timer_3
+    frames:
+    - {fileID: 21300000, guid: d2ad7841a0d2e4b10a83994296f5e442, type: 3}
+  - name: timer_4
+    frames:
+    - {fileID: 21300000, guid: adb58ebe5022847fbad1298a7162dacb, type: 3}
+  - name: timer_5
+    frames:
+    - {fileID: 21300000, guid: a8b86acd2b78e4824b2d75df39b21868, type: 3}
+  - name: timer_6
+    frames:
+    - {fileID: 21300000, guid: 5e9bb94814ed94d1d8facd32816af447, type: 3}
+  - name: timer_7
+    frames:
+    - {fileID: 21300000, guid: aaff076a9b2784b05bf827492e8ef6c6, type: 3}
   - name: wait
     frames:
     - {fileID: 21300000, guid: 8a5e9f50c92e2410bb66e1d895a365a0, type: 3}

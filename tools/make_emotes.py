@@ -38,6 +38,29 @@ NAMES = {
 }
 
 
+# ── 審批倒數計時器 ───────────────────────────────────────────────────────────
+# 來源是【另一張】表：UI_16x16.png。同樣是量出來的——
+#   綠→綠在列 8-9、綠→紅在列 10-11，每幀 16 寬 × 32 高（跟同名 GIF 尺寸一致）。
+# 我們要綠→紅那組：它同時編碼了進度（餅圖填滿）與急迫（轉紅），正好是倒數要講的兩件事。
+# 內容只佔格子的 y10-24，所以裁成 16×16——讓它跟其他徽章同尺寸、共用同一個掛點，
+# 不必為了它在 Unity 那邊多一組位置。
+TIMER_SRC = ("limezu/Modern_Interiors_v41.4/4_User_Interface_Elements/UI_16x16.png")
+TIMER_Y = 169     # 綠→紅那組的內容起點（列 10 的 y160 + 內容偏移 9），往上留 1px
+TIMER_N = 8
+
+
+def cut_timer(out: str) -> int:
+    px = read_png(TIMER_SRC)
+    for i in range(TIMER_N):
+        frame = crop(px, i * C, TIMER_Y, C, C)
+        if not any(p[3] for line in frame for p in line):
+            raise SystemExit(f"倒數第 {i} 幀是空的——UI_16x16 的格局跟預期不符，先重量一次")
+        # 檔名 timer_<第幾格>_0：載入端用【最後一個】底線切名字與幀號，
+        # 所以每一格各自是一組單幀徽章（由橋決定現在該顯示哪一格）。
+        write_png(f"{out}/timer_{i}_0.png", frame)
+    return TIMER_N
+
+
 def main() -> None:
     px = read_png(sys.argv[1] if len(sys.argv) > 1 else SRC)
     os.makedirs(OUT, exist_ok=True)
@@ -51,7 +74,8 @@ def main() -> None:
                                  "先重量一次再改 SLOTS")
             write_png(f"{OUT}/{name}_{i}.png", frame)
             n += 1
-    print(f"{n} 幀（{len(SLOTS)} 個圖示）→ {OUT}/")
+    n += cut_timer(OUT)
+    print(f"{n} 幀（{len(SLOTS)} 個圖示 + {TIMER_N} 格倒數）→ {OUT}/")
 
 
 if __name__ == "__main__":
