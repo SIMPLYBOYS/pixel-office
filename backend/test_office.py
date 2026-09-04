@@ -432,6 +432,7 @@ def run() -> None:
     roster_carries_badges()
     reject_always_works()
     cli_keeps_session()
+    proposed_review()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1374,6 +1375,77 @@ def proposed_memory_badge() -> None:
             main.CHANNELS_DIR = old_ch
             main.memo_pending.clear()
             main.pending_approval.pop(aid, None)
+
+
+def proposed_review() -> None:
+    """在外殼審記憶提案：列得出來、編號跟 cogito 一致、放行轉給 cogito 執行。
+
+    【編號一致是這條的重點】。放行是把 `apply memory <編號>` 轉過去給 cogito 跑的，
+    橋這邊算錯一個位移，放行的就是別條——而 UPDATE/DELETE 那種會改掉或刪掉既有記憶，
+    錯放比不放糟得多。所以文法要跟他們的 parseProposedMemory 對齊：
+    `## ` 是任務標題不算、有內容的 `- ` 才算、編號跨標題連號、縮排是附帶欄位。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ch = Path(tmp) / "channels"
+        (ch / "office_p07" / ".claw").mkdir(parents=True)
+        (ch / "office_p07" / ".claw" / "AGENTS.proposed.md").write_text(
+            "<!-- 這段註解裡的 - 假 bullet 不能算 -->\n"
+            "## 任務 A\n"
+            "- 第一條學到的事\n"
+            "  觸發：關鍵字\n"
+            "-\n"                                   # 空 bullet：cogito 也不算
+            "## 任務 B\n"
+            "- UPDATE old-slug 改成新的說法\n"
+            "  舊：本來的說法\n"
+            "- DELETE stale-slug\n", encoding="utf-8")
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, ch
+        old_http, main.COGITO_HTTP = main.COGITO_HTTP, ""
+        try:
+            items = main.parse_proposed("p07")
+            assert [it["n"] for it in items] == [1, 2, 3], f"編號要連號跨標題：{items}"
+            assert items[0]["task"] == "任務 A" and items[2]["task"] == "任務 B", items
+            assert items[0]["meta"] == ["觸發：關鍵字"], items[0]
+            assert items[1]["op"] == "update" and items[2]["op"] == "delete", \
+                "會動到既有記憶的要標出來——那不是多記一件事"
+            assert items[0]["op"] == "", items[0]
+            assert main.count_proposed("p07") == 3, "數量與清單必須同源"
+
+            with TestClient(main.app) as c:
+                r = c.get("/office/proposed/p07").json()
+                assert r["ok"] and len(r["items"]) == 3, r
+                assert r["can_apply"] is False, "沒有 cogito 就放行不了，要先講"
+                # 沒有 cogito → 一條都不能動，而且要明說（不是靜默失敗）
+                a = c.post("/office/proposed/p07", json={"verb": "apply", "nums": [1]}).json()
+                assert a["ok"] is False and "只有它能放行" in a["error"], a
+                # 編號越界要擋：轉過去就會放行到別條，或整批被 cogito 拒絕
+                main.COGITO_HTTP = "http://fake"
+                b = c.post("/office/proposed/p07", json={"verb": "apply", "nums": [9]}).json()
+                assert b["ok"] is False and "超出範圍" in b["error"], b
+                # verb 白名單：這條會被原樣拼進送給 cogito 的指令字串
+                v = c.post("/office/proposed/p07", json={"verb": "drop", "nums": []}).json()
+                assert v["ok"] is False, v
+
+                # 轉發成功：指令字串要正確（編號空＝全部）
+                sent = []
+
+                class _Rec(_FakeHTTP):
+                    async def post(self, url, **kw):
+                        sent.append(kw.get("json", {}).get("text"))
+                        return _FakeResp()
+
+                old_cl, main.httpx.AsyncClient = main.httpx.AsyncClient, lambda **kw: _Rec()
+                try:
+                    assert c.post("/office/proposed/p07",
+                                  json={"verb": "apply", "nums": [1, 3]}).json()["ok"]
+                    assert c.post("/office/proposed/p07",
+                                  json={"verb": "reject", "nums": []}).json()["ok"]
+                    assert sent == ["apply memory 1 3", "reject memory"], sent
+                finally:
+                    main.httpx.AsyncClient = old_cl
+        finally:
+            main.CHANNELS_DIR, main.COGITO_HTTP = old_ch, old_http
+            main.memo_pending.pop("p07", None)
 
 
 def cli_keeps_session() -> None:

@@ -113,6 +113,24 @@
   .wdbtn { flex: none; cursor: pointer; opacity: .55; font-size: 13px; }
   .wdbtn:hover { opacity: 1; }
   /* 角色設定：預設收合，展開狀態記在 localStorage（想一直開著的人不用每次點） */
+  /* 待審記憶提案：一條一列，動作貼右。刻意不做成表格——33 條的時候要能快速掃過去，
+     而掃的是【那句話】，不是編號或欄位。 */
+  .memo .row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 16px;
+               border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; }
+  .memo .row:hover { background: #1d212a; }
+  .memo .n { color: var(--dim); flex: none; min-width: 22px; text-align: right; }
+  .memo .txt { flex: 1; min-width: 0; }
+  .memo .why { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  /* 會動到既有記憶的（UPDATE/DELETE）要看得出來：那不是「多記一件事」，是改掉或刪掉庫裡的東西 */
+  .memo .row.destructive { border-left: 2px solid #d98a4a; }
+  .memo .op { color: #d98a4a; font-size: 10px; border: 1px solid #4a3a28; border-radius: 4px;
+              padding: 0 4px; margin-right: 4px; }
+  .memo .acts { flex: none; display: flex; gap: 4px; }
+  .memo .acts button { font-size: 11px; padding: 2px 7px; border-radius: 5px; cursor: pointer;
+                       border: 1px solid var(--line); background: #232936; color: var(--fg); }
+  .memo .acts button:hover { border-color: #6b7686; }
+  .memo .bulk { padding: 8px 16px; display: flex; gap: 8px; align-items: center; }
+  .memo .bulk .warn { color: var(--dim); font-size: 11px; margin-left: auto; }
   .prof { border-bottom: 1px solid var(--line); }
   .prof[hidden] { display: none; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
@@ -401,6 +419,7 @@
          抓到資料才會取消 hidden。 -->
     <details class="prof ws" id="ws" hidden></details>
     <details class="prof board" id="board" hidden></details>
+    <details class="prof memo" id="memo" hidden></details>
     <details class="prof" id="profile" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
@@ -664,13 +683,64 @@ async function roster() {
                onerror="this.replaceWith(Object.assign(document.createElement('span'),
                         {className:'face ph', textContent:'${esc(a.name[0])}'}))">
           <span class="who"><div class="name">${esc(a.name)}</div><div class="role">${esc(a.role)}</div></span>
-          <span class="state">${rosterState(a)}</span>
+          <span class="state">${rosterState(a, id)}</span>
         </div>`;
       }).join('')}`).join('') || '<div class="empty">後端未載入名冊</div>';
     updateComposer();
     status();
     titleAlert();   // 有人在等審批就寫進分頁標題——這條不受自動播放政策影響
   } catch { $('roster').innerHTML = '<div class="empty">後端未連線</div>'; }
+}
+
+// 待審記憶提案面板：點名冊上的 💡 就展開，逐條放行或丟棄。
+//
+// 為什麼要有：提案是 cogito 的 consolidate 寫下來的「這次學到什麼」，要人點頭才進長期
+// 記憶。先前【唯一】的入口是回聊天端下 `apply memory`——看板那 33 條就是這樣堆起來的：
+// 看板不是真人的對話頻道，你平常根本不會去那裡。
+//
+// 動作一律轉給 cogito 執行（橋不自己搬檔案），所以 cogito 沒在跑時是【按不動】的，
+// 這件事要在按之前就講，不要按了才發現。
+async function memocard(id) {
+  const box = $('memo');
+  if (!id || !(agentsData[id]?.memo)) { box.hidden = true; return; }
+  const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`)).json();
+  if (!r.ok || !r.items.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const rows = r.items.map(it => `
+    <div class="row ${it.op ? 'destructive' : ''}">
+      <span class="n">${it.n}.</span>
+      <span class="txt">${it.op ? `<span class="op">${esc(it.op.toUpperCase())}</span>` : ''}${esc(it.text)}
+        ${it.meta.length ? `<div class="why">${esc(it.meta.join('　'))}</div>` : ''}</span>
+      ${r.can_apply ? `<span class="acts">
+        <button onclick="memoAct('${id}', 'apply', [${it.n}])">放行</button>
+        <button onclick="memoAct('${id}', 'reject', [${it.n}])">丟棄</button>
+      </span>` : ''}
+    </div>`).join('');
+  box.innerHTML = `<summary>💡 待審記憶提案<small>${r.items.length} 條</small></summary>`
+    + (r.can_apply
+        ? `<div class="bulk">
+             <button onclick="memoAct('${id}', 'apply', [])">全部放行</button>
+             <button onclick="memoAct('${id}', 'reject', [])">全部丟棄</button>
+             <span class="warn">放行＝寫進長期記憶；丟棄不可復原</span>
+           </div>`
+        : `<div class="bulk"><span class="warn">cogito 沒在跑——提案存在它的工作區，`
+          + `只有它能放行。這裡只能看。</span></div>`)
+    + rows;
+}
+
+async function memoAct(id, verb, nums) {
+  // 整批操作要先問一聲：33 條一次丟掉是回不來的。逐條就不問——那是使用者一條一條看過的判斷。
+  if (!nums.length && !confirm(`確定要${verb === 'apply' ? '放行' : '丟棄'}全部提案嗎？`
+                               + (verb === 'reject' ? '\n丟棄之後救不回來。' : ''))) return;
+  const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verb, nums }),
+  })).json();
+  // cogito 是【非同步】收下的：這一刻檔案還沒改完，立刻重抓會拿到舊清單，
+  // 看起來像沒生效。所以只回報「送出去了」，數字等下一輪 sweep 自己對齊。
+  $('hint').textContent = r.ok
+    ? `已送出：${r.sent}——cogito 處理完清單就會更新`
+    : `送不出去：${r.error}`;
 }
 
 // 名冊列右側那格：他在做什麼 ＋ 有什麼在等你。
@@ -685,7 +755,15 @@ const BADGE_TEXT = {
   think: ['busy', '思考中'],
 };
 
-function rosterState(a) {
+function openMemo(id) {
+  pick(id);              // 面板是右欄的一部分，要先切到那個人才對得上
+  const box = $('memo');
+  box.hidden = false;
+  box.open = true;
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function rosterState(a, id) {
   // 等審批擺第一：它是唯一【非你不可】的狀態。timer_N 是倒數餅圖的格數（見橋的 want_emote）
   let dot, text;
   if (a.approval) [dot, text] = ['wait', '等審批'];
@@ -695,7 +773,10 @@ function rosterState(a) {
   const state = `<span class="dot ${dot}"></span>${esc(text)}`;
   // 提案數獨立顯示：這是【看板那 33 條】唯一露得出來的地方——它沒有身體，
   // 頭上掛不了徽章（emote() 對 KANBAN 直接 return）。
-  const memo = a.memo ? `<span class="memo" title="${a.memo} 條待審記憶提案（聊天端 apply memory 收）">💡${a.memo}</span>` : '';
+  const memo = a.memo
+    ? `<span class="memo" title="${a.memo} 條待審記憶提案——點開來逐條放行或丟棄"
+             onclick="event.stopPropagation(); openMemo('${id}')">💡${a.memo}</span>`
+    : '';
   return state + memo;
 }
 
@@ -922,7 +1003,7 @@ function pick(id) {
   // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
   // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→
   // 573→245），看起來就是閃爍。讓面板先settle，feed 只需要重排一次。
-  Promise.all([profile(id), board(id), workspace(id, '')]).then(feed);
+  Promise.all([profile(id), board(id), workspace(id, ''), memocard(id)]).then(feed);
 }
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。

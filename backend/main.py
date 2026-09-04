@@ -430,22 +430,42 @@ PROPOSED_FILE = ".claw/AGENTS.proposed.md"
 memo_pending: dict[str, int] = {}   # aid -> 待審條數（收工與 sweep 時刷新）
 
 
-def count_proposed(aid: str) -> int:
-    """數這位員工有幾條待審提案。讀不到一律當 0——沒設 COGITO_CHANNELS 就整條靜默關閉。
+def parse_proposed(aid: str) -> list[dict]:
+    """這位員工的待審提案，逐條帶編號。讀不到一律回空——沒設 COGITO_CHANNELS 就整條靜默關閉。
 
-    數法跟 cogito 的 parseProposedMemory 對齊：剝掉 HTML 註解後，每個 "- " 開頭
-    且有內容的行算一條（`## ` 是任務標題不算）。刻意不自己發明格式——
-    數字跟他們的 review 畫面對不上，比沒有數字更糟。
+    文法跟 cogito 的 parseProposedMemory 對齊：剝掉 HTML 註解後，`## ` 是任務標題、
+    每個有內容的 `- ` 是一條（編號從 1 連號、跨標題不重來）、縮排行是附帶欄位。
+    刻意不自己發明格式——【編號必須跟他們一致】，因為放行是把 `apply memory <編號>`
+    轉給 cogito 執行的。對不上就會放行到錯的那條，那比沒有這個功能糟得多。
+
+    UPDATE/DELETE 前綴＝會動到既有記憶（cogito 的 IsDestructive）。標出來讓人審的時候
+    知道這條不是「多記一件事」，而是要改掉或刪掉已經在庫裡的東西。
     """
     if not CHANNELS_DIR:
-        return 0
+        return []
     try:
         raw = (CHANNELS_DIR / f"office_{aid}" / PROPOSED_FILE).read_text(encoding="utf-8")
     except OSError:
-        return 0            # 沒這個檔＝這位員工還沒產生過提案，不是錯誤
+        return []           # 沒這個檔＝這位員工還沒產生過提案，不是錯誤
     raw = re.sub(r"<!--.*?-->", "", raw, flags=re.S)
-    return sum(1 for ln in raw.splitlines()
-               if (b := ln.strip()).startswith("- ") and b[2:].strip())
+    out: list[dict] = []
+    task = ""
+    for line in raw.splitlines():
+        indented = line[:1] in (" ", "\t")
+        b = line.strip()
+        if b.startswith("## "):
+            task = b[3:].strip()
+        elif b.startswith("- ") and b[2:].strip():
+            body = b[2:].strip()
+            op = next((v.lower() for v in ("UPDATE", "DELETE") if body.startswith(v + " ")), "")
+            out.append({"n": len(out) + 1, "task": task, "text": body, "op": op, "meta": []})
+        elif indented and b and out:
+            out[-1]["meta"].append(b)      # 觸發／舊值／理由那些附帶欄位
+    return out
+
+
+def count_proposed(aid: str) -> int:
+    return len(parse_proposed(aid))
 
 
 def refresh_proposed(aid: str = "") -> None:
@@ -1690,6 +1710,53 @@ def cli_caps_reply() -> dict | None:
     return {"ok": True, "tools": cli_caps["tools"], "skills": cli_caps.get("skills") or [],
             "mcp": cli_caps.get("mcp") or [],
             "source": f"Claude Code CLI（{name} 於 {cli_caps.get('at', '')} 回報）"}
+
+
+@app.get("/office/proposed/{aid}")
+def office_proposed(aid: str):
+    """這位員工待審的記憶提案。編號跟 cogito 的 `memory list` 一致（見 parse_proposed）。"""
+    if aid not in agents:
+        return {"ok": False, "error": "沒有這位員工"}
+    return {"ok": True, "agent": aid, "name": agents[aid].name,
+            "items": parse_proposed(aid),
+            # 沒有 cogito 就【放行不了】——先講清楚，別讓人按了才發現。
+            "can_apply": bool(COGITO_HTTP)}
+
+
+@app.post("/office/proposed/{aid}")
+async def office_proposed_act(aid: str, d: dict):
+    """放行／丟棄提案。實際動作【轉給 cogito 執行】，橋不自己搬檔案。
+
+    為什麼不自己做：放行不只是把那行搬走——cogito 那邊還要寫進 .claw/memory/、
+    處理 UPDATE/DELETE 的樂觀鎖比對、記自動放行的撤回窗。在這裡重寫一份，兩邊遲早
+    對不上，而對不上的後果是【改錯或刪錯既有記憶】。橋只做它該做的：把人的決定送過去。
+    """
+    verb = str(d.get("verb") or "")
+    if verb not in ("apply", "reject"):
+        return {"ok": False, "error": "verb 只能是 apply 或 reject"}
+    if aid not in agents:
+        return {"ok": False, "error": "沒有這位員工"}
+    nums = [int(n) for n in (d.get("nums") or []) if str(n).isdigit()]
+    total = len(parse_proposed(aid))
+    if bad := [n for n in nums if not 1 <= n <= total]:
+        return {"ok": False, "error": f"編號超出範圍（現有 1–{total}）：{bad}"}
+    if not COGITO_HTTP:
+        return {"ok": False, "error": "未設 COGITO_HTTP——提案存在 cogito 的工作區，"
+                                      "只有它能放行。這裡改不了。"}
+    cmd = f"{verb} memory" + ("".join(f" {n}" for n in nums) if nums else "")
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": cmd},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"cogito 連不上（{type(e).__name__}）——一條都沒動"}
+    if r.status_code != 202:
+        return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}——一條都沒動"}
+    # cogito 是非同步收下的（202），檔案不會在這一刻就改好。刻意【不】立刻回報新數字：
+    # 現在讀到的還是舊的，回一個「還沒變」的數字看起來像沒生效。等下一輪 sweep 對齊。
+    log_ev(aid, f"🧑‍💼 老闆{'放行' if verb == 'apply' else '丟棄'}了記憶提案"
+                f"（{'第 ' + '、'.join(map(str, nums)) + ' 條' if nums else '全部'}）")
+    return {"ok": True, "sent": cmd}
 
 
 @app.get("/office/caps")
