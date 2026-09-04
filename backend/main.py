@@ -906,6 +906,34 @@ async def tell_cogito_stop(aid: str) -> str:
     return "——已通知 cogito，它會在目前這一步跑完後停下"
 
 
+def approve_hint(verb: str, err: str) -> str:
+    """核准送不出去時，把【後果】跟【出路】講出來。
+
+    只講「連不上」不夠：使用者會以為再按一次就好，但 agent 那邊正阻塞著，逾時後會
+    自動拒絕——跟他按的相反。而卡刻意留著（收掉會讓人以為高危操作已經授權），
+    所以要順便告訴他怎麼脫身。
+    """
+    if verb != "approve":
+        return err
+    return (f"{err}——這個核准【沒有送到】agent 那邊，它會等到逾時自動拒絕。"
+            "卡留著不收（收掉會看起來像已經批准了）；要現在結束就按駁回或中止。")
+
+
+async def tell_cogito_reject(aid: str) -> str:
+    """把駁回轉給 cogito（best-effort）。回一句「實際發生了什麼」。"""
+    if not COGITO_HTTP:
+        return "（未設 COGITO_HTTP——畫面收掉了，agent 那邊會等到逾時自動拒絕）"
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+    except httpx.HTTPError as e:
+        return f"（cogito 連不上：{type(e).__name__}——agent 那邊會等到逾時自動拒絕，結果一樣）"
+    if r.status_code != 202:
+        return f"（cogito 回 {r.status_code}——agent 那邊會等到逾時自動拒絕，結果一樣）"
+    return ""
+
+
 async def adjourn(parent: str) -> None:
     """散會：把還站在白板前的人請回自己位子。
 
@@ -2639,6 +2667,24 @@ async def office_dispatch(d: dict):
             how = "（未設 COGITO_HTTP——畫面收掉了，但沒叫停任何東西）"
         await force_stop(aid, how)
         return {"ok": True, "stopped": True}
+    # 駁回跟中止同一個道理：它是使用者的【決定】，不是對上游的請求。所以先收卡再轉發，
+    # 送不到也照收——逾時的預設行為【本來就是自動拒絕】，結果一致，畫面早一步反映事實
+    # 不算說謊。這也保證審批卡永遠有出路：不會再出現「按了駁回卻收不掉」。
+    #
+    # 核准【刻意不比照】。審批擋的是高危操作：送不出去卻把卡收掉，使用者會以為
+    # rm -rf 已經授權執行了，實際上 agent 會等到逾時然後【自動拒絕】——那是相反的結果。
+    # 寧可卡留著、明講送不出去（見下面轉發失敗的訊息）。
+    if verb == "reject" and aid in pending_approval:
+        how = await tell_cogito_reject(aid)
+        clear_approval(aid)
+        await sync_emote(aid)                # 頭上的倒數餅圖跟著收
+        notify("agent", aid, alert="done")
+        await bubble(aid, "⚠ 駁回")
+        log_ev(aid, f"🧑‍💼 老闆駁回了這個操作{how}")
+        if desk := WORK_DESK.get(aid):       # 審批完回工位繼續
+            await goto(aid, desk)
+        return {"ok": True, "delivered": not how}
+
     if cli_mode and verb not in ("approve", "reject", "/stop", "/steer"):
         if eng := str(d.get("engine") or ""):
             engine_sent[aid] = eng
@@ -2703,9 +2749,9 @@ async def office_dispatch(d: dict):
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
     except httpx.HTTPError as e:
-        return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
+        return {"ok": False, "error": approve_hint(verb, f"cogito 入口連不上：{type(e).__name__}")}
     if r.status_code != 202:
-        return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}"}
+        return {"ok": False, "error": approve_hint(verb, f"cogito 回 {r.status_code}：{r.text[:120]}")}
     if verb == "/steer":
         # 投影：插話上工作串（卡片正開著，直接掛進去）＋泡泡。cogito 端下一輪生效。
         log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")

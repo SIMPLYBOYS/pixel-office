@@ -430,6 +430,7 @@ def run() -> None:
     proposed_memory_badge()
     approval_countdown_walks()
     roster_carries_badges()
+    reject_always_works()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1357,6 +1358,49 @@ def proposed_memory_badge() -> None:
             main.CHANNELS_DIR = old_ch
             main.memo_pending.clear()
             main.pending_approval.pop(aid, None)
+
+
+def reject_always_works() -> None:
+    """駁回一定收得掉卡；核准送不出去時【不收】卡，而且要講出後果。
+
+    這兩件事刻意【不對稱】，理由是安全而不是一致性：
+      - 駁回：逾時的預設行為本來就是自動拒絕，送不到結果也一樣，所以照收卡。
+        這保證審批永遠有出路——先前 cogito 沒在跑時按駁回毫無反應（實際踩到）。
+      - 核准：審批擋的是高危操作。送不出去卻把卡收掉，使用者會以為 rm -rf 已經
+        授權執行了，實際上 agent 會逾時【自動拒絕】——那是相反的結果。
+    """
+    class _Down(_FakeHTTP):
+        async def post(self, url, **kw):
+            raise main.httpx.HTTPError("cogito 沒在跑")
+
+    old_client, main.httpx.AsyncClient = main.httpx.AsyncClient, lambda **kw: _Down()
+    old_http, main.COGITO_HTTP = main.COGITO_HTTP, "http://fake"
+    aid = "p08"
+    try:
+        with TestClient(main.app) as c:
+            # 【核准送不出去 → 卡留著】
+            main.pending_approval[aid] = "rm -rf /tmp/x"
+            main.approval_at[aid] = time.time()
+            r = c.post("/office/dispatch", json={"agent": aid, "text": "approve"}).json()
+            assert r["ok"] is False, r
+            assert "沒有送到" in r["error"] and "逾時" in r["error"], r["error"]
+            assert aid in main.pending_approval, \
+                "核准送不出去卻收了卡——使用者會以為高危操作已經授權執行"
+
+            # 【駁回一定收得掉】——即使 cogito 完全連不上
+            r = c.post("/office/dispatch", json={"agent": aid, "text": "reject"}).json()
+            assert r["ok"] is True, r
+            assert r.get("delivered") is False, "送不到就不該說送到了"
+            assert aid not in main.pending_approval, "駁回收不掉卡——審批就沒有出路了"
+            assert aid not in main.approval_at, "倒數也要一起收（漏一份就是下一個殘影）"
+    finally:
+        main.httpx.AsyncClient = old_client
+        main.COGITO_HTTP = old_http
+        main.pending_approval.pop(aid, None)
+        main.approval_at.pop(aid, None)
+        main.approval_meta.pop(aid, None)
+        main.emote_now.clear()
+        main.busy.discard(aid)
 
 
 def roster_carries_badges() -> None:
