@@ -104,6 +104,7 @@
   .badge.ok { color: var(--ok); }
   .badge.error, .badge.lost { color: #e07070; }
   .badge.superseded, .badge.note { color: var(--dim); }   /* 不是失敗也不是進行中：別搶眼 */
+.badge.stopped { color: #c9a227; }   /* 使用者自己喊停：沒做完，但不是壞掉——跟 ✗ 失敗分開 */
   /* 產出目錄：卡頭就給一個入口，不必展開才點得到 */
   .wdbtn { flex: none; cursor: pointer; opacity: .55; font-size: 13px; }
   .wdbtn:hover { opacity: 1; }
@@ -1252,7 +1253,7 @@ async function dispatch(text) {
                            engine: $('engineSel').value || null }),
   })).json();
   $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
-    : text.trim() === '/stop' ? '已請求中止——會等目前這一步跑完才停下 🛑' : '已交辦 ✓';
+    : text.trim() === '/stop' ? '已中止 🛑' : '已交辦 ✓';
   if (r.ok) { $('box').value = ''; loadModels(); feed(); }
 }
 
@@ -1279,7 +1280,7 @@ addEventListener('keydown', e => { if (e.key === 'Escape') cancelSend(); });
 const shortModel = id => String(id).replace(/^(claude|gpt|gemini)-/, '').replace(/-\d{8}$/, '');
 
 const BADGE = { working: '⏳ 進行中', ok: '✔ 已完成', error: '✗ 失敗', lost: '⚠ 失聯',
-                superseded: '↻ 已由續跑接手', note: '· 雜記' };
+                stopped: '🛑 已中止', superseded: '↻ 已由續跑接手', note: '· 雜記' };
 
 // 展開狀態：進行中的任務自動展開（要看得到即時進度），完成後【維持展開】——
 // 使用者往往還沒讀完就結束了。手動收起就尊重他；重新整理後歷史卡一律收合。
@@ -1806,8 +1807,8 @@ async function clearBoard() {
 function dayCounts(feed) {
   for (const box of feed.querySelectorAll(':scope > .daybox')) {
     const cards = box.querySelectorAll('.tcard');
-    const bad = [...cards].filter(c => c.querySelector('.badge')?.classList.contains('error')
-      || c.querySelector('.badge')?.classList.contains('lost')).length;
+    const bad = [...cards].filter(c => ['error', 'lost', 'stopped'].some(
+      k => c.querySelector('.badge')?.classList.contains(k))).length;
     box.querySelector('.cnt').innerHTML = `${cards.length} 件` +
       (bad ? ` <span class="bad">· ${bad} 未完成</span>` : '');
   }

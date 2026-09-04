@@ -114,9 +114,9 @@ def run() -> None:
             assert r["ok"] is False and "工作中" in r["error"]
             r = c.post("/office/dispatch", json={"agent": "p17", "text": "approve"}).json()
             assert r["ok"] is False and "COGITO_HTTP" in r["error"]
-            # /stop 同樣豁免——擋住中止等於沒有中止（工作中才需要它）
-            r = c.post("/office/dispatch", json={"agent": "p17", "text": "/stop"}).json()
-            assert r["ok"] is False and "COGITO_HTTP" in r["error"]
+            # /stop 也豁免這道防呆，但它【不會】停在這裡回錯——中止是使用者的決定，
+            # 一定收得掉（先前沒設 COGITO_HTTP 就回錯，卡片永遠開著）。整條行為在
+            # stop_always_works() 驗；這裡不按它，按了會收掉卡、後面的投影斷言就沒對象了。
 
             # tool → ▸ 泡；think/turn/result 不投影（靠順序驗證：夾在中間不該出現）
             post(c, agent="p17", kind="think", label="")
@@ -424,6 +424,7 @@ def run() -> None:
     clear_all()
     note_not_echoed()
     stop_clears_approval()
+    stop_always_works()
     dup_msg()
     sub_by_name()
     kanban()
@@ -763,8 +764,11 @@ def headcount() -> None:
         main.pending_approval["p01"] = "x"
         main.approval_src["p01"] = "office:p01"
         main.conv_npc.clear()
+        main.busy.add(main.KANBAN)   # 中止只在有事做的時候有意義（沒事做會直接回「沒有進行中的任務」）
         c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "/stop", "people": 2})
         assert sent[-1]["text"] == "/stop", sent[-1]
+        main.busy.discard(main.KANBAN)
+        main.stopped.discard(main.KANBAN)
         main.clear_approval("p01")
     main.COGITO_HTTP = ""
 
@@ -920,10 +924,99 @@ def stop_clears_approval() -> None:
             assert r["ok"], r
             assert sent == ["reject", "/stop"], f"要先駁回再中止，實際送出：{sent}"
             assert "p07" not in main.pending_approval, "審批卡沒收掉，畫面會一直卡在選擇上"
+            assert "p07" not in main.busy, "中止之後人就該放出來"
     finally:
         main.httpx.AsyncClient = old
         main.COGITO_HTTP = ""
         main.busy.discard("p07")
+
+
+def stop_always_works() -> None:
+    """中止是【使用者的意思表示】，按下去就一定結束——不管上游停不停得下來。
+
+    先前它被寫成「對上游的請求」：CLI 沒有行程時回一句「沒有進行中的 CLI 任務」什麼都
+    不做，cogito 連不上時直接回錯。兩種情況下卡片都永遠開著、人永遠 busy，唯一的出路是
+    等失聯保險五分鐘或去改 state 檔（實際回報：阿海一直在工作中，中止按不動）。
+
+    收得掉是一回事、有沒有真的叫停上游是另一回事：後者寫進工作串，不能混為一談。
+    """
+    def stop(c, aid):
+        return c.post("/office/dispatch", json={"agent": aid, "text": "/stop"}).json()
+
+    def card_of(c, aid):
+        return c.get(f"/office/report/{aid}").json()
+
+    with TestClient(main.app) as c:
+        # ① CLI 引擎、沒有行程可砍（卡片來自手打事件或上個行程留下的）
+        main.busy.discard("p05")
+        main.engine_sent["p05"] = main.ENGINE_CLI
+        post(c, agent="p05", kind="start", label="停不掉的任務")
+        assert "p05" in main.busy
+        r = stop(c, "p05")
+        assert r["ok"], f"沒有 CLI 行程也必須停得掉：{r}"
+        assert "p05" not in main.busy, "中止後人沒放出來"
+        card = card_of(c, "p05")
+        assert card["status"] == "stopped", f"卡片要收成【已中止】而不是失敗：{card['status']}"
+        evs = [e["text"] for e in card["timeline"]]
+        assert any("老闆中止" in t for t in evs), evs
+        # 誠實：沒有行程可砍就要講出來，不能讓人以為真的叫停了什麼
+        assert any("沒有進行中的 CLI 行程" in t for t in evs), evs
+
+        # ② 中止之後才到的收尾事件不該自相矛盾（砍掉行程的退出碼 -9 是我們自己造成的）
+        post(c, agent="p05", kind="done", label="error", detail="CLI 異常結束（退出碼 -9）")
+        card = card_of(c, "p05")
+        assert card["status"] == "stopped", f"收尾事件把中止蓋掉了：{card['status']}"
+        assert "異常結束" not in (card.get("report") or ""), card.get("report")
+        evs2 = [e["text"] for e in card["timeline"]]
+        assert not any("任務中斷" in t for t in evs2), f"中止之後又喊一次中斷：{evs2}"
+
+        # ③ cogito 引擎、cogito 連不上：照樣停得掉，但要說清楚沒叫停它
+        main.engine_sent.pop("p05", None)
+        class _Down(_FakeHTTP):
+            async def post(self, url, **kw):
+                raise main.httpx.HTTPError("cogito down")
+
+        main.COGITO_HTTP = "http://fake"
+        old_cli = main.httpx.AsyncClient
+        main.httpx.AsyncClient = lambda **kw: _Down()
+        try:
+            main.busy.discard("p12")
+            post(c, agent="p12", kind="start", label="cogito 掛了的任務")
+            r = stop(c, "p12")
+            assert r["ok"], f"cogito 連不上也必須停得掉：{r}"
+            assert "p12" not in main.busy
+            evs3 = [e["text"] for e in card_of(c, "p12")["timeline"]]
+            assert any("沒叫停它" in t for t in evs3), f"要誠實說沒叫停上游：{evs3}"
+        finally:
+            main.httpx.AsyncClient = old_cli
+            main.COGITO_HTTP = ""
+
+        # ④ 沒有 COGITO_HTTP 也能停（先前這條直接回錯，卡片就此永遠開著）
+        main.busy.discard("p07")
+        post(c, agent="p07", kind="start", label="沒設入口的任務")
+        r = stop(c, "p07")
+        assert r["ok"] and "p07" not in main.busy, r
+        assert card_of(c, "p07")["status"] == "stopped"
+
+        # ⑤ 【卡在但人不 busy】——上個行程留下的殘卡，先前唯一無解的情況：
+        # 畫面顯示進行中，中止卻說「沒有進行中的任務」。
+        post(c, agent="p08", kind="start", label="上個行程留下的")
+        main.busy.discard("p08")            # 模擬：卡還開著，busy 沒了
+        r = stop(c, "p08")
+        assert r["ok"], f"殘卡也要收得掉：{r}"
+        assert card_of(c, "p08")["status"] == "stopped"
+
+        # ⑥ 真的沒事做的人按中止：這時才該說「沒有進行中的任務」
+        main.busy.discard("p01")
+        post(c, agent="p01", kind="start", label="正常做完的任務")
+        post(c, agent="p01", kind="done", label="ok")
+        r = stop(c, "p01")
+        assert not r["ok"] and "沒有進行中的任務" in r["error"], r
+        for aid in ("p05", "p12", "p07", "p08", "p01"):
+            main.busy.discard(aid)
+        main.engine_sent.clear()
+        main.stopped.clear()
+        main.save_state()
 
 
 def cli_mode() -> None:

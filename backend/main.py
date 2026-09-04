@@ -725,6 +725,50 @@ def in_meeting(parent: str) -> bool:
     return started is not None and f.stat().st_mtime < started
 
 
+async def force_stop(aid: str, how: str) -> None:
+    """使用者按了中止 → 投影這邊【一定】收乾淨，不管上游停不停得下來。
+
+    中止是使用者的意思表示，不是一個對上游的請求。先前它被寫成請求：CLI 沒有行程時
+    只回一句「沒有進行中的任務」什麼都不做，cogito 連不上時直接回錯——兩種情況下
+    卡片都永遠開著、人永遠 busy，唯一的出路是等失聯保險五分鐘或去改 state 檔（實際回報）。
+
+    how＝上游到底發生了什麼（砍掉了／通知了／連不上），原話寫進工作串。收得掉是一回事，
+    「有沒有真的叫停」是另一回事，兩者不能混為一談——那正是投影誠實的分界。
+    """
+    stopped.add(aid)
+    log_ev(aid, f"🧑‍💼 老闆中止了任務{how}")
+    close_card(aid, "stopped")
+    clear_approval(aid)
+    await adjourn(aid)
+    reading.discard(aid)
+    release_work(aid)          # busy、委派、失聯計時一起收
+    notify("agent", aid, alert="error")
+    if aid in agents:
+        agents[aid].remember("工作任務被老闆中止了")
+    await bubble(aid, "⚠ 中斷")
+    if desk := WORK_DESK.get(aid):
+        await goto(aid, desk)   # 走位順便清掉看書／掏手機的姿勢
+
+
+async def tell_cogito_stop(aid: str) -> str:
+    """把中止轉給 cogito（best-effort）。回一句「實際發生了什麼」——收卡不等於叫得停。"""
+    try:
+        async with httpx.AsyncClient(timeout=5) as cl:
+            # 卡在審批時【先送駁回再送中止】：agent 這時阻塞在等審批，中止指令它根本讀不到，
+            # 要等逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
+            if aid in pending_approval:
+                await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+                log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
+            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "/stop"},
+                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
+    except httpx.HTTPError as e:
+        return f"（cogito 連不上：{type(e).__name__}——畫面收掉了，但沒叫停它）"
+    if r.status_code != 202:
+        return f"（cogito 回 {r.status_code}——畫面收掉了，但沒叫停它）"
+    return "——已通知 cogito，它會在目前這一步跑完後停下"
+
+
 async def adjourn(parent: str) -> None:
     """散會：把還站在白板前的人請回自己位子。
 
@@ -1196,6 +1240,7 @@ async def office_event(ev: dict):
     chatting = aid in chat_mode  # 這一輪是閒聊：不開卡、不走位、不冒任務泡
     if kind == "start":
         busy.add(aid)
+        stopped.discard(aid)   # 新任務＝上一次中止翻篇，別讓它吃掉這張卡的收尾
         notify("roster")
         if await is_chat(label) and last_report.get(aid):
             # 閒聊（「nice job」「辛苦了」）不是任務：不開卡、不起身走工位，
@@ -1243,6 +1288,13 @@ async def office_event(ev: dict):
         # 常不知道下一步怎麼操作）。card["report"] 只留最後一則，中間輪次的全文只有這裡。
         log_ev(aid, label)
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
+        # 使用者剛按過中止：卡已經收好了。這裡再走一次會把報告蓋成「CLI 異常結束
+        # （退出碼 -9）」——那個 -9 是【我們自己砍的】，把它寫成異常等於自己騙自己，
+        # 而且會再叮一聲、再記一行「任務中斷」，跟上一行自相矛盾。
+        if aid in stopped:
+            stopped.discard(aid)
+            release_work(aid)
+            return {"ok": True}
         if chatting and (desk := WORK_DESK.get(aid)):
             await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
         chat_mode.discard(aid)
@@ -1364,6 +1416,7 @@ def clear_approval(aid: str) -> None:
     approval_src.pop(aid, None)
     approval_meta.pop(aid, None)
     approval_at.pop(aid, None)
+stopped: set[str] = set()             # 剛被使用者按中止的人——收尾事件到達時別再喊一次「中斷」
 pending_note: dict[str, str] = {}     # npc id -> 等下一張任務卡開出來才掛上去的「老闆交辦」
 # npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
 # cogito 的審批是 ResolveByChannel 按頻道解析的，而這裡的 approve 一律送往 office:pXX，
@@ -2415,6 +2468,25 @@ async def office_dispatch(d: dict):
     # 引擎分流：CLI 模式不經過 cogito——它自己就是完整的 agent，橋只負責把它的事件
     # 轉成 office 事件（走位/泡泡/工作串/卡片全部共用同一條投影路徑）。
     cli_mode = engine_of(aid, str(d.get("engine") or "")) == ENGINE_CLI
+    # 中止在分流【之前】處理：兩種引擎共用同一條收尾，差別只在「怎麼叫停上游」。
+    # 這條路徑不准有任何 return False 的分支——中止按下去就得結束，這是使用者的決定。
+    if verb == "/stop":
+        card = last_report.get(aid)
+        # busy 沒了但卡還開著（上個行程留下的、手打事件開的）也要能收——那正是先前
+        # 唯一無解的情況：畫面顯示進行中，中止卻說「沒有進行中的任務」。
+        if aid not in busy and not (card and card["status"] == "working"):
+            return {"ok": False, "error": f"{agents[aid].name} 沒有進行中的任務"}
+        if proc := cli_procs.get(aid):
+            proc.kill()      # CLI 沒有優雅中止的入口，砍掉就是砍掉——done 由 finally 補
+            how = ""
+        elif cli_mode:
+            how = "（沒有進行中的 CLI 行程——直接收掉這張卡）"
+        elif COGITO_HTTP:
+            how = await tell_cogito_stop(aid)
+        else:
+            how = "（未設 COGITO_HTTP——畫面收掉了，但沒叫停任何東西）"
+        await force_stop(aid, how)
+        return {"ok": True, "stopped": True}
     if cli_mode and verb not in ("approve", "reject", "/stop", "/steer"):
         if eng := str(d.get("engine") or ""):
             engine_sent[aid] = eng
@@ -2445,12 +2517,6 @@ async def office_dispatch(d: dict):
         cli_want = "" if pick == MODEL_RESET else (pick or model_sent.get(aid) or agents[aid].model)
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
-    if cli_mode and verb == "/stop":
-        if proc := cli_procs.get(aid):
-            proc.kill()   # CLI 沒有「優雅中止」的入口，砍掉就是砍掉——done 由 finally 補
-            log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
-            return {"ok": True, "engine": ENGINE_CLI}
-        return {"ok": False, "error": "這位員工沒有進行中的 CLI 任務"}
     if cli_mode:
         return {"ok": False, "error": f"CLI 模式不支援「{verb}」——審批與插話是 cogito 的機制"}
     if not COGITO_HTTP:
@@ -2473,14 +2539,6 @@ async def office_dispatch(d: dict):
         text = with_repo(text, bound[0], repo["path"], bound[1])
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
-            # 中止時若正卡在審批：【先送駁回再送中止】。agent 這時阻塞在等審批，中止指令它根本
-            # 讀不到，要等五分鐘逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
-            # 語意上也對：要停掉整件事，那個高危操作當然不該放行。
-            if verb == "/stop" and aid in pending_approval:
-                await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
-                              headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
-                clear_approval(aid)
-                log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
             # model：員工的屬性（persona 的 model 欄位），跟任務一起送。空＝不動 cogito
             # 那邊現有的設定（可能是聊天端 `model` 指令設的），別無聲覆蓋人家的選擇。
             payload = {"agent": aid, "text": text}
@@ -2496,12 +2554,7 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": f"cogito 入口連不上：{type(e).__name__}"}
     if r.status_code != 202:
         return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}"}
-    if verb == "/stop":
-        # cogito 的 /stop 本來就吃得下（忙碌時照樣消費），這裡只補投影：泡泡＋工作串留痕。
-        # 真正收卡等 cogito 的 done 事件——中止要等目前這一步（模型呼叫或工具）跑完才生效。
-        log_ev(aid, "🧑‍💼 老闆要求中止這個任務")
-        await bubble(aid, "⚠ 中斷")
-    elif verb == "/steer":
+    if verb == "/steer":
         # 投影：插話上工作串（卡片正開著，直接掛進去）＋泡泡。cogito 端下一輪生效。
         log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
         await bubble(aid, "📨 插話")
