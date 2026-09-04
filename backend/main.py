@@ -2799,6 +2799,15 @@ def get_agents():
               "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
               "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
+              # 名冊也要看得到頭上那些徽章。理由不只是方便：
+              #   ① 看板【沒有身體】，它那份（實測 33 條待審提案，佔全部六成）在 3D 畫面上
+              #      根本掛不出來——emote() 對 KANBAN 直接 return；
+              #   ② 沒建 WebGL 時整個 3D 是空的，但 README 說好名冊照常運作。
+              # 來源跟徽章同一個 want_emote()，不另外發明一套判斷。
+              "badge": want_emote(aid),
+              # memo 另外給【數字】而不是只給 badge：頭上一次只掛得下一件事（有優先序），
+              # 名冊有位子並排——「他在等審批」跟「他還有 6 條提案沒人收」可以同時為真。
+              "memo": memo_pending.get(aid, 0),
               "npc": aid != KANBAN,   # False＝這張卡沒有身體（看板），前端不畫走位/位置
             "model": a.model,      # 設定值（空＝跟 cogito 啟動預設）；實際跑的那個看卡片
               "memory": list(a.memory)}
@@ -3033,6 +3042,9 @@ async def _startup() -> None:
     load_state()
     sync_souls()
     sync_agents()   # kanban 頻道的具名 agent（主持人才點得到名）
+    # 提案數要在【第一次開名冊之前】就是對的。只靠 sweep（30 秒一輪）的話，剛啟動那段
+    # 名冊會說「0 條」——那不是「還沒載入」，是一句錯的話（實際上看板就有 33 條）。
+    refresh_proposed()
     # watchdog 脫鉤 Unity：純 Web 派工（不開 Unity）失聯保險也要在
     global watchdog
     if watchdog is None or watchdog.done():

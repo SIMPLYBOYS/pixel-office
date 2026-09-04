@@ -38,6 +38,10 @@
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4150; flex: none; display: inline-block; }
   .dot.busy { background: var(--accent); margin-right: 5px; }
   .dot.wait { background: #e07070; margin-right: 5px; animation: blink 1.1s infinite; }
+  .dot.rate { background: #e0a050; margin-right: 5px; }   /* 額度：卡著但不是在等你決定 */
+  /* 待審提案：獨立於「他在做什麼」的另一條軸——是【等你】處理的東西，所以並排不互斥 */
+  .memo { font-size: 11px; color: #d9b44a; background: #2a2519; border-radius: 8px;
+          padding: 1px 6px; margin-left: 6px; flex: none; }
   @keyframes blink { 50% { opacity: .25; } }
   .mute { cursor: pointer; float: right; opacity: .7; }
   .mute:hover { opacity: 1; }
@@ -660,14 +664,39 @@ async function roster() {
                onerror="this.replaceWith(Object.assign(document.createElement('span'),
                         {className:'face ph', textContent:'${esc(a.name[0])}'}))">
           <span class="who"><div class="name">${esc(a.name)}</div><div class="role">${esc(a.role)}</div></span>
-          <span class="state">${a.approval ? '<span class="dot wait"></span>等審批'
-            : a.busy ? '<span class="dot busy"></span>工作中' : '<span class="dot"></span>'}</span>
+          <span class="state">${rosterState(a)}</span>
         </div>`;
       }).join('')}`).join('') || '<div class="empty">後端未載入名冊</div>';
     updateComposer();
     status();
     titleAlert();   // 有人在等審批就寫進分頁標題——這條不受自動播放政策影響
   } catch { $('roster').innerHTML = '<div class="empty">後端未連線</div>'; }
+}
+
+// 名冊列右側那格：他在做什麼 ＋ 有什麼在等你。
+//
+// 兩條軸【刻意分開】：頭上的徽章一次只掛得下一件事（有優先序），名冊有位子並排——
+// 「他在等審批」跟「他還有 6 條提案沒人收」可以同時為真，擠成一個就得丟掉一個。
+//
+// 狀態文字對著橋的 want_emote() 回來的 badge，不在這裡另外判斷一次（同一份真相）。
+const BADGE_TEXT = {
+  alert: ['rate', '額度卡住'],
+  warn:  ['rate', '額度快滿'],
+  think: ['busy', '思考中'],
+};
+
+function rosterState(a) {
+  // 等審批擺第一：它是唯一【非你不可】的狀態。timer_N 是倒數餅圖的格數（見橋的 want_emote）
+  let dot, text;
+  if (a.approval) [dot, text] = ['wait', '等審批'];
+  else if (BADGE_TEXT[a.badge]) [dot, text] = BADGE_TEXT[a.badge];
+  else if (a.busy) [dot, text] = ['busy', '工作中'];
+  else [dot, text] = ['', ''];
+  const state = `<span class="dot ${dot}"></span>${esc(text)}`;
+  // 提案數獨立顯示：這是【看板那 33 條】唯一露得出來的地方——它沒有身體，
+  // 頭上掛不了徽章（emote() 對 KANBAN 直接 return）。
+  const memo = a.memo ? `<span class="memo" title="${a.memo} 條待審記憶提案（聊天端 apply memory 收）">💡${a.memo}</span>` : '';
+  return state + memo;
 }
 
 // 鏈路健康度：畫面凍結時（WebGL 分頁被瀏覽器暫停，WS 還開著）明講，別讓人猜 NPC 為何不動

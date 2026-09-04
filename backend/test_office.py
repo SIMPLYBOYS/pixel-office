@@ -429,6 +429,7 @@ def run() -> None:
     status_emote()
     proposed_memory_badge()
     approval_countdown_walks()
+    roster_carries_badges()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1356,6 +1357,63 @@ def proposed_memory_badge() -> None:
             main.CHANNELS_DIR = old_ch
             main.memo_pending.clear()
             main.pending_approval.pop(aid, None)
+
+
+def roster_carries_badges() -> None:
+    """名冊列要帶得出徽章狀態——不然沒有 3D 畫面時它們全部不存在。
+
+    兩個具體的洞（都是實測出來的）：
+      ① 看板沒有身體，emote() 對它直接 return。它身上那 33 條待審提案（佔全部六成）
+         在辦公室畫面上一條都掛不出來，名冊是唯一露得出來的地方。
+      ② 沒建 WebGL 時 3D 是空的，但 README 說好「名冊和工作串照常運作」。
+
+    來源必須是同一個 want_emote()：名冊自己判斷一次的話，兩邊遲早各說各話。
+    """
+    with TestClient(main.app) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "waypoints", "agents": [],
+                                 "list": main.waypoint_list or ["chair_1"]}))
+        aid, kb = "p12", main.KANBAN
+        keep = dict(main.memo_pending)
+        main.pending_approval.pop(aid, None)
+        main.rate_state.clear()
+        main.watering.discard(aid)
+        try:
+            # 【啟動就要是對的】：只靠 30 秒一輪的 sweep，剛開的名冊會說「0 條」——
+            # 那不是還沒載入，是一句錯的話。TestClient 進來時 startup 已經跑過了。
+            assert main.memo_pending, "啟動時沒刷提案數，名冊頭 30 秒會說謊"
+
+            main.memo_pending[aid] = 0
+            d = c.get("/agents").json()
+            assert "badge" in d[aid] and "memo" in d[aid], f"名冊沒帶徽章欄位：{d[aid].keys()}"
+            assert d[aid]["badge"] == "", d[aid]["badge"]
+
+            # 【看板那 33 條】：沒有身體，但名冊要看得到
+            main.memo_pending[kb] = 33
+            d = c.get("/agents").json()
+            assert kb in d, "看板不在名冊裡，那這條就白做了"
+            assert d[kb]["npc"] is False, "前置條件：看板本來就沒有身體"
+            assert d[kb]["memo"] == 33, d[kb]
+            # 它掛不出 3D 徽章——這正是名冊要補的洞
+            asyncio.run(main.emote(kb, "idea"))
+            assert kb not in main.emote_now, "看板不該有 3D 徽章（沒有頭）"
+
+            # 【兩條軸並排】：他在等審批，同時還有提案沒人收——擠成一格就得丟掉一個
+            main.memo_pending[aid] = 6
+            main.pending_approval[aid] = "x"
+            d = c.get("/agents").json()
+            assert d[aid]["approval"] is True and d[aid]["memo"] == 6, d[aid]
+
+            # 【同一份真相】：badge 就是 want_emote 的輸出，名冊不另外判斷一次
+            main.pending_approval.pop(aid, None)
+            main.rate_state[aid] = "alert"
+            d = c.get("/agents").json()
+            assert d[aid]["badge"] == main.want_emote(aid) == "alert", d[aid]["badge"]
+        finally:
+            main.memo_pending.clear()
+            main.memo_pending.update(keep)
+            main.pending_approval.pop(aid, None)
+            main.rate_state.clear()
+            main.emote_now.clear()
 
 
 def approval_countdown_walks() -> None:
