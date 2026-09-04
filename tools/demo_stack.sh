@@ -29,19 +29,41 @@ LOGS=${LOGS:-"$HERE/.demo-logs"}; mkdir -p "$LOGS"
 SECRET=$(grep -E '^X402_MOCK_SECRET=' "$COGITO/.env" | cut -d= -f2- | tr -d '"'"'"' ' || true)
 SECRET=${SECRET:-demo}
 
+# 預檢：port 被佔就明講、不硬起。實測踩過——上一輪的 cogito 沒被殺乾淨還在 8787 上，新的 office
+# 入口 bind 失敗後【行程照樣活著】（main 是 <-ctx.Done() 撐著的），畫面上看不出任何異常。
+COGITO_ADDR=$(grep -E '^COGITO_HTTP_ADDR=' "$COGITO/.env" | cut -d= -f2- | tr -d '"'"'"' ' || true)
+COGITO_PORT=${COGITO_ADDR##*:}
+for port in 4021 "${COGITO_PORT:-8787}" 8123; do
+  if lsof -ti tcp:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "⛔ port $port 已被佔（PID $(lsof -ti tcp:"$port" -sTCP:LISTEN | tr '\n' ' ')）。先收掉：kill \$(lsof -ti tcp:$port)"; exit 1
+  fi
+done
+
+# 先 build 成 binary 再 exec：`go run` 會 fork 出真正的伺服器子行程，kill 只殺得到包裝、子行程變孤兒
+# ——乾跑實測 Ctrl-C 之後三個 port 全部還在。exec binary 讓 $! 就是伺服器本體。順便省掉上台時的編譯等待。
+BIN="$LOGS/bin"; mkdir -p "$BIN"
+echo "▶ go build（x402mock、claw）…"
+( cd "$COGITO" && go build -o "$BIN/x402mock" ./cmd/x402mock && go build -o "$BIN/claw" ./cmd/claw ) || { echo "⛔ go build 失敗"; exit 1; }
+
 pids=()
-cleanup() { echo; echo "收拾中…"; for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
+cleanup() {
+  echo; echo "收拾中…"
+  for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  sleep 1
+  for p in "${pids[@]:-}"; do kill -9 "$p" 2>/dev/null || true; done   # 不肯走的補一刀
+  wait 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
 echo "▶ x402mock  :4021  價格 \$$PRICE  → $LOGS/x402mock.log"
-( cd "$COGITO" && exec go run ./cmd/x402mock -addr 127.0.0.1:4021 -price "$PRICE" -secret "$SECRET" ) >"$LOGS/x402mock.log" 2>&1 &
+( cd "$COGITO" && exec "$BIN/x402mock" -addr 127.0.0.1:4021 -price "$PRICE" -secret "$SECRET" ) >"$LOGS/x402mock.log" 2>&1 &
 pids+=($!)
 
 echo "▶ cogito    office-only（Slack/TG 關）→ $LOGS/cogito.log"
 ( cd "$COGITO" && \
   SLACK_BOT_TOKEN= SLACK_APP_TOKEN= TELEGRAM_BOT_TOKEN= \
   LANGFUSE_BASE_URL= LANGFUSE_PUBLIC_KEY= LANGFUSE_SECRET_KEY= OTEL_EXPORTER_OTLP_ENDPOINT= \
-  exec go run ./cmd/claw ) >"$LOGS/cogito.log" 2>&1 &
+  exec "$BIN/claw" ) >"$LOGS/cogito.log" 2>&1 &
 pids+=($!)
 
 echo "▶ 橋        :8123  → $LOGS/bridge.log"
@@ -59,6 +81,7 @@ done
 echo
 grep -hE "x402mock\] 監聽" "$LOGS/x402mock.log" || echo "⚠ x402mock 還沒起來，看 $LOGS/x402mock.log"
 grep -hE "\[policy\] 支付|\[Slack\]|\[office\]" "$LOGS/cogito.log" || echo "⚠ cogito 還沒起來，看 $LOGS/cogito.log"
+if grep -q "HTTP 入口結束" "$LOGS/cogito.log"; then echo "⛔ cogito 的 office 入口沒綁上（見上行）——行程還活著但派工進不去，請 Ctrl-C 後處理"; fi
 grep -hE "Uvicorn running" "$LOGS/bridge.log" || echo "⚠ 橋還沒起來，看 $LOGS/bridge.log"
 if grep -qE "Socket Mode|Slack 服務已啟動|Telegram 長輪詢" "$LOGS/cogito.log"; then
   echo "⛔ cogito 連上了 Slack/Telegram——這不該發生，請回報"; fi
