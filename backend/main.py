@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 import time
 from collections import deque
 from pathlib import Path
@@ -2403,6 +2404,45 @@ def rate_limit_line(info: dict) -> str:
     return ""
 
 
+def cli_session_id(aid: str, cwd: Path) -> str:
+    """這位員工在這個工作目錄的【固定】session id。
+
+    為什麼要固定：CLI 每次派工都是一個新行程。沒有 --session-id 就等於每次都失憶——
+    使用者按了中止再下「繼續」，它根本不知道要繼續什麼，只好自己鑽研那兩個字（實際回報）。
+    cogito 那條本來就是一個頻道一條 session（磁碟上 office_p17 累積了 44 則、跨多個任務），
+    兩個引擎在同一個介面下行為不同、而使用者看不出來，比單純沒有記憶更糟。
+
+    【綁 cwd】是因為 Claude Code 的 session 是按專案目錄收納的
+    （~/.claude/projects/<cwd 編碼>/<id>.jsonl，實地確認過：office-p01 與
+    office-p01-shop-coupon 各自一個目錄）。所以連續性的粒度是「同一個人 × 同一個工作
+    目錄」——換工作 repo 會另起一條。這跟 cogito 的「一個頻道一條」有出入，但那是工具
+    的收納方式決定的，硬要跨目錄共用只會在 resume 時找不到。
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"pixffice/cli/{aid}/{cwd}"))
+
+
+# Claude Code 收納 session 的地方（<這裡>/<cwd 編碼>/<id>.jsonl）。認 CLAUDE_CONFIG_DIR：
+# 搬過 config 的人如果找不到檔案，每次派工都會被判成「沒有舊對話」→ 永遠重開一條。
+CLI_SESSION_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")) / "projects"
+
+
+def cli_session_args(aid: str, cwd: Path) -> list[str]:
+    """接回這位員工在這個目錄的對話：沒有就用固定 id 開一條，有就續上去。
+
+    【實測，不是猜的】--session-id 只負責【建立】。對已經存在的 id 再用一次會直接死：
+        Error: Session ID <id> is already in use.（退出碼 1）
+    所以兩種情況要用不同旗標，靠磁碟上有沒有那個 session 檔來判斷。
+
+    用 glob 搜 id 而不是自己拼目錄名：Claude Code 把 cwd 編碼成目錄
+    （/ 和 _ 都變成 -，非 ASCII 也是），這個規則沒有文件、拼錯就等於每次都重開一條
+    ——那正是這次要修的病。id 本身已經含了 cwd、全域唯一，直接搜它最穩；
+    session 檔被清掉時也會自動退回「開一條新的」，不會卡在 resume 失敗。
+    """
+    sid = cli_session_id(aid, cwd)
+    known = next(CLI_SESSION_DIR.glob(f"*/{sid}.jsonl"), None)
+    return ["--resume", sid] if known else ["--session-id", sid]
+
+
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "") -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
@@ -2423,7 +2463,8 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         return
     base.mkdir(parents=True, exist_ok=True)
     argv = [CLI_CMD, "-p", text, "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION]
+            "--permission-mode", CLI_PERMISSION,
+            *cli_session_args(aid, base)]   # 接回上一次的對話，「繼續」才有東西可繼續
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
     # 那是它的預設，不是我們該替它決定的事。
     if model:

@@ -431,6 +431,7 @@ def run() -> None:
     approval_countdown_walks()
     roster_carries_badges()
     reject_always_works()
+    cli_keeps_session()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1044,11 +1045,14 @@ def cli_mode() -> None:
     """
     import tempfile
     fake = """#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 # 把收到的 --model 原樣回報成 init 的 model——沒傳就報一個假的預設，
 # 這樣測試才分得出「有指定」與「用 CLI 自己的設定」
 argv = sys.argv[1:]
 picked = argv[argv.index("--model") + 1] if "--model" in argv else "cli-自己的預設"
+# 把收到的參數留下來：合約測試要確認 session 旗標【真的送到 CLI】，
+# 光驗 cli_session_args() 算得對，接線被拔掉一樣不會紅
+open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8").write(" ".join(argv) + chr(10))
 out = [
  {"type":"system","subtype":"init","model":picked,"cwd":"x",
   "tools":["Read","Edit","Bash","Task"],
@@ -1080,6 +1084,10 @@ for o in out:
         bin_.chmod(0o755)
         old_cmd, main.CLI_CMD = main.CLI_CMD, str(bin_)
         old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
+        argv_log = Path(tmp) / "argv.log"
+        os.environ["FAKE_ARGV_LOG"] = str(argv_log)
+        old_sess, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp) / "sessions"
+        main.CLI_SESSION_DIR.mkdir()
         main.engine_sent.clear()   # 這個是會持久化的：先前跑測試留下的殘值會讓斷言錯亂
         try:
             with TestClient(main.app) as c:
@@ -1103,6 +1111,12 @@ for o in out:
                         card = cur
                         break
                 assert card and card["status"] == "ok", card
+                # 【session 旗標要真的送出去】。第一次沒有舊對話 → --session-id 建立。
+                # 沒有它，每次派工都是全新行程、全新失憶——使用者下「繼續」時 agent
+                # 根本不知道要繼續什麼（實際回報）。
+                sent = argv_log.read_text(encoding="utf-8").splitlines()[-1]
+                sid = main.cli_session_id("p05", main.CHANNELS_DIR / "office_p05")
+                assert f"--session-id {sid}" in sent, f"argv 沒帶 session：{sent}"
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
@@ -1197,6 +1211,8 @@ for o in out:
                     main.REPOS_DIR = old_repos
         finally:
             main.CLI_CMD, main.CHANNELS_DIR = old_cmd, old_ch
+            main.CLI_SESSION_DIR = old_sess
+            os.environ.pop("FAKE_ARGV_LOG", None)
             main.busy.discard("p05")
             # engine_sent 會【持久化】：不 flush 的話，殘值留在 state 檔裡，
             # 下一個測試的 TestClient 啟動時 load_state 又把它讀回來（踩過：
@@ -1358,6 +1374,44 @@ def proposed_memory_badge() -> None:
             main.CHANNELS_DIR = old_ch
             main.memo_pending.clear()
             main.pending_approval.pop(aid, None)
+
+
+def cli_keeps_session() -> None:
+    """CLI 派工要接回上一次的對話——否則每次都是全新的行程、全新的失憶。
+
+    實際回報的症狀：中止之後下「繼續」，agent 完全不知道要繼續什麼，只好自己鑽研
+    那兩個字。根因不是中止，是【每一次】派工都沒有連續性；中止只是讓它現形。
+    cogito 那條本來就是一個頻道一條 session（磁碟上實測累積 30-44 則），
+    同一個介面下兩個引擎行為不同、使用者又看不出來，比單純沒有記憶更糟。
+
+    分兩種旗標是【實測】出來的，不是猜的：--session-id 只負責建立，對已存在的 id
+    再用一次會直接死（Error: Session ID ... is already in use.，退出碼 1）。
+    """
+    import tempfile
+    ch = Path("/ch/office_p05")
+    assert main.cli_session_id("p05", ch) == main.cli_session_id("p05", ch), "同人同目錄要穩定"
+    assert main.cli_session_id("p05", ch) != main.cli_session_id("p07", ch), "不同人不能撞"
+    # 換工作 repo＝換 cwd＝另一條。Claude Code 的 session 按專案目錄收納，
+    # 硬要跨目錄共用只會在 resume 時找不到（實地確認過目錄長相）。
+    assert main.cli_session_id("p05", ch) != main.cli_session_id("p05", ch / "repo")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp)
+        try:
+            sid = main.cli_session_id("p05", ch)
+            assert main.cli_session_args("p05", ch) == ["--session-id", sid], "沒有舊對話要用建立"
+            # 有 session 檔了 → 必須改用 --resume，再送 --session-id 會被 CLI 拒絕
+            proj = Path(tmp) / "-ch-office-p05"
+            proj.mkdir()
+            (proj / f"{sid}.jsonl").write_text("{}", encoding="utf-8")
+            assert main.cli_session_args("p05", ch) == ["--resume", sid], \
+                "有舊對話卻還用 --session-id——CLI 會回 already in use 直接掛掉"
+            # 檔案被清掉（使用者手動刪、或工具自己輪替）要能自己退回開新的，不能卡死
+            (proj / f"{sid}.jsonl").unlink()
+            assert main.cli_session_args("p05", ch) == ["--session-id", sid], \
+                "session 檔沒了還硬要 resume，那個員工就再也派不了工"
+        finally:
+            main.CLI_SESSION_DIR = old_dir
 
 
 def reject_always_works() -> None:
