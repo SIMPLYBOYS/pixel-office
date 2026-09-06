@@ -1614,61 +1614,8 @@ def parse_approval(text: str) -> dict | None:
     if not m:
         return None
     t = APPROVAL_TIMEOUT_RE.search(text)
-    meta = {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
+    return {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
             "timeout_s": int(t.group(1)) * 60 if t else 300}
-    if pay := parse_payment_card(meta["params"]):
-        meta["payment"] = pay   # 外殼據此把卡排成請購單，而不是一段 JSON
-    return meta
-
-
-PAYMENT_CARD_RE = re.compile(
-    r"💳 請購單｜任務 (?P<task>[^｜]+)｜(?P<merchant>[^｜]+)｜\$(?P<amount>[\d.]+) (?P<asset>\S+)｜(?P<resource>\S+)"
-    r"(?:\s*裁決：(?P<rule>[^（(]+)[（(](?P<reason>.*?)[）)])?", re.S)
-
-
-def parse_payment_card(params: str) -> dict | None:
-    """把 request_payment 的請購單一行解成欄位。解不出來回 None——退回原文渲染，看得到永遠優先於排得漂亮。
-
-    給核准的人看的必須是【policy 要簽的確切參數】（任務／商家／金額／資源），不是模型的自然語言理由
-    ——OWASP ASI09「誤導性支付摘要誘導不安全核准」的解法就是欄位化。理由附在下面，蓋章蓋的是欄位。
-    """
-    m = PAYMENT_CARD_RE.search(params or "")
-    if not m:
-        return None
-    d = {k: (v or "").strip() for k, v in m.groupdict().items()}
-    return d
-
-
-# ── 金流稽核帳（read-only 投影）：cogito 每筆請購單的裁決都落在 <workspace>/.claw/audit/payments.jsonl，
-# 【含被拒的】。外殼只讀不寫——帳是 cogito 記的，橋若能改就不是稽核了。
-def audit_path() -> Path | None:
-    if not CHANNELS_DIR:
-        return None
-    return CHANNELS_DIR.parent / ".claw" / "audit" / "payments.jsonl"
-
-
-@app.get("/office/audit")
-def office_audit(agent: str = "", limit: int = 50):
-    """最近的支付稽核記錄（新的在前）。agent 留空＝全辦公室。"""
-    p = audit_path()
-    if p is None:
-        return {"ok": False, "error": "未設 COGITO_CHANNELS——不知道帳本在哪"}
-    try:
-        lines = p.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {"ok": True, "items": [], "path": str(p)}   # 還沒有任何一筆：不是錯誤
-    items = []
-    for ln in reversed(lines):
-        try:
-            e = json.loads(ln)
-        except ValueError:
-            continue            # 一行寫壞不擋整本
-        if agent and e.get("agent") not in (agent, f"office:{agent}"):
-            continue
-        items.append(e)
-        if len(items) >= max(1, min(limit, 500)):
-            break
-    return {"ok": True, "items": items, "path": str(p)}
 
 
 def clear_approval(aid: str) -> None:

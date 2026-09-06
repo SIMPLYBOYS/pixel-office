@@ -433,7 +433,7 @@ def run() -> None:
     reject_always_works()
     cli_keeps_session()
     proposed_review()
-    payment_projection()
+    approver_key_separation()
     caps_refresh()
     rate_limit_wording()
     model_per_agent()
@@ -1449,16 +1449,9 @@ def proposed_review() -> None:
             main.memo_pending.pop("p07", None)
 
 
-def payment_projection() -> None:
-    """支付授權層在橋這端的三件事：審批鑰匙分開送、請購單解成欄位、稽核帳讀得出來（含被拒的）。
-
-    ① 派工權／審批權分離：只有 approve/reject 帶 X-Approver-Token，派工不帶。兩把鑰匙各開一扇門，
-       橋若把審批鑰匙也塞進派工請求，等於把兩把鑰匙綁在一起送出去。
-    ② 請購單欄位化：給核准的人看的是【policy 要簽的確切參數】，不是模型的理由（OWASP ASI09）。
-    ③ 稽核帳只讀、被拒的也列——那是攻擊偵測的證據，不是可以藏起來的失敗。
-    """
-    import tempfile
-    # ① 標頭
+def approver_key_separation() -> None:
+    """派工權／審批權分離在橋這端的半邊：只有 approve/reject 帶 X-Approver-Token，派工與中止不帶。
+    兩把鑰匙各開一扇門——橋若把審批鑰匙也塞進派工請求，等於把兩把鑰匙綁在一起送出去。"""
     old_tok, main.COGITO_HTTP_APPROVER_TOKEN = main.COGITO_HTTP_APPROVER_TOKEN, "approve-key"
     try:
         assert "X-Approver-Token" not in main.cogito_headers("看一下 repo"), "派工不該帶審批鑰匙"
@@ -1469,56 +1462,6 @@ def payment_projection() -> None:
         assert "X-Approver-Token" not in main.cogito_headers("approve"), "沒設鑰匙就不帶（不送空字串）"
     finally:
         main.COGITO_HTTP_APPROVER_TOKEN = old_tok
-
-    # ② 請購單解析（cogito request_payment 的一行格式）
-    card = ("⚠️ *高危操作審批請求*\nAgent 試圖執行：\n• 工具: `request_payment`\n"
-            "• 參數: `💳 請購單｜任務 T-0905-1030-ab12｜localhost:4021｜$1.000000 USDC｜http://localhost:4021/premium-data\n"
-            "裁決：cap（單筆 $1.000000 超過免審額度 $0.100000，要人核准）`\n任務 ID: `pay-T-0905-1030-ab12-n1`\n"
-            "👉 直接回復 `approve` / `reject` 即可。5 分鐘內無響應將自動拒絕。")
-    meta = main.parse_approval(card)
-    assert meta and meta["tool"] == "request_payment", meta
-    pay = meta.get("payment")
-    assert pay, f"請購單沒被解成欄位：{meta}"
-    assert pay["task"] == "T-0905-1030-ab12" and pay["merchant"] == "localhost:4021", pay
-    assert pay["amount"] == "1.000000" and pay["asset"] == "USDC", pay
-    assert pay["resource"] == "http://localhost:4021/premium-data" and pay["rule"] == "cap", pay
-    assert "免審額度" in pay["reason"], pay
-    # 不是請購單的卡維持原樣（沒有 payment 鍵）
-    plain = card.replace("💳 請購單｜任務 T-0905-1030-ab12｜localhost:4021｜$1.000000 USDC｜http://localhost:4021/premium-data\n裁決：cap（單筆 $1.000000 超過免審額度 $0.100000，要人核准）", '{"command":"rm -rf x"}')
-    assert "payment" not in (main.parse_approval(plain) or {}), "一般審批卡不該被當成請購單"
-
-    # ③ 稽核帳
-    with tempfile.TemporaryDirectory() as tmp:
-        ws = Path(tmp)
-        (ws / "channels").mkdir()
-        (ws / ".claw" / "audit").mkdir(parents=True)
-        rows = [
-            {"agent": "office:p19", "task_id": "T1", "intent": {"merchant": "localhost:4021", "max_amount": "0.050000"},
-             "decision": {"action": "allow", "rule": "auto", "reason": "小額"}, "approver": "policy", "settled": True, "tx_ref": "0xmockaaa"},
-            {"agent": "office:p19", "task_id": "T1", "intent": {"merchant": "evil.example", "max_amount": "0.050000"},
-             "decision": {"action": "deny", "rule": "merchant", "reason": "商家不在白名單"}, "settled": False},
-            {"agent": "office:p05", "task_id": "T2", "intent": {"merchant": "localhost:4021", "max_amount": "1.000000"},
-             "decision": {"action": "ask", "rule": "cap", "reason": "要人"}, "approver": "human:admin", "settled": True, "tx_ref": "0xmockbbb"},
-        ]
-        (ws / ".claw" / "audit" / "payments.jsonl").write_text(
-            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n壞掉的一行\n", encoding="utf-8")
-        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, ws / "channels"
-        try:
-            with TestClient(main.app) as c:
-                r = c.get("/office/audit").json()
-                assert r["ok"] and len(r["items"]) == 3, r
-                assert r["items"][0]["task_id"] == "T2", "新的在前"
-                r19 = c.get("/office/audit", params={"agent": "p19"}).json()
-                assert len(r19["items"]) == 2, r19
-                assert any(e["decision"]["action"] == "deny" for e in r19["items"]), \
-                    "被拒的那筆一定要列出來——那是證據，不是可以藏的失敗"
-                # 沒有帳本檔＝還沒有任何一筆，不是錯誤
-                (ws / ".claw" / "audit" / "payments.jsonl").unlink()
-                empty = c.get("/office/audit").json()
-                assert empty["ok"] and empty["items"] == [], empty
-        finally:
-            main.CHANNELS_DIR = old_ch
-
 
 def cli_keeps_session() -> None:
     """CLI 派工要接回上一次的對話——否則每次都是全新的行程、全新的失憶。
