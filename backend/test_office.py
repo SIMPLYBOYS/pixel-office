@@ -447,6 +447,7 @@ def run() -> None:
     office_guide()
     schedule_delivery()
     schedule_file_valid()
+    schedule_visible()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2092,6 +2093,10 @@ def schedule_jobs() -> None:
         assert sent == ["例行巡檢"], f"cogito 那條只該收到巡邏：{sent}"
         assert cli_sent == [("p19", "整理趨勢", True)], f"每日任務該走 CLI、且開新 session（靠檔案接續，不靠對話）：{cli_sent}"
         assert main.sched_running.get("p19", {}).get("job", {}).get("name") == "每日趨勢", "派出去的班表任務要記著，收工才知道要交付"
+        assert main.pending_note.get("p19", "").startswith("🗓 班表任務「每日趨勢」開跑"), "開跑那行要寄放到新卡，不是直接寫進上一張卡"
+        old_evs = [e["text"] for e in (main.last_report.get("p19") or {"events": []})["events"]]
+        assert not any("每日趨勢」開跑" in t for t in old_evs), "開跑那行掛到上一張卡的尾巴了"
+        main.pending_note.pop("p19", None)
         delivered = []
         old_deliver = main.deliver_job
 
@@ -2319,6 +2324,30 @@ def schedule_file_valid() -> None:
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
                 assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
+
+
+def schedule_visible() -> None:
+    """班表要在畫面上看得到：檔案卡列這個人的班表（何時、引擎、交付、上次），名冊知道誰有例行工作。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = Path(tmp) / "schedule.json"
+        sched.write_text(json.dumps([
+            {"name": "每日趨勢", "hour": 9, "engine": "cli", "agent": "p19", "text": "x", "deliver": {"file": "trend-{date}.md"}},
+            {"name": "週一巡檢", "hour": 10, "weekday": 0, "agent": "p07", "text": "x"}], ensure_ascii=False), encoding="utf-8")
+        old_file, main.SCHEDULE_FILE = main.SCHEDULE_FILE, sched
+        old_last = dict(main.sched_last); main.sched_last.clear(); main.sched_last["每日趨勢"] = "2026-09-07 15"
+        try:
+            with TestClient(main.app) as c:
+                main.sched_last.clear(); main.sched_last["每日趨勢"] = "2026-09-07 15"   # lifespan 會重載 state
+                p19 = c.get("/office/profile/p19").json()["schedule"]
+                assert p19 == [{"name": "每日趨勢", "when": "每天 09:00", "engine": "cli", "deliver": "trend-{date}.md", "last": "2026-09-07 15"}], p19
+                assert c.get("/office/profile/p07").json()["schedule"][0]["when"] == "週一 10:00"
+                assert c.get("/office/profile/p01").json()["schedule"] == [], "沒班表的人就是空的，不猜"
+                ag = c.get("/agents").json()
+                assert ag["p19"]["scheduled"] == 1 and ag["p07"]["scheduled"] == 1 and ag["p01"]["scheduled"] == 0, {k: v.get("scheduled") for k, v in ag.items()}
+        finally:
+            main.SCHEDULE_FILE = old_file
+            main.sched_last.clear(); main.sched_last.update(old_last)
 
 
 def full_stream() -> None:

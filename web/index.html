@@ -806,7 +806,9 @@ function rosterState(a, id) {
     ? `<span class="memo" title="${a.memo} 條待審記憶提案——點開來逐條放行或丟棄"
              onclick="event.stopPropagation(); openMemo('${id}')">💡${a.memo}</span>`
     : '';
-  return state + memo;
+  // 有例行工作的人：一眼看得出誰是有班表的員工；細節在檔案卡
+  const sched = a.scheduled ? `<span class="memo" title="${a.scheduled} 條班表——點開檔案卡看時間與交付">🗓</span>` : '';
+  return state + memo + sched;
 }
 
 // 鏈路健康度：畫面凍結時（WebGL 分頁被瀏覽器暫停，WS 還開著）明講，別讓人猜 NPC 為何不動
@@ -1303,6 +1305,18 @@ async function profile(id) {
     t.appendChild(el('b', k + '：'));
     t.appendChild(document.createTextNode(v));
     t.appendChild(document.createElement('br'));
+  }
+  // 班表：這個人有什麼例行工作。資料就是 schedule.json 與防重戳記，畫面不另存——
+  // 先前完全不在畫面上，老闆要知道誰幾點做什麼只能去讀檔。
+  if (r.schedule && r.schedule.length) {
+    t.appendChild(el('b', '🗓 班表：'));
+    for (const j of r.schedule) {
+      const bits = [j.when, j.name, j.engine ? j.engine.toUpperCase() : '依外殼引擎'];
+      if (j.deliver) bits.push('交付 ' + j.deliver);
+      bits.push(j.last ? '上次 ' + j.last.slice(5) + ' 時' : '還沒跑過');
+      t.appendChild(el('span', bits.map(esc).join(' · ')));
+      t.appendChild(document.createElement('br'));
+    }
   }
   if (r.soul) {
     const soul = el('div');

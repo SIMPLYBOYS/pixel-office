@@ -112,6 +112,10 @@ yahoo finance／marketwatch／nikkei asia（去掉早已停掉的 feeds.reuters.
 RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三則帶時間與連結，零拒絕），網域已放進 office profile 白名單。
 新增 `schedule_file_valid` 合約測試：員工存在、引擎認得、deliver 帶 {date}、名字不重複——人名打錯班表會靜默略過，這種錯不該等到 09:00。
 
+**班表上畫面（同日）**：先前班表完全不在 UI 上，老闆要知道誰幾點做什麼只能讀檔。現在檔案卡多一段「🗓 班表」
+（何時、名稱、引擎、交付檔、上次跑），名冊上有班表的人掛 🗓。資料仍只有 `schedule.json` 與防重戳記，畫面不另存。
+順手把「班表任務開跑」那行改走派工既有的寄放機制，掛在它開出的那張卡上，不再落在前一張卡的尾巴（卡 237 尾巴那行 239 的開跑就是這個 bug）。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`

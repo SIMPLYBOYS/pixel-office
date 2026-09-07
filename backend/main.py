@@ -1823,7 +1823,8 @@ def office_profile(aid: str):
     soul = Path(__file__).parent / "personas" / f"{aid}.md"
     return {"ok": True, "id": aid, **{k: a.persona.get(k, "") for k in
             ("name", "role", "team", "personality", "style", "habits")},
-            "soul": soul.read_text(encoding="utf-8") if soul.exists() else ""}
+            "soul": soul.read_text(encoding="utf-8") if soul.exists() else "",
+            "schedule": schedule_of(aid)}   # 班表是這個人的一部分：誰有例行工作、什麼時候、送去哪
 
 
 # ── 產出預覽：把任務卡的工作目錄唯讀開一個窗，讓圖片／PDF 直接在工作串裡看得到。
@@ -3062,6 +3063,23 @@ def load_schedule() -> list[dict]:
         return []
 
 
+WEEKDAYS = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+
+
+def schedule_of(aid: str, jobs: list[dict] | None = None) -> list[dict]:
+    """這位員工的班表摘要，給檔案卡與名冊看。畫面不另存一份：讀 schedule.json 與防重戳記就是全部事實。"""
+    out = []
+    for j in (load_schedule() if jobs is None else jobs):
+        if str(j.get("agent", "")) != aid or not isinstance(j.get("hour"), int):
+            continue
+        wd = j.get("weekday")
+        when = (WEEKDAYS[wd] if isinstance(wd, int) and 0 <= wd <= 6 else "每天") + f" {j['hour']:02d}:00"
+        d = j.get("deliver") if isinstance(j.get("deliver"), dict) else {}
+        out.append({"name": str(j.get("name", "")), "when": when, "engine": str(j.get("engine") or ""),
+                    "deliver": str(d.get("file") or ""), "last": sched_last.get(str(j.get("name", "")), "")})
+    return out
+
+
 async def run_due_jobs(now: time.struct_time) -> None:
     """weekday（0=週一；省略＝每天）＋hour 命中、這一小時還沒跑過 → 派工。job 可帶 engine（cli／cogito）。
 
@@ -3087,10 +3105,13 @@ async def run_due_jobs(now: time.struct_time) -> None:
         # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
         r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo"),
                                    "engine": job.get("engine"), "scheduled": True})
-        log_ev(aid, f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）" if r.get("ok")
-               else f"🗓 班表任務「{name}」派不出去：{r.get('error')}")
         if r.get("ok"):
+            # 這一刻新卡還沒開，直接 log_ev 會掛在上一張卡的尾巴（實測：卡 237 尾巴多了一行 239 的開跑）。
+            # 寄放著，等 start 開出任務卡再掛——跟老闆派工那行同一個機制。
+            pending_note[aid] = f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）"
             sched_running[aid] = {"job": job, "started": time.time()}   # 收工時據此交付（見 deliver_job）
+        else:
+            log_ev(aid, f"🗓 班表任務「{name}」派不出去：{r.get('error')}")   # 沒有卡會開，只能掛現在這張
 
 
 async def schedule_loop() -> None:
@@ -3116,8 +3137,10 @@ def get_events():
 
 @app.get("/agents")
 def get_agents():
+    jobs = load_schedule()   # 一次讀，七個人共用；名冊上要看得出誰是有例行工作的人
     return {
         aid: {"name": a.name, "role": a.persona.get("role", "員工"),
+              "scheduled": len(schedule_of(aid, jobs)),
               "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
               "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
