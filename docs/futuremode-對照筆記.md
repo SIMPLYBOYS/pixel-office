@@ -66,6 +66,22 @@ cogito，同一個人可以兩種都有；所以班表派工帶 `scheduled` 標�
 抓不到、只讀不改不 push。產物是 md 不是 html：員工隔天要**讀**它、老闆要 diff 它，md 兩件都順。
 CLI 吃訂閱額度、模型跟人設（Opus）；cwd 是老徐的頻道工作區，報告落在那裡，外殼工作區檔案面板打得開。
 
+**試跑（2026-09-07 13:16，hour 暫改成當下小時）**：班表一分鐘內點到老徐、走位與工作串照常、trending 頁抓到。
+但交付物沒落地，卡片卻標「✔ 任務完成」。根因**不在模型、不在班表**：
+
+- `~/.claude/settings.json` 把 `Write`／`Edit`／`git commit`／`git push` 放在 `permissions.ask`。ask 規則壓過
+  acceptEdits 模式、也壓過 `--allowedTools Write`（兩個目錄各測一次）。`-p` 沒有人能回答 ask ＝ 拒絕。
+  翻遍 p01／p05／p07／p19 的 CLI transcript：**CLI 路徑從來沒有成功寫過任何檔案**，這是第一個以檔案為交付物的任務才浮出來。
+- `api.github.com` 的 WebFetch 放行寫在 `~/.claude/settings.local.json`，Claude Code 不讀那個位置。
+- 全域 hook 指的 `check_main_branch.py` 哪個專案都沒有；每次 Write 留一筆非阻斷失敗（exit 127），無害但是死設定。
+
+**決定：員工用獨立的 Claude Code profile**（`CLAUDE_CONFIG_DIR=~/.claude-office`，橋 `.env` 設、子行程繼承）。
+員工是無人值守的 -p 行程，權限姿態本來就不該跟老闆本人互動用的一樣：那裡只有 allow（Write／Edit／WebSearch／
+github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env 與 ssh），**沒有 ask**——要問的事在無人值守下
+等於拒絕，寧可明講。代價：該 profile 要登入一次；員工的 CLI session 收在它底下，等於從新對話開始。
+
+**還開著的**：CLI 的 result 帶 `permission_denials`，橋現在忽略它，所以被擋的任務會標成完成——投影誠實的直接違反，待修。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`
