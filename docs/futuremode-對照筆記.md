@@ -43,12 +43,18 @@ cogito 另有**內建 cron**（`.claw/cron.json`，`internal/cron`）與 **`claw
 
 ## 二、行動清單（依「解真實缺口 × 成本」排序）
 
-### ① 班表支援「每天」—— ⬜ 待做
+### ① 班表支援「每天」—— ✅ 已完成（2026-09-07）
 
-`run_due_jobs` 只認 `weekday`＋`hour`：`job.get("weekday") != now.tm_wday`，欄位缺＝`None`＝永遠不命中，
-「每天」現在要寫七條。改成 **weekday 省略即每天**（`not in (None, now.tm_wday)`），一行。
-順手把 `schedule.json.example` 加一條每天的 GitHub trend 範例。
-驗紅：一條沒有 weekday 的 job 在改前不觸發、改後觸發。
+`run_due_jobs` 原本只認 `weekday`＋`hour`：欄位缺＝`None`＝永遠不命中，「每天」要寫七條。
+改成 **weekday 省略即每天**（`not in (None, now.tm_wday)`），一行；測試加一條沒有 weekday 的任務，
+驗過改前紅（`['例行巡檢']` 少了它）、改後綠。
+
+**第一張真班表**：老徐（p19）每天 09:00 整理 GitHub 趨勢，`backend/schedule.json`（範例同步在 example）。
+任務文字把 ②④ 的要求直接寫進去：先讀昨天的 `trend-<日期>.md`、兩條資料源交叉（`gh search repos` ＋
+`fetch_url` 抓 trending 頁）並在報告開頭講清楚都不是官方榜、抓不到就寫抓不到、只讀不改不 push。
+產物是 md 不是 html：員工隔天要**讀**它、老闆要 diff 它，md 兩件都順；外殼工作區檔案面板打得開。
+老徐走 cogito（人設沒指定 engine），向外查靠 Tavily 兩顆工具＋bash 的 `gh`，三者本機都在。
+每天一次 Opus 約 $0.3–0.5，嫌貴把 `p19.yaml` 的 model 改便宜的即可。
 
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 

@@ -2913,7 +2913,7 @@ def load_schedule() -> list[dict]:
 
 
 async def run_due_jobs(now: time.struct_time) -> None:
-    """weekday（0=週一）＋hour 命中、這一小時還沒跑過 → 派工。
+    """weekday（0=週一；省略＝每天）＋hour 命中、這一小時還沒跑過 → 派工。
 
     人在忙就【跳過這一輪】而不是排隊——班表任務是例行巡邏，錯過一輪下次照排；
     排隊反而會在他收工的瞬間搶走老闆正要派的活。跳過有留痕，不是靜默消失。
@@ -2924,7 +2924,7 @@ async def run_due_jobs(now: time.struct_time) -> None:
         name, aid = str(job.get("name", "")), str(job.get("agent", ""))
         if not name or aid not in agents or not str(job.get("text", "")).strip():
             continue
-        if job.get("weekday") != now.tm_wday or job.get("hour") != now.tm_hour:
+        if job.get("weekday") not in (None, now.tm_wday) or job.get("hour") != now.tm_hour:
             continue
         if sched_last.get(name) == stamp:
             continue

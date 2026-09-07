@@ -2053,27 +2053,30 @@ def schedule_jobs() -> None:
         sched = Path(tmp) / "schedule.json"
         now = time.localtime()
         sched.write_text(json.dumps([{"name": "巡邏", "weekday": now.tm_wday, "hour": now.tm_hour,
-                                      "agent": "p07", "text": "例行巡檢"}], ensure_ascii=False))
+                                      "agent": "p07", "text": "例行巡檢"},
+                                     # 沒有 weekday＝每天（老徐的每日趨勢就是這種）；欄位缺不能等於永遠不跑
+                                     {"name": "每日趨勢", "hour": now.tm_hour,
+                                      "agent": "p19", "text": "整理趨勢"}], ensure_ascii=False))
         old_file, main.SCHEDULE_FILE = main.SCHEDULE_FILE, sched
         main.sched_last.clear()
         main.COGITO_HTTP = "http://fake"
         old_client = main.httpx.AsyncClient
         main.httpx.AsyncClient = lambda **kw: _Rec()
-        main.busy.discard("p07")
+        main.busy.difference_update({"p07", "p19"})
         # 到點：派一次（run_due_jobs 不需要 HTTP 伺服器——它自己呼叫 dispatch 函式）
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢"], sent
+        assert sent == ["例行巡檢", "整理趨勢"], f"每日任務（沒有 weekday）該在到點時派出：{sent}"
         # 同一小時再查：不重複
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢"], f"同一小時重複觸發：{sent}"
+        assert sent == ["例行巡檢", "整理趨勢"], f"同一小時重複觸發：{sent}"
         # 下一小時且人在忙：跳過＋工作串留痕
         main.sched_last.clear()
-        main.busy.add("p07")
+        main.busy.update({"p07", "p19"})
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢"], "忙碌時不該派"
+        assert sent == ["例行巡檢", "整理趨勢"], "忙碌時不該派"
         evs = [e["text"] for e in (main.last_report.get("p07") or {"events": []})["events"]]
         assert any("這輪跳過" in t for t in evs), evs
-        main.busy.discard("p07")
+        main.busy.difference_update({"p07", "p19"})
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.SCHEDULE_FILE = old_file
