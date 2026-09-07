@@ -2055,8 +2055,18 @@ def schedule_jobs() -> None:
         sched.write_text(json.dumps([{"name": "巡邏", "weekday": now.tm_wday, "hour": now.tm_hour,
                                       "agent": "p07", "text": "例行巡檢"},
                                      # 沒有 weekday＝每天（老徐的每日趨勢就是這種）；欄位缺不能等於永遠不跑
-                                     {"name": "每日趨勢", "hour": now.tm_hour,
+                                     {"name": "每日趨勢", "hour": now.tm_hour, "engine": "cli",
                                       "agent": "p19", "text": "整理趨勢"}], ensure_ascii=False))
+        # CLI 那條樁掉：記下「派給誰、派了什麼」就好，不真的起 claude
+        cli_sent: list[tuple[str, str]] = []
+
+        def fake_cli(aid, text, cwd=None, model=""):
+            cli_sent.append((aid, text))
+            async def _noop(): pass
+            return _noop()
+        old_cli, main.run_cli_task = main.run_cli_task, fake_cli
+        old_avail, main.cli_available = main.cli_available, lambda: True
+        main.engine_sent.pop("p19", None)
         old_file, main.SCHEDULE_FILE = main.SCHEDULE_FILE, sched
         main.sched_last.clear()
         main.COGITO_HTTP = "http://fake"
@@ -2065,18 +2075,21 @@ def schedule_jobs() -> None:
         main.busy.difference_update({"p07", "p19"})
         # 到點：派一次（run_due_jobs 不需要 HTTP 伺服器——它自己呼叫 dispatch 函式）
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢", "整理趨勢"], f"每日任務（沒有 weekday）該在到點時派出：{sent}"
+        assert sent == ["例行巡檢"], f"cogito 那條只該收到巡邏：{sent}"
+        assert cli_sent == [("p19", "整理趨勢")], f"每日任務（沒有 weekday、engine=cli）該走 CLI 派出：{cli_sent}"
+        assert "p19" not in main.engine_sent, "班表指定的引擎不是外殼的選擇，不該被記成 engine_sent"
         # 同一小時再查：不重複
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢", "整理趨勢"], f"同一小時重複觸發：{sent}"
+        assert sent == ["例行巡檢"] and len(cli_sent) == 1, f"同一小時重複觸發：{sent} {cli_sent}"
         # 下一小時且人在忙：跳過＋工作串留痕
         main.sched_last.clear()
         main.busy.update({"p07", "p19"})
         asyncio.run(main.run_due_jobs(now))
-        assert sent == ["例行巡檢", "整理趨勢"], "忙碌時不該派"
+        assert sent == ["例行巡檢"] and len(cli_sent) == 1, "忙碌時不該派"
         evs = [e["text"] for e in (main.last_report.get("p07") or {"events": []})["events"]]
         assert any("這輪跳過" in t for t in evs), evs
         main.busy.difference_update({"p07", "p19"})
+        main.run_cli_task, main.cli_available = old_cli, old_avail
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.SCHEDULE_FILE = old_file

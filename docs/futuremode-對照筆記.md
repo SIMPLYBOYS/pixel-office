@@ -49,12 +49,22 @@ cogito 另有**內建 cron**（`.claw/cron.json`，`internal/cron`）與 **`claw
 改成 **weekday 省略即每天**（`not in (None, now.tm_wday)`），一行；測試加一條沒有 weekday 的任務，
 驗過改前紅（`['例行巡檢']` 少了它）、改後綠。
 
-**第一張真班表**：老徐（p19）每天 09:00 整理 GitHub 趨勢，`backend/schedule.json`（範例同步在 example）。
-任務文字把 ②④ 的要求直接寫進去：先讀昨天的 `trend-<日期>.md`、兩條資料源交叉（`gh search repos` ＋
-`fetch_url` 抓 trending 頁）並在報告開頭講清楚都不是官方榜、抓不到就寫抓不到、只讀不改不 push。
-產物是 md 不是 html：員工隔天要**讀**它、老闆要 diff 它，md 兩件都順；外殼工作區檔案面板打得開。
-老徐走 cogito（人設沒指定 engine），向外查靠 Tavily 兩顆工具＋bash 的 `gh`，三者本機都在。
-每天一次 Opus 約 $0.3–0.5，嫌貴把 `p19.yaml` 的 model 改便宜的即可。
+**第一張真班表**：老徐（p19）每天 09:00 整理 GitHub 趨勢，`backend/schedule.json`（範例同步在 example），
+**走 CLI**（job 的 `engine: cli`）。engine 是這件例行事的屬性不是這位員工的：省錢的例行事走 CLI、要審批的走
+cogito，同一個人可以兩種都有；所以班表派工帶 `scheduled` 標記，dispatch 不把它記成「外殼最後選的引擎」
+（測試斷言 `engine_sent` 不動）。
+
+**CLI 在 `-p`＋`acceptEdits` 下實測（2026-09-07，haiku，各一次）**：
+- Bash 跑 `date`：直接執行、零拒絕，不需要 `--allowedTools`
+- WebFetch 抓 `github.com/trending`：直接執行、回了三個真 repo
+- Bash 跑 `gh search`：**被 CLI 自己的沙箱擋掉網路**（回「沙箱阻止了對 GitHub API 的網路訪問」）
+
+所以任務文字兩條資料源**都走 WebFetch**（trending 頁＋ `api.github.com/search/repositories`），明講不要用
+`gh`／`curl`。要讓 Bash 有網路是使用者在 `/sandbox` 裡放行 `api.github.com` 的決定，不在任務文字裡繞。
+
+任務文字把 ②④ 的要求直接寫進去：先讀昨天的 `trend-<日期>.md`、報告開頭講清楚都不是官方榜、抓不到就寫
+抓不到、只讀不改不 push。產物是 md 不是 html：員工隔天要**讀**它、老闆要 diff 它，md 兩件都順。
+CLI 吃訂閱額度、模型跟人設（Opus）；cwd 是老徐的頻道工作區，報告落在那裡，外殼工作區檔案面板打得開。
 
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
@@ -80,7 +90,7 @@ cogito 另有**內建 cron**（`.claw/cron.json`，`internal/cron`）與 **`claw
 
 ## 三、引擎怎麼選
 
-觸發統一用橋的班表；**執行引擎按員工選**（人設 `engine` 欄位）：
+觸發統一用橋的班表；**執行引擎按例行事選**（job 的 `engine` 欄位；沒指定才落到外殼的選擇／人設）：
 
 - 省錢、要免設定的抓網頁 → **CLI**
 - 要審批、記憶蒸餾、Slack 推播、政策裁決 → **cogito**

@@ -2807,7 +2807,8 @@ async def office_dispatch(d: dict):
         return {"ok": True, "delivered": not how}
 
     if cli_mode and verb not in ("approve", "reject", "/stop", "/steer"):
-        if eng := str(d.get("engine") or ""):
+        # 只記外殼的選擇；班表派工（scheduled）指定的引擎是那件事的屬性，不是老闆對這個人的決定
+        if (eng := str(d.get("engine") or "")) and not d.get("scheduled"):
             engine_sent[aid] = eng
             _dirty = True
         # repo 綁定要在【分流之前】做——先前這裡直接 return，於是 CLI 模式選了 repo
@@ -2913,7 +2914,7 @@ def load_schedule() -> list[dict]:
 
 
 async def run_due_jobs(now: time.struct_time) -> None:
-    """weekday（0=週一；省略＝每天）＋hour 命中、這一小時還沒跑過 → 派工。
+    """weekday（0=週一；省略＝每天）＋hour 命中、這一小時還沒跑過 → 派工。job 可帶 engine（cli／cogito）。
 
     人在忙就【跳過這一輪】而不是排隊——班表任務是例行巡邏，錯過一輪下次照排；
     排隊反而會在他收工的瞬間搶走老闆正要派的活。跳過有留痕，不是靜默消失。
@@ -2933,7 +2934,10 @@ async def run_due_jobs(now: time.struct_time) -> None:
         if aid in busy:
             log_ev(aid, f"🗓 班表任務「{name}」到點，但人在忙——這輪跳過，下次照排")
             continue
-        r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo")})
+        # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
+        # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
+        r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo"),
+                                   "engine": job.get("engine"), "scheduled": True})
         log_ev(aid, f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）" if r.get("ok")
                else f"🗓 班表任務「{name}」派不出去：{r.get('error')}")
 

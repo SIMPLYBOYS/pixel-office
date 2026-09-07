@@ -2,7 +2,8 @@
   {
     "name": "trend-daily-老徐",
     "hour": 9,
+    "engine": "cli",
     "agent": "p19",
-    "text": "每日 GitHub 趨勢整理（班表任務，不是老闆派的）。目標：找出過去 24 小時最受關注的開源專案與技術話題，寫成一份給工程團隊看的簡報。步驟：1) 用 bash 跑 date +%F 取今天日期、也算出昨天日期，不要猜；2) 先讀工作區裡昨天的 trend-<昨天>.md（沒有就跳過這步），今天要標出「新上榜／連續上榜／掉出」；3) 資料來源兩條交叉：bash 跑 gh search repos --sort stars --order desc --created \">=<昨天>\" --limit 30，以及 fetch_url 抓 https://github.com/trending?since=daily。只採一手來源，每條附 repo 連結；兩條都不是官方 trending 榜，報告開頭要講清楚資料是這樣來的；4) 輸出 trend-<今天>.md 到工作區根目錄：頂部三行 CTO 結論（哪個值得團隊看、哪個是噪音、為什麼），接著表格（repo、stars 或名次、一句話它解決誰的問題、來源），最後「與昨天相比」小節；5) 只讀不改任何 repo、不 push、不 clone 大型 repo。抓不到資料就在報告裡寫抓不到，不要編。"
+    "text": "每日 GitHub 趨勢整理（班表任務，不是老闆派的）。目標：找出過去 24 小時最受關注的開源專案與技術話題，寫成一份給工程團隊看的簡報。步驟：1) 用 Bash 跑 date +%F 取今天日期、也算出昨天日期，不要猜；2) 先讀目前目錄裡昨天的 trend-<昨天>.md（沒有就跳過這步），今天要標出「新上榜／連續上榜／掉出」；3) 資料來源兩條交叉，都用 WebFetch（不要用 gh 或 curl，Bash 在這裡沒有網路）：https://github.com/trending?since=daily 以及 https://api.github.com/search/repositories?q=created:>=<昨天>&sort=stars&order=desc&per_page=30 。只採一手來源，每條附 repo 連結；兩條都不是官方 trending 榜，報告開頭要講清楚資料是這樣來的；4) 在目前目錄寫 trend-<今天>.md：頂部三行 CTO 結論（哪個值得團隊看、哪個是噪音、為什麼），接著表格（repo、stars 或名次、一句話它解決誰的問題、來源），最後「與昨天相比」小節；5) 只讀不改任何 repo、不 push、不 clone。抓不到資料就在報告裡寫抓不到，不要編。"
   }
 ]
