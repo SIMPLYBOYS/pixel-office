@@ -80,6 +80,8 @@ CLI 吃訂閱額度、模型跟人設（Opus）；cwd 是老徐的頻道工作�
 github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env 與 ssh），**沒有 ask**——要問的事在無人值守下
 等於拒絕，寧可明講。代價：該 profile 要登入一次；員工的 CLI session 收在它底下，等於從新對話開始。
 
+**換 profile 後重跑（同日 13:36，班表觸發、CLI、Opus）**：兩條來源都抓到，還自己對前四名打 `api.github.com/repos` 核對星數，寫出 `trend-2026-09-07.md`（85 行）。報告開頭先講資料怎麼來、哪條是新建榜不是趨勢榜、哪些是刷星噪音——正是任務文字要的誠實。唯一被擋的是第一條複合 Bash（沙箱要求拆開），CLI 自己拆成三條重來。
+
 **還開著的**：CLI 的 result 帶 `permission_denials`，橋現在忽略它，所以被擋的任務會標成完成——投影誠實的直接違反，待修。
 
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
