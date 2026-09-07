@@ -616,6 +616,7 @@ def previews() -> None:
         (wd / "a.md").write_text("# hi\n", encoding="utf-8")
         (wd / "k.env").write_text("TOKEN=x\n", encoding="utf-8")   # 不在白名單
         (wd / "AGENTS.md").write_text("人設\n", encoding="utf-8")   # 橋自己同步的基礎設施，不是產出
+        (wd / "CLAUDE.md").write_text("人設\n", encoding="utf-8")   # 同一份人設的 Claude Code 檔名
         (wd / "i.png").write_bytes(base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
         (Path(tmp) / "outside.txt").write_text("secret\n", encoding="utf-8")
@@ -656,6 +657,7 @@ def previews() -> None:
             # 根目錄的 AGENTS.md 是橋同步進去的人設，不是產出——工作區面板要回答
             # 「這次做出了什麼」，混進基礎設施就是雜訊
             assert ("AGENTS.md", False) not in names, f"根目錄的 AGENTS.md 該被濾掉：{names}"
+            assert ("CLAUDE.md", False) not in names, f"根目錄的 CLAUDE.md 該被濾掉：{names}"
             assert ("k.env", False) in names, "白名單外的檔案要列出來（只是不給預覽）"
             assert next(e for e in root["entries"] if e["name"] == "k.env")["kind"] == "raw"
             # 改動時間：agent 邊做邊寫檔，哪些是這次任務剛產出的、哪些是上週留下來的，
@@ -689,18 +691,25 @@ def souls() -> None:
         aid = next(a for a in main.agents if (Path(main.__file__).parent / "personas" / f"{a}.md").exists())
         dst = Path(tmp) / f"office_{aid}" / "AGENTS.md"
 
-        assert main.sync_souls()["wrote"] >= 1          # 第一次：建檔
+        assert main.sync_souls()["wrote"] >= 2          # 第一次：建檔（兩個檔名）
         assert dst.read_text(encoding="utf-8").startswith(main.SOUL_MARK)
         assert main.agents[aid].persona["name"] in dst.read_text(encoding="utf-8")
+        # Claude Code 只讀 CLAUDE.md、不讀 AGENTS.md（實測）：沒有這份，走 CLI 的員工就是無人設
+        claude_md = dst.parent / "CLAUDE.md"
+        assert claude_md.exists(), "CLAUDE.md 沒同步——CLI 員工拿不到人設"
+        assert claude_md.read_text(encoding="utf-8") == dst.read_text(encoding="utf-8"), "兩個檔名內容該同源"
 
         n = main.sync_souls()                            # 第二次：內容相同就不重寫
         assert n["wrote"] == 0 and n["same"] >= 1
 
         mine = "# 我自己寫的專案指南\n不要動我。\n"        # 沒有標記＝人寫的
         dst.write_text(mine, encoding="utf-8")
+        claude_md.write_text(mine, encoding="utf-8")     # 兩個檔名同一套保護
         n = main.sync_souls()
         assert dst.read_text(encoding="utf-8") == mine, "手寫的 AGENTS.md 被覆蓋了"
-        assert n["skipped"] >= 1
+        assert claude_md.read_text(encoding="utf-8") == mine, "手寫的 CLAUDE.md 被覆蓋了"
+        assert n["skipped"] >= 2
+        claude_md.unlink()
 
         dst.unlink()                                     # 刪掉標記檔 → 下次照樣補回來
         assert main.sync_souls()["wrote"] >= 1

@@ -1862,7 +1862,7 @@ def resolve_in(base: Path, rel: str) -> Path | None:
 # 基礎設施檔：橋自己同步進工作區的東西，不是 agent 的產出。列檔的兩條路徑（卡片產出清單、
 # 工作區瀏覽）共用這個判斷——兩邊各寫一份的話，改一邊忘另一邊只是時間問題。
 # 只在【工作區根目錄】適用：子目錄裡的同名檔是 agent 自己寫的，那就是產出。
-INFRA_FILES = {"AGENTS.md"}
+INFRA_FILES = {"AGENTS.md", "CLAUDE.md"}   # ＝SOUL_FILES；那個常數定義在後面，這裡寫死避免順序依賴
 
 
 def infra_file(name: str) -> bool:
@@ -2553,7 +2553,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
-    人設也是免費的——AGENTS.md 已經同步在那個工作區，Claude Code 自己會讀。
+    人設也是免費的——CLAUDE.md 已經同步在那個工作區，Claude Code 會讀（它不讀 AGENTS.md，實測過）。
 
     cwd：綁了工作 repo 時直接【進到 worktree 裡】跑，而不是待在頻道工作區靠一句話
     叫它 cd 進去。理由是 Claude Code 會【自己判斷處境】——往上找 CLAUDE.md/AGENTS.md、
@@ -3015,12 +3015,15 @@ def get_agents():
 # 這邊補齊對稱）。notify() 兼作 dirty 標記，存檔器每 2 秒批次寫（原子寫入：tmp + rename）。
 STATE_FILE = Path(os.environ.get("OFFICE_STATE") or Path(__file__).parent / "office_state.json")
 
-# ── 人設落地：把 personas/<id>.md 同步進 cogito 各頻道的工作目錄當 AGENTS.md。
-# cogito 的 PromptComposer 會把工作目錄裡的 AGENTS.md 讀進系統提示，所以這一步讓角色設定
-# 【真的影響 agent 行為】，而不只是名冊上的一張名片。沒設 COGITO_CHANNELS 就整個不啟用——
-# 這是往別的 repo 的工作區寫檔，預設關閉。
+# ── 人設落地：把 personas/<id>.md 同步進各頻道的工作目錄，同一份內容寫兩個檔名。
+# cogito 的 PromptComposer 讀 AGENTS.md；Claude Code 讀 CLAUDE.md（含 cwd 的上層目錄，所以綁 repo
+# 在 worktree 裡跑也吃得到）、【不讀 AGENTS.md】——2026-09-07 探針實測：同目錄放兩份，CLI 逐字列出
+# CLAUDE.md、對 AGENTS.md 回「無」；老徐工作區直接問「你是誰」答「沒有這類資訊」。先前只寫 AGENTS.md，
+# 於是走 CLI 的員工歷來都是無人設狀態，只是沒人問過他們。這一步讓角色設定【真的影響 agent 行為】，
+# 而不只是名冊上的一張名片。沒設 COGITO_CHANNELS 就整個不啟用——這是往別的 repo 的工作區寫檔，預設關閉。
 CHANNELS_DIR = Path(os.environ["COGITO_CHANNELS"]).expanduser() if os.environ.get("COGITO_CHANNELS") else None
-SOUL_MARK = "<!-- office-persona:"   # 我們產生的檔案的第一行；手寫的 AGENTS.md 沒有它
+SOUL_MARK = "<!-- office-persona:"   # 我們產生的檔案的第一行；手寫的沒有它
+SOUL_FILES = ("AGENTS.md", "CLAUDE.md")   # 前者 cogito 讀、後者 Claude Code 讀；內容同源
 
 
 def agents_dir() -> Path | None:
@@ -3113,7 +3116,7 @@ def sync_agents() -> int:
 
 
 def sync_souls() -> dict[str, int]:
-    """回傳 {寫入, 無異動, 略過}。略過＝那個 AGENTS.md 是人寫的，我們不覆蓋。"""
+    """回傳 {寫入, 無異動, 略過}，兩個檔名合計。略過＝那個檔是人寫的，我們不覆蓋。"""
     n = {"wrote": 0, "same": 0, "skipped": 0}
     if CHANNELS_DIR is None:
         return n
@@ -3121,23 +3124,28 @@ def sync_souls() -> dict[str, int]:
         src = Path(__file__).parent / "personas" / f"{aid}.md"
         if not src.exists():
             continue
-        dst = CHANNELS_DIR / f"office_{aid}" / "AGENTS.md"
         want = soul_doc(aid, src.read_text(encoding="utf-8"))
+        for fname in SOUL_FILES:
+            _sync_one(CHANNELS_DIR / f"office_{aid}" / fname, want, n)
+    if any(n.values()):
+        print(f"人設同步 AGENTS.md＋CLAUDE.md：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
+    return n
+
+
+def _sync_one(dst: Path, want: str, n: dict[str, int]) -> None:
+    if True:
         if dst.exists():
             old = dst.read_text(encoding="utf-8")
             if not old.startswith(SOUL_MARK):   # ⚠ 保護：手寫的一律不動
                 n["skipped"] += 1
                 print(f"⚠ {dst} 不是由人設產生的（沒有標記），保留原檔不覆蓋")
-                continue
+                return
             if old == want:
                 n["same"] += 1
-                continue
+                return
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(want, encoding="utf-8")
         n["wrote"] += 1
-    if any(n.values()):
-        print(f"人設同步 AGENTS.md：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
-    return n
 
 
 def save_state() -> None:

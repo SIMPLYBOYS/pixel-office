@@ -31,7 +31,7 @@ Pixffice 現在的員工是**恆久物**（常駐、有人設、有記憶、有�
 | 沒人在場撞到高危操作 | 審批卡發到辦公室，沒人按就等到逾時自動拒絕（cogito `cmd/claw/cron.go` 自己的註解稱這是「碰巧安全」） | `acceptEdits`（`OFFICE_CLI_PERMISSION`）直接拒，不卡 |
 | 跟昨天比、累積觀點 | 頻道 session `office_<aid>` 累積＋記憶提案／`recall` | 固定 `--resume` session 累積（`cli_session_id` 綁 aid × cwd），會越滾越長 |
 | 成本 | API 計費；人設可指定便宜模型 | 吃訂閱額度（`rate_limit_event`），零 API 費 |
-| 人設 | AGENTS.md 同步在工作區 | 同一份，Claude Code 自己會讀 |
+| 人設 | 工作區 AGENTS.md（PromptComposer 讀） | 工作區 CLAUDE.md（Claude Code **不讀 AGENTS.md**，實測；修前 CLI 員工全是無人設） |
 | 交付 | 報告卡＋工作串＋`/office/wsfile` | 同一條投影（`office_event`） |
 
 ### 明確不走的兩條

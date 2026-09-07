@@ -32,9 +32,10 @@ cd backend
 出生點 + Unity **Tools → Build Characters**。
 
 設了 `COGITO_CHANNELS=<cogito>/workspace/channels` 時，橋啟動會把 `pXX.md` 同步成各頻道的
-`AGENTS.md`（cogito 的 PromptComposer 會讀進系統提示，人設才真的影響行為）。
+`AGENTS.md` **與** `CLAUDE.md`，內容同源：cogito 的 PromptComposer 讀前者、Claude Code（CLI 引擎）讀後者，
+人設才真的影響行為。CLI **不讀 AGENTS.md**（2026-09-07 實測），所以兩個檔名缺一不可。
 ⚠️ 覆寫保護：只有「檔案不存在」或「開頭是 `<!-- office-persona:` 標記」才會寫——手寫的
-`AGENTS.md` 一律保留並印警告。想自己維護某個頻道的檔案，把那兩行標記刪掉即可。
+一律保留並印警告。想自己維護某個頻道的檔案，把那兩行標記刪掉即可。
 
 泡泡中文字型（一次性）：`tools/get_font.sh` 取得 Noto Sans CJK TC（OFL 授權，16MB 已
 gitignore）放到 `unity/Assets/Resources/OfficeFont.otf`。編輯器匯入時只會把泡泡用字烘成
