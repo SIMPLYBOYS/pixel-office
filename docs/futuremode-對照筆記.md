@@ -84,6 +84,19 @@ github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env
 
 **已修（同日）**：CLI 的 result 帶 `permission_denials`（`[{tool_name, tool_use_id, tool_input}]`），橋先前忽略它。現在 `cli_done_events`：檔案類工具（Write／Edit）被擋 → 卡標 error、工作串多一行「⛔ 交付被權限擋下：Write×1」；其他工具被擋 → 維持 CLI 的判斷但留一行 ⚠（卡 234 的複合 Bash 就是這種，它自己拆開重來了）。測試用實抓的 result 形狀，驗過舊邏輯（只看 is_error）在 Write 被擋時標成 ok 而紅。卡 233 本身留在歷史裡不改——它是這條規則的來源。
 
+**同日第二輪調整（六項）**：
+
+1. 根 `workspace/AGENTS.md` 那份 6 月 demo 指南（「本專案以 Go 撰寫」「API 回傳含 code/message」）換成辦公室共通守則
+   （誠實／工作方式／邊界），來源 `backend/personas/office.md`；舊檔備份在 scratchpad。
+2. 共通守則同步到兩個引擎的全員座位：cogito 根 `AGENTS.md`（composer 先根後頻道，cogito `41af31f`）、
+   員工 CLI profile 的 `~/.claude-office/CLAUDE.md`（探針實測：cwd 無指示檔時仍逐字列得出三個小節）。同一套手寫保護。
+3. 老徐 26 條記憶歸檔 2 條（`memory-archive/`，可復原）：「API 回應必須統一格式」「後端用 Go」——兩條都是從那份 demo 指南推出來的。
+   其餘 24 條沒動；零命中是 recall 索引的問題，不是內容的問題。
+4. 兩個行程要重啟才吃到新碼（橋：cli_done_events、面板過濾、班表新 session、能力面板；cogito：composer 疊頻道 AGENTS.md）。
+5. 班表派的 CLI 任務每次開新 session（`fresh`）：例行事靠工作區檔案接續，不靠對話；老闆派的活照舊接回上一次。
+6. 能力面板帶 `?agent=`：走 CLI 的人看 CLI 回報的清單，其他人與不帶人＝cogito 的；CLI 沒回報過就明說，不拿 cogito 的清單充數。
+   外殼換人時跟著刷，標題標出是誰的。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`

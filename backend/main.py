@@ -1773,8 +1773,12 @@ async def office_proposed_act(aid: str, d: dict):
 
 
 @app.get("/office/caps")
-async def office_caps():
+async def office_caps(agent: str = ""):
+    """帶 agent＝回答「這位員工這一刻派工會用到什麼」：引擎逐件事選了之後，全員一份的清單
+    只回答得了「cogito 有什麼」。走 CLI 的人問 cogito 的清單，答的是另一個世界。"""
     global _caps_cache, _caps_at
+    if agent in agents and engine_of(agent) == ENGINE_CLI:
+        return cli_caps_reply() or {"ok": False, "error": f"{agents[agent].name} 走 CLI 引擎，但 CLI 還沒回報過能力（跑過一次任務就有）"}
     if _caps_cache and time.time() - _caps_at < CAPS_TTL:
         return _caps_cache
     # CLI 模式的能力來自 CLI 自己（init 事件帶的工具/技能/MCP）。cogito 沒開時它就是唯一
@@ -2549,7 +2553,7 @@ def cli_done_events(d: dict) -> list[dict]:
     return out
 
 
-async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "") -> None:
+async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False) -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
@@ -2568,9 +2572,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                             "detail": "未設 COGITO_CHANNELS，沒有工作區可跑"})
         return
     base.mkdir(parents=True, exist_ok=True)
+    # 老闆派的活接回上一次的對話（「繼續」才有東西可繼續）；班表的例行事每次開新的——
+    # 它靠工作區檔案接續（先讀昨天那份），不靠對話；固定 session 每天疊一次，老徐跑一次就 130K，
+    # 疊到 compact 只會讓它記得「做過趨勢報告」，不會因此更會做。
+    sess_args = ["--session-id", str(uuid.uuid4())] if fresh else cli_session_args(aid, base)
     argv = [CLI_CMD, "-p", text, "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION,
-            *cli_session_args(aid, base)]   # 接回上一次的對話，「繼續」才有東西可繼續
+            "--permission-mode", CLI_PERMISSION, *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
     # 那是它的預設，不是我們該替它決定的事。
     if model:
@@ -2860,7 +2867,7 @@ async def office_dispatch(d: dict):
             model_sent[aid] = "" if pick == MODEL_RESET else pick
             _dirty = True
         cli_want = "" if pick == MODEL_RESET else (pick or model_sent.get(aid) or agents[aid].model)
-        asyncio.create_task(run_cli_task(aid, text, wt, cli_want))
+        asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled"))))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
     if cli_mode:
         return {"ok": False, "error": f"CLI 模式不支援「{verb}」——審批與插話是 cogito 的機制"}
@@ -3132,6 +3139,40 @@ def sync_souls() -> dict[str, int]:
     return n
 
 
+GUIDE_SRC = Path(__file__).parent / "personas" / "office.md"   # 全辦公室共用守則的唯一來源
+
+
+def guide_doc(body: str) -> str:
+    return (f"{SOUL_MARK} office 由 backend/personas/office.md 產生。手改會在橋下次啟動時被覆蓋；\n"
+            f"     想自己維護這個檔案，把這兩行標記刪掉即可，橋就不會再動它。 -->\n\n"
+            f"# 辦公室共通守則\n\n{body.strip()}\n")
+
+
+def guide_targets() -> list[Path]:
+    """共通守則要放的兩個座位：cogito 讀共享根 workspace 的 AGENTS.md；Claude Code 讀 profile 目錄的 CLAUDE.md
+    （CLAUDE_CONFIG_DIR，員工 CLI 用的那個）。沒設的座位就不寫——寫到沒人讀的地方不算同步。"""
+    out: list[Path] = []
+    if CHANNELS_DIR is not None:
+        out.append(CHANNELS_DIR.parent / "AGENTS.md")
+    if cfg := os.environ.get("CLAUDE_CONFIG_DIR"):
+        out.append(Path(cfg).expanduser() / "CLAUDE.md")
+    return out
+
+
+def sync_office_guide() -> dict[str, int]:
+    """把共通守則同步到兩個引擎各自的全員座位。回傳 {寫入, 無異動, 略過}；略過＝那個檔是人寫的。
+    先前 cogito 根的 AGENTS.md 是 6 月的 demo 指南（「本專案以 Go 撰寫」），每個員工都吃到；CLI 那邊什麼都沒有。"""
+    n = {"wrote": 0, "same": 0, "skipped": 0}
+    if not GUIDE_SRC.exists():
+        return n
+    want = guide_doc(GUIDE_SRC.read_text(encoding="utf-8"))
+    for dst in guide_targets():
+        _sync_one(dst, want, n)
+    if any(n.values()):
+        print(f"共通守則同步（{len(guide_targets())} 個座位）：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
+    return n
+
+
 def _sync_one(dst: Path, want: str, n: dict[str, int]) -> None:
     if True:
         if dst.exists():
@@ -3245,6 +3286,7 @@ async def state_saver() -> None:
 async def _startup() -> None:
     load_state()
     sync_souls()
+    sync_office_guide()   # 共通守則：cogito 根 AGENTS.md ＋ 員工 CLI profile 的 CLAUDE.md
     sync_agents()   # kanban 頻道的具名 agent（主持人才點得到名）
     # 提案數要在【第一次開名冊之前】就是對的。只靠 sweep（30 秒一輪）的話，剛啟動那段
     # 名冊會說「0 條」——那不是「還沒載入」，是一句錯的話（實際上看板就有 33 條）。

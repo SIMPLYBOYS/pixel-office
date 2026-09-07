@@ -37,6 +37,10 @@ cd backend
 ⚠️ 覆寫保護：只有「檔案不存在」或「開頭是 `<!-- office-persona:` 標記」才會寫——手寫的
 一律保留並印警告。想自己維護某個頻道的檔案，把那兩行標記刪掉即可。
 
+全辦公室共用的守則另有一份來源 `backend/personas/office.md`，啟動時同步到兩個引擎各自的「全員」座位：
+cogito 共享根 `workspace/AGENTS.md`（PromptComposer 先讀根、再疊頻道那份）與員工 CLI profile 的
+`$CLAUDE_CONFIG_DIR/CLAUDE.md`（Claude Code 的使用者層指示，實測會載入）。同一套覆寫保護。
+
 泡泡中文字型（一次性）：`tools/get_font.sh` 取得 Noto Sans CJK TC（OFL 授權，16MB 已
 gitignore）放到 `unity/Assets/Resources/OfficeFont.otf`。編輯器匯入時只會把泡泡用字烘成
 圖集（見 `OfficeFontImporter.cs` 的字表），build 不會被字型拖胖；沒有這個檔案時 WebGL

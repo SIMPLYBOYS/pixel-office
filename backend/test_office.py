@@ -443,6 +443,8 @@ def run() -> None:
     git_lens()
     schedule_jobs()
     cli_done_honesty()
+    caps_per_agent()
+    office_guide()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2068,10 +2070,10 @@ def schedule_jobs() -> None:
                                      {"name": "每日趨勢", "hour": now.tm_hour, "engine": "cli",
                                       "agent": "p19", "text": "整理趨勢"}], ensure_ascii=False))
         # CLI 那條樁掉：記下「派給誰、派了什麼」就好，不真的起 claude
-        cli_sent: list[tuple[str, str]] = []
+        cli_sent: list[tuple[str, str, bool]] = []
 
-        def fake_cli(aid, text, cwd=None, model=""):
-            cli_sent.append((aid, text))
+        def fake_cli(aid, text, cwd=None, model="", fresh=False):
+            cli_sent.append((aid, text, fresh))
             async def _noop(): pass
             return _noop()
         old_cli, main.run_cli_task = main.run_cli_task, fake_cli
@@ -2086,7 +2088,7 @@ def schedule_jobs() -> None:
         # 到點：派一次（run_due_jobs 不需要 HTTP 伺服器——它自己呼叫 dispatch 函式）
         asyncio.run(main.run_due_jobs(now))
         assert sent == ["例行巡檢"], f"cogito 那條只該收到巡邏：{sent}"
-        assert cli_sent == [("p19", "整理趨勢")], f"每日任務（沒有 weekday、engine=cli）該走 CLI 派出：{cli_sent}"
+        assert cli_sent == [("p19", "整理趨勢", True)], f"每日任務該走 CLI、且開新 session（靠檔案接續，不靠對話）：{cli_sent}"
         assert "p19" not in main.engine_sent, "班表指定的引擎不是外殼的選擇，不該被記成 engine_sent"
         # 同一小時再查：不重複
         asyncio.run(main.run_due_jobs(now))
@@ -2128,6 +2130,68 @@ def cli_done_honesty() -> None:
     # CLI 自己說炸了：照舊是 error，沒有 denial 就不多那一行
     assert main.cli_done_events({"type": "result", "is_error": True, "result": "boom"}) == [
         {"kind": "done", "label": "error", "detail": "boom"}]
+
+
+def caps_per_agent() -> None:
+    """能力面板按員工的實際引擎回答：走 CLI 的人看 CLI 的清單，其他人與不帶人＝cogito 的。"""
+    old_cache, old_at = main._caps_cache, main._caps_at
+    old_avail, main.cli_available = main.cli_available, lambda: True
+    main._caps_cache = {"ok": True, "tools": [{"name": "read_file", "description": ""}], "skills": [], "mcp": [],
+                        "source": "cogito（測試）"}
+    main._caps_at = time.time()
+    saved = {a: main.engine_sent.get(a) for a in ("p05", "p19")}
+    try:
+        with TestClient(main.app) as c:
+            # ⚠ 要在 TestClient 啟動【之後】設：lifespan 會從 state 檔重載 cli_caps 與 engine_sent，
+            # 進入前塞的假資料會被真實狀態蓋掉（踩過：拿到的是 CLI 真跑過的 184 個工具）。
+            main.cli_caps.clear()
+            main.cli_caps.update({"at": "10:00", "agent": "p05", "tools": [{"name": "Read", "description": ""}], "skills": [], "mcp": []})
+            main.engine_sent["p05"] = main.ENGINE_CLI
+            main.engine_sent.pop("p19", None)          # 老徐：人設沒指定引擎 → 預設 cogito
+            assert c.get("/office/caps").json()["source"].startswith("cogito"), "不帶人＝全員 cogito 清單"
+            assert c.get("/office/caps", params={"agent": "p19"}).json()["source"].startswith("cogito")
+            r = c.get("/office/caps", params={"agent": "p05"}).json()
+            assert r["ok"] and r["source"].startswith("Claude Code CLI"), f"走 CLI 的人該看 CLI 的清單：{r.get('source')}"
+            assert [t["name"] for t in r["tools"]] == ["Read"], r["tools"]
+            main.cli_caps.clear()
+            r = c.get("/office/caps", params={"agent": "p05"}).json()
+            assert r["ok"] is False and "還沒回報" in r["error"], "CLI 沒回報過不能拿 cogito 的清單充數"
+    finally:
+        main._caps_cache, main._caps_at = old_cache, old_at
+        main.cli_available = old_avail
+        main.cli_caps.clear()
+        for a, v in saved.items():
+            (main.engine_sent.__setitem__(a, v) if v else main.engine_sent.pop(a, None))
+
+
+def office_guide() -> None:
+    """共通守則同步到兩個座位：cogito 共享根的 AGENTS.md、員工 CLI profile 的 CLAUDE.md；手寫保護同一套。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "workspace" / "channels"
+        old_cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(tmp) / "claude-office")
+        try:
+            root_md = Path(tmp) / "workspace" / "AGENTS.md"
+            prof_md = Path(tmp) / "claude-office" / "CLAUDE.md"
+            n = main.sync_office_guide()
+            assert n["wrote"] == 2, f"兩個座位都該寫：{n}"
+            a, b = root_md.read_text(encoding="utf-8"), prof_md.read_text(encoding="utf-8")
+            assert a == b and a.startswith(main.SOUL_MARK) and "辦公室共通守則" in a and "誠實" in a
+            assert "Go" not in a, "共通守則不該再有 6 月 demo 指南那套 Go 專案慣例"
+            assert main.sync_office_guide()["same"] == 2
+            root_md.write_text("# 我自己維護的\n", encoding="utf-8")   # 沒有標記＝人寫的
+            n = main.sync_office_guide()
+            assert root_md.read_text(encoding="utf-8") == "# 我自己維護的\n" and n["skipped"] == 1
+            # 沒設 CLAUDE_CONFIG_DIR：CLI 那個座位不存在，只寫 cogito 根
+            del os.environ["CLAUDE_CONFIG_DIR"]
+            assert [p.name for p in main.guide_targets()] == ["AGENTS.md"]
+        finally:
+            main.CHANNELS_DIR = old_ch
+            if old_cfg is not None:
+                os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
+            else:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
 
 def full_stream() -> None:
