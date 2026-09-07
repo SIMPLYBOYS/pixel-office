@@ -24,5 +24,25 @@
     "deliver": {
       "file": "trend-{date}.md"
     }
+  },
+  {
+    "name": "intel-daily-小樺",
+    "hour": 9,
+    "engine": "cli",
+    "agent": "p08",
+    "deliver": {
+      "file": "intel-{date}.md"
+    },
+    "text": "每日市場情報整理（班表任務，不是老闆派的）。你是市場研究員，交出去的是判斷材料，不是判斷。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；2) 資料來源只用 WebFetch 抓 RSS——英文：https://techcrunch.com/feed/ 、https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114 、https://finance.yahoo.com/news/rssindex 、https://feeds.marketwatch.com/marketwatch/topstories/ 、https://asia.nikkei.com/rss ；中文：https://technews.tw/feed/ 、https://www.ithome.com.tw/rss 、https://www.inside.com.tw/feed/rss 、https://www.bnext.com.tw/rss 。只取 24 小時內的項目；任一來源抓不到就寫進報告的「來源狀態」，不要補、不要換別的來源。不要用 gh／curl，Bash 在這裡沒有網路。3) 先讀目前目錄裡昨天的 intel-<昨天>.md（沒有就跳過），今天要標出「延續／新出現／落幕」；4) 在目前目錄寫 intel-<今天>.md：來源狀態表（來源｜抓到幾則｜失敗原因）；今日重點 6–10 條，每條「一句話｜來源與時間｜連結｜信心：幾個來源提到」，依 AI／半導體／平台與消費／資本市場／台灣 分組；與昨天相比；最後「給小美的判斷材料」2–3 條——對 AI agent、數字員工、辦公室協作這類產品開發可能有影響的訊號，每條列選項與各自代價，不下判斷；5) 只讀不改任何 repo、不 push。沒來源的數字不寫；單一來源不寫成趨勢；查不到就寫查不到。"
+  },
+  {
+    "name": "pm-daily-小美",
+    "hour": 9,
+    "engine": "cli",
+    "agent": "p01",
+    "deliver": {
+      "file": "pm-{date}.md"
+    },
+    "text": "每日 PM 市場觀點（班表任務，不是老闆派的）。你是產品經理，這份給老闆看：市場今天發生什麼、對我們的產品開發意味什麼、要做什麼與不做什麼。我們的產品是 Pixffice：像素辦公室裡的數字員工（AI agent）團隊，有人設、班表、審批、工作串，老闆在外殼派工與驗收。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；2) 資料來源只用 WebFetch 抓 RSS——英文：https://techcrunch.com/feed/ 、https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114 、https://finance.yahoo.com/news/rssindex 、https://feeds.marketwatch.com/marketwatch/topstories/ 、https://asia.nikkei.com/rss ；中文：https://technews.tw/feed/ 、https://www.ithome.com.tw/rss 、https://www.inside.com.tw/feed/rss 、https://www.bnext.com.tw/rss 。只取 24 小時內的項目；任一來源抓不到就寫進報告的「來源狀態」，不要補、不要換別的來源。不要用 gh／curl，Bash 在這裡沒有網路。3) 先讀目前目錄裡昨天的 pm-<昨天>.md（沒有就跳過），昨天列「觀察」的今天要交代有沒有進展；4) 在目前目錄寫 pm-<今天>.md：來源狀態；市場一分鐘 5 條（一句話＋連結）；PM 觀點 3 條——挑對 AI agent、數字員工、辦公室協作有意義的，每條寫「訊息｜對 Pixffice 的意涵｜做／不做／觀察｜若要做，一句可機械檢查的驗收標準」；這週不做什麼（一條，附理由）；與昨天相比；5) 只讀不改、不 push、不寫實作程式碼。沒有來源的不寫；結論裡不能出現「大概」「應該」。"
   }
 ]

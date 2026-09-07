@@ -105,6 +105,13 @@ Telegram 走 `sendDocument`（檔＋caption），Slack 走新版三步上傳（`
 Slack HTTP 200 但 `ok:false` → 寫失敗不寫已送；老闆中止的班表任務不交付。三條都驗過紅。
 token 放橋的 `.env`（與 cogito 同名、同一把），永不提交。
 
+**第二、三張班表（同日）**：小樺 `intel-daily`（市場情報，判斷材料不下判斷，haiku）與小美 `pm-daily`（PM 觀點：對 Pixffice 的意涵、
+做／不做／觀察、可機械檢查的驗收標準），都是每天 09:00、CLI、交付到 Telegram／Slack。來源沿 Aaron 自己的
+`midnight-diner-market-intel` 的作法：RSS 清單、只取 24 小時內、抓不到就寫進「來源狀態」不補——英文 techcrunch／cnbc／
+yahoo finance／marketwatch／nikkei asia（去掉早已停掉的 feeds.reuters.com），中文 technews／ithome／inside／bnext。
+RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三則帶時間與連結，零拒絕），網域已放進 office profile 白名單。
+新增 `schedule_file_valid` 合約測試：員工存在、引擎認得、deliver 帶 {date}、名字不重複——人名打錯班表會靜默略過，這種錯不該等到 09:00。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`

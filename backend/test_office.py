@@ -446,6 +446,7 @@ def run() -> None:
     caps_per_agent()
     office_guide()
     schedule_delivery()
+    schedule_file_valid()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2295,6 +2296,29 @@ def schedule_delivery() -> None:
             main.httpx.AsyncClient = old_client
             main.TELEGRAM_BOT_TOKEN, main.SLACK_BOT_TOKEN, main.DELIVER_TO = old_tokens
             main.CHANNELS_DIR = old_ch
+
+
+def schedule_file_valid() -> None:
+    """真的那份 schedule.json（與 example）每條 job 都得站得住：欄位齊、員工存在、引擎認得、交付檔名帶 {date}。
+    這些錯在 09:00 才浮出來太晚——例：人名打錯成不存在的員工，班表會靜默略過。"""
+    for f in ("schedule.json", "schedule.json.example"):
+        path = Path(main.__file__).parent / f
+        if not path.exists():
+            continue
+        jobs = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(jobs, list) and jobs, f
+        names = [j.get("name") for j in jobs]
+        assert len(set(names)) == len(names), f"{f}：job 名字重複（防重戳記是用名字記的）：{names}"
+        for j in jobs:
+            tag = f"{f}／{j.get('name')}"
+            assert j.get("name") and str(j.get("text", "")).strip(), f"{tag}：缺 name 或 text"
+            assert j.get("agent") in main.agents, f"{tag}：員工 {j.get('agent')!r} 不存在（名冊：{sorted(main.agents)}）"
+            assert isinstance(j.get("hour"), int) and 0 <= j["hour"] <= 23, f"{tag}：hour 要 0–23"
+            assert j.get("weekday") is None or (isinstance(j["weekday"], int) and 0 <= j["weekday"] <= 6), f"{tag}：weekday 要 0–6 或省略"
+            assert j.get("engine") in (None, main.ENGINE_CLI, main.ENGINE_COGITO), f"{tag}：engine 只能是 cli／cogito"
+            if d := j.get("deliver"):
+                assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
+                assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
 
 
 def full_stream() -> None:
