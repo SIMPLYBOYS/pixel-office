@@ -95,7 +95,8 @@ github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env
 4. 兩個行程要重啟才吃到新碼（橋：cli_done_events、面板過濾、班表新 session、能力面板；cogito：composer 疊頻道 AGENTS.md）。
 5. 班表派的 CLI 任務每次開新 session（`fresh`）：例行事靠工作區檔案接續，不靠對話；老闆派的活照舊接回上一次。
 6. 能力面板帶 `?agent=`：走 CLI 的人看 CLI 回報的清單，其他人與不帶人＝cogito 的；CLI 沒回報過就明說，不拿 cogito 的清單充數。
-   外殼換人時跟著刷，標題標出是誰的。
+   外殼換人時跟著刷，標題標出是誰的。cogito 關著時問走 cogito 的人：明講「入口連不上，現在派給他會失敗」，
+   不再退到 CLI 的清單充數（那是全員面板的退路，按人問時是誤導——Aaron 實測點老徐看到 250 個 CLI 工具，他一個都用不上）。
 
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 

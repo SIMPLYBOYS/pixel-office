@@ -1794,8 +1794,12 @@ async def office_caps(agent: str = ""):
         r.raise_for_status()
         d = r.json()
     except (httpx.HTTPError, ValueError) as e:
-        # cogito 連不上：先給上一份好的（過期也照給——稍舊的清單遠比空白有用），
-        # 再退到 CLI 回報的，最後才是一句錯誤。
+        # cogito 連不上：先給上一份好的（過期也照給——稍舊的清單遠比空白有用）。
+        # 問的是【走 cogito 的某個人】時，不能再退到 CLI 的清單充數——他派工會進 cogito，那邊沒開，
+        # 給他看 CLI 的 250 個工具等於說「他能用這些」，實際上他現在什麼都做不了。明講。
+        if agent in agents:
+            return _caps_cache or {"ok": False, "error": f"{agents[agent].name} 走 cogito 引擎，但 cogito 入口連不上（{type(e).__name__}）——現在派給他會失敗"}
+        # 全員清單（沒指定人）：退到 CLI 回報的，最後才是一句錯誤。
         return _caps_cache or cli_caps_reply() or {
             "ok": False, "error": f"取不到能力清單：{type(e).__name__}"}
     # mcp：外部 MCP 工具不個別註冊（cogito 只掛 mcp_call_tool／mcp_describe_tool 兩個閘道），

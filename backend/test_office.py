@@ -2156,6 +2156,18 @@ def caps_per_agent() -> None:
             main.cli_caps.clear()
             r = c.get("/office/caps", params={"agent": "p05"}).json()
             assert r["ok"] is False and "還沒回報" in r["error"], "CLI 沒回報過不能拿 cogito 的清單充數"
+            # cogito 關著、沒有快取：問走 cogito 的人 → 明講連不上，不拿 CLI 的清單充數；
+            # 不帶人（全員）照舊退到 CLI 回報的——那是純 CLI 用法下面板唯一的來源
+            main.cli_caps.update({"at": "10:00", "agent": "p05", "tools": [{"name": "Read", "description": ""}], "skills": [], "mcp": []})
+            main._caps_cache, main._caps_at = None, 0.0
+            old_http, main.COGITO_HTTP = main.COGITO_HTTP, "http://fake"
+            old_client, main.httpx.AsyncClient = main.httpx.AsyncClient, (lambda **kw: _FakeHTTP())
+            try:
+                r = c.get("/office/caps", params={"agent": "p19"}).json()
+                assert r["ok"] is False and "cogito" in r["error"], f"cogito 沒開時走 cogito 的人不該拿到 CLI 清單：{r.get('source') or r}"
+                assert c.get("/office/caps").json()["source"].startswith("Claude Code CLI"), "全員清單照舊退到 CLI"
+            finally:
+                main.COGITO_HTTP, main.httpx.AsyncClient = old_http, old_client
     finally:
         main._caps_cache, main._caps_at = old_cache, old_at
         main.cli_available = old_avail
