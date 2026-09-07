@@ -116,6 +116,15 @@ RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三
 （何時、名稱、引擎、交付檔、上次跑），名冊上有班表的人掛 🗓。資料仍只有 `schedule.json` 與防重戳記，畫面不另存。
 順手把「班表任務開跑」那行改走派工既有的寄放機制，掛在它開出的那張卡上，不再落在前一張卡的尾巴（卡 237 尾巴那行 239 的開跑就是這個 bug）。
 
+**小樺、小美試跑（同日 16:01）**：兩人 90 秒內收工，報表都送到 Telegram 與 Slack。品質對得上人設：小樺每條帶來源、時間、
+「信心：單一來源（未驗證）」；小美三條 PM 觀點各附對 Pixffice 的意涵、做／不做／觀察、可機械檢查的驗收標準。兩份報表開頭都有來源狀態表，
+9 個 feed 4 個壞（MarketWatch 連不上、Nikkei 與 bnext 404、iThome 對 WebFetch 回 403）——**誠實地列出來，沒有補**。
+抓到兩件要修的：
+- 小美的報表寫進了 `office_p01/shop_coupon/`——沒綁 repo 的班表任務跑在 `agent_dir()`，那個優先拿上一張卡的 worktree。
+  改成 `job_workdir`：沒綁 repo＝工作區根，交付找檔用同一個算法；驗紅過（不指定 cwd → None）。今天那份已手動搬回根。
+- feed 網址用 curl 逐一探過：Nikkei 正確路徑是 `/rss/feed/nar`；MarketWatch 改走 `feeds.content.dowjones.io`；bnext 兩個路徑都 404、
+  iThome 只擋 WebFetch 的 UA——兩個都換成 TechOrange。網域補進 profile 白名單。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`

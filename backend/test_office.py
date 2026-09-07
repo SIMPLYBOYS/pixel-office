@@ -2074,9 +2074,10 @@ def schedule_jobs() -> None:
                                       "agent": "p19", "text": "整理趨勢"}], ensure_ascii=False))
         # CLI 那條樁掉：記下「派給誰、派了什麼」就好，不真的起 claude
         cli_sent: list[tuple[str, str, bool]] = []
+        cli_cwd: list = []
 
         def fake_cli(aid, text, cwd=None, model="", fresh=False):
-            cli_sent.append((aid, text, fresh))
+            cli_sent.append((aid, text, fresh)); cli_cwd.append(cwd)
             async def _noop(): pass
             return _noop()
         old_cli, main.run_cli_task = main.run_cli_task, fake_cli
@@ -2092,6 +2093,8 @@ def schedule_jobs() -> None:
         asyncio.run(main.run_due_jobs(now))
         assert sent == ["例行巡檢"], f"cogito 那條只該收到巡邏：{sent}"
         assert cli_sent == [("p19", "整理趨勢", True)], f"每日任務該走 CLI、且開新 session（靠檔案接續，不靠對話）：{cli_sent}"
+        if main.CHANNELS_DIR is not None:
+            assert cli_cwd == [main.CHANNELS_DIR / "office_p19"], f"沒綁 repo 的班表任務要在工作區根跑，不是上一張卡的 worktree：{cli_cwd}"
         assert main.sched_running.get("p19", {}).get("job", {}).get("name") == "每日趨勢", "派出去的班表任務要記著，收工才知道要交付"
         assert main.pending_note.get("p19", "").startswith("🗓 班表任務「每日趨勢」開跑"), "開跑那行要寄放到新卡，不是直接寫進上一張卡"
         old_evs = [e["text"] for e in (main.last_report.get("p19") or {"events": []})["events"]]

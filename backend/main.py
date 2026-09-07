@@ -2875,6 +2875,8 @@ async def office_dispatch(d: dict):
             model_sent[aid] = "" if pick == MODEL_RESET else pick
             _dirty = True
         cli_want = "" if pick == MODEL_RESET else (pick or model_sent.get(aid) or agents[aid].model)
+        if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
+            wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled"))))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
     if cli_mode:
@@ -2968,6 +2970,15 @@ def parse_targets(raw) -> list[tuple[str, str]]:
     return out
 
 
+def job_workdir(aid: str, job: dict) -> Path | None:
+    """班表任務在哪裡跑、報表落在哪。沒綁 repo＝員工工作區根（CHANNELS_DIR/office_<aid>），【不是】agent_dir()——
+    那個會優先拿上一張卡的 workdir，實測小美的 PM 報表因此寫進她上次任務的 shop_coupon worktree 裡。
+    綁了 repo 才回退 agent_dir（worktree 就是那張卡的 workdir）。"""
+    if not job.get("repo") and CHANNELS_DIR is not None:
+        return CHANNELS_DIR / f"office_{aid}"
+    return agent_dir(aid)
+
+
 def deliver_path(aid: str, job: dict, started: float) -> tuple[Path | None, str]:
     """要送的檔：job.deliver.file 相對於員工工作區根，{date} 是開跑那天。回 (路徑, 為何沒有)。
     檔案沒更新（mtime 早於開跑）也算沒有——把昨天那份標成今天送出去，是說謊。"""
@@ -2976,7 +2987,7 @@ def deliver_path(aid: str, job: dict, started: float) -> tuple[Path | None, str]
     if not pat:
         return None, ""
     name = pat.replace("{date}", time.strftime("%Y-%m-%d", time.localtime(started)))
-    base = agent_dir(aid)
+    base = job_workdir(aid, job)   # 跟 CLI 實際跑的目錄同一個算法，找檔才找得到
     if base is None:
         return None, f"沒有工作區可找 {name}"
     p = base / name
