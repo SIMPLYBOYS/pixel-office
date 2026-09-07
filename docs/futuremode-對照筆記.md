@@ -82,7 +82,7 @@ github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env
 
 **換 profile 後重跑（同日 13:36，班表觸發、CLI、Opus）**：兩條來源都抓到，還自己對前四名打 `api.github.com/repos` 核對星數，寫出 `trend-2026-09-07.md`（85 行）。報告開頭先講資料怎麼來、哪條是新建榜不是趨勢榜、哪些是刷星噪音——正是任務文字要的誠實。唯一被擋的是第一條複合 Bash（沙箱要求拆開），CLI 自己拆成三條重來。
 
-**還開著的**：CLI 的 result 帶 `permission_denials`，橋現在忽略它，所以被擋的任務會標成完成——投影誠實的直接違反，待修。
+**已修（同日）**：CLI 的 result 帶 `permission_denials`（`[{tool_name, tool_use_id, tool_input}]`），橋先前忽略它。現在 `cli_done_events`：檔案類工具（Write／Edit）被擋 → 卡標 error、工作串多一行「⛔ 交付被權限擋下：Write×1」；其他工具被擋 → 維持 CLI 的判斷但留一行 ⚠（卡 234 的複合 Bash 就是這種，它自己拆開重來了）。測試用實抓的 result 形狀，驗過舊邏輯（只看 is_error）在 Write 被擋時標成 ok 而紅。卡 233 本身留在歷史裡不改——它是這條規則的來源。
 
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 

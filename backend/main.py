@@ -2523,6 +2523,32 @@ def cli_session_args(aid: str, cwd: Path) -> list[str]:
     return ["--resume", sid] if known else ["--session-id", sid]
 
 
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}   # 被擋＝交付物很可能沒落地
+
+
+def cli_done_events(d: dict) -> list[dict]:
+    """CLI 的 result → 收工事件。is_error 只說 CLI 行程有沒有炸，不說任務有沒有交付。
+
+    實測（卡 233）：-p 模式下 Write 被 ask 規則擋掉，CLI 仍以 is_error=false、subtype=success 收工，
+    橋照抄就把一張檔案根本不存在的卡標成「✔ 任務完成」。result 其實帶 permission_denials
+    （[{tool_name, tool_use_id, tool_input}]），只是先前沒人看。規則：
+    - 檔案類工具被擋 → 交付物大概沒寫出去 → label=error，工作串多一行 ⛔ 明講被擋了什麼
+    - 其他工具被擋（Bash/WebFetch）→ CLI 多半自己繞過（卡 234 把複合 Bash 拆三條重來）→
+      維持 CLI 的判斷，但工作串留一行 ⚠，讓人看得到有東西被擋
+    寧可把一張其實成功的卡標成有疑慮，也不要把一張沒交付的卡標成完成。
+    """
+    denials = [str(x.get("tool_name") or "?") for x in (d.get("permission_denials") or []) if isinstance(x, dict)]
+    blocked_write = [t for t in denials if t in WRITE_TOOLS]
+    label = "error" if (d.get("is_error") or blocked_write) else "ok"
+    out: list[dict] = []
+    if denials:
+        counts = "、".join(f"{t}×{denials.count(t)}" for t in dict.fromkeys(denials))
+        out.append({"kind": "error", "label": (f"⛔ 交付被權限擋下：{counts}——檔案沒寫出去" if blocked_write
+                                               else f"⚠ {len(denials)} 個操作被權限擋下：{counts}")})
+    out.append({"kind": "done", "label": label, "detail": str(d.get("result") or "")[:120]})
+    return out
+
+
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "") -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
@@ -2599,9 +2625,8 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     done_sent = True
                     # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
                     # 標成花費就是說謊，所以不送 cost——額度用量另外講（見 msg）。
-                    await office_event({"v": 1, "agent": aid, "kind": "done",
-                                        "label": "error" if d.get("is_error") else "ok",
-                                        "detail": str(d.get("result") or "")[:120]})
+                    for ev in cli_done_events(d):   # 被權限擋下的交付不算完成（見函式說明）
+                        await office_event({"v": 1, "agent": aid, **ev})
                     continue
                 for ev in cli_events(d, tool_names):
                     # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠

@@ -442,6 +442,7 @@ def run() -> None:
     repo_binding()
     git_lens()
     schedule_jobs()
+    cli_done_honesty()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2094,6 +2095,30 @@ def schedule_jobs() -> None:
         main.COGITO_HTTP = ""
         main.SCHEDULE_FILE = old_file
         main.sched_last.clear()
+
+
+def cli_done_honesty() -> None:
+    """CLI 收工：被權限擋下的交付不能標成完成（卡 233 的教訓）。result 形狀是 2026-09-07 實抓的。"""
+    ok = {"type": "result", "subtype": "success", "is_error": False, "result": "寫好了", "permission_denials": []}
+    evs = main.cli_done_events(ok)
+    assert [e["kind"] for e in evs] == ["done"] and evs[0]["label"] == "ok", evs
+    # Write 被 ask 規則擋掉：CLI 照樣回 success／is_error=false——這正是卡 233
+    blocked = {"type": "result", "subtype": "success", "is_error": False,
+               "result": "兩個權限被擋，任務卡在最後一步",
+               "permission_denials": [
+                   {"tool_name": "WebFetch", "tool_use_id": "t1", "tool_input": {"url": "https://api.github.com/x"}},
+                   {"tool_name": "Write", "tool_use_id": "t2", "tool_input": {"file_path": "trend-2026-09-07.md", "content": "..."}}]}
+    evs = main.cli_done_events(blocked)
+    assert evs[-1]["kind"] == "done" and evs[-1]["label"] == "error", f"Write 被擋卻標完成：{evs}"
+    assert evs[0]["kind"] == "error" and "Write" in evs[0]["label"] and "⛔" in evs[0]["label"], evs
+    # 只有 Bash 被擋（卡 234：複合指令被沙箱要求拆開，CLI 自己拆了重來，任務真的完成）→ 維持 ok、但留痕
+    recovered = {"type": "result", "subtype": "success", "is_error": False, "result": "寫好了",
+                 "permission_denials": [{"tool_name": "Bash", "tool_use_id": "t3", "tool_input": {"command": "a; b"}}]}
+    evs = main.cli_done_events(recovered)
+    assert evs[-1]["label"] == "ok" and evs[0]["kind"] == "error" and "Bash" in evs[0]["label"], evs
+    # CLI 自己說炸了：照舊是 error，沒有 denial 就不多那一行
+    assert main.cli_done_events({"type": "result", "is_error": True, "result": "boom"}) == [
+        {"kind": "done", "label": "error", "detail": "boom"}]
 
 
 def full_stream() -> None:
