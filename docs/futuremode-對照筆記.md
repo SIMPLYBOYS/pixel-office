@@ -98,6 +98,13 @@ github 兩個 domain）與 deny（rm／git clean／git push／publish／讀 .env
    外殼換人時跟著刷，標題標出是誰的。cogito 關著時問走 cogito 的人：明講「入口連不上，現在派給他會失敗」，
    不再退到 CLI 的清單充數（那是全員面板的退路，按人問時是誤導——Aaron 實測點老徐看到 250 個 CLI 工具，他一個都用不上）。
 
+**交付到遠端（同日）**：Aaron 要在辦公室外看到產出。班表 job 加 `deliver: {file}`，收工事件掛點觸發 `deliver_job`：
+Telegram 走 `sendDocument`（檔＋caption），Slack 走新版三步上傳（`getUploadURLExternal` → 傳 bytes →
+`completeUploadExternal`，`files.upload` 已停用，需要 `files:write`）。目標格式沿用 cogito 的 `<平台>:<id>`，
+連「id 長得像 token 就擋」那條理由一起沿用。誠實三條：檔不在或 mtime 早於開跑 → 改送收工訊息並明講「沒有產出」；
+Slack HTTP 200 但 `ok:false` → 寫失敗不寫已送；老闆中止的班表任務不交付。三條都驗過紅。
+token 放橋的 `.env`（與 cogito 同名、同一把），永不提交。
+
 ### ② 資料來源要誠實 —— ⬜ 待做（先做 GitHub，Threads 不承諾）
 
 - **GitHub trending 沒有官方 API。** 可行：`gh search repos --sort stars --created ">$(date -v-1d +%F)"`

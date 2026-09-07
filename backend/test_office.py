@@ -445,6 +445,7 @@ def run() -> None:
     cli_done_honesty()
     caps_per_agent()
     office_guide()
+    schedule_delivery()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2089,6 +2090,21 @@ def schedule_jobs() -> None:
         asyncio.run(main.run_due_jobs(now))
         assert sent == ["例行巡檢"], f"cogito 那條只該收到巡邏：{sent}"
         assert cli_sent == [("p19", "整理趨勢", True)], f"每日任務該走 CLI、且開新 session（靠檔案接續，不靠對話）：{cli_sent}"
+        assert main.sched_running.get("p19", {}).get("job", {}).get("name") == "每日趨勢", "派出去的班表任務要記著，收工才知道要交付"
+        delivered = []
+        old_deliver = main.deliver_job
+
+        def fake_deliver(aid, job, label, started):
+            delivered.append((aid, job["name"], label))
+            async def _noop(): pass
+            return _noop()
+        main.deliver_job = fake_deliver
+        try:
+            asyncio.run(main.office_event({"v": 1, "agent": "p19", "kind": "done", "label": "ok"}))
+        finally:
+            main.deliver_job = old_deliver
+        assert delivered == [("p19", "每日趨勢", "ok")], f"班表任務收工該觸發交付：{delivered}"
+        assert "p19" not in main.sched_running
         assert "p19" not in main.engine_sent, "班表指定的引擎不是外殼的選擇，不該被記成 engine_sent"
         # 同一小時再查：不重複
         asyncio.run(main.run_due_jobs(now))
@@ -2204,6 +2220,81 @@ def office_guide() -> None:
                 os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
             else:
                 os.environ.pop("CLAUDE_CONFIG_DIR", None)
+
+
+class _DeliverHTTP:
+    """Telegram／Slack 替身：記下每次 post，照網址回像真的一樣的 body。ok_slack=False 模擬 Slack 200+ok:false。"""
+    def __init__(self, ok_slack=True):
+        self.calls, self.ok_slack = [], ok_slack
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, **kw):
+        self.calls.append((url, kw))
+        if "api.telegram.org" in url:
+            return _FakeResp({"ok": True})
+        if "getUploadURLExternal" in url:
+            return _FakeResp({"ok": self.ok_slack, "error": "missing_scope", "upload_url": "https://files.slack/up", "file_id": "F1"})
+        if url == "https://files.slack/up":
+            r = _FakeResp({}); r.status_code = 200
+            return r
+        return _FakeResp({"ok": self.ok_slack, "error": "missing_scope"})
+
+
+def schedule_delivery() -> None:
+    """班表收工 → 報表送 Telegram／Slack；送到才說送到，沒檔或 API 失敗都要在工作串上講清楚。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp)
+        old_tokens = (main.TELEGRAM_BOT_TOKEN, main.SLACK_BOT_TOKEN, main.DELIVER_TO)
+        main.TELEGRAM_BOT_TOKEN, main.SLACK_BOT_TOKEN, main.DELIVER_TO = "tg-token", "xoxb-token", "telegram:123, slack:C0ABC"
+        old_client = main.httpx.AsyncClient
+        wd = Path(tmp) / "office_p19"; wd.mkdir()
+        main.history.setdefault("p19", [])          # agent_dir 先看卡的 workdir；沒有就退回 CHANNELS_DIR/office_p19
+        try:
+            # 目標解析：token 形狀的 id 擋掉、不認識的平台擋掉
+            assert main.parse_targets("telegram:123, slack:C0ABC") == [("telegram", "123"), ("slack", "C0ABC")]
+            assert main.parse_targets(["slack:xoxb-secret", "line:1", "telegram:"]) == []
+            job = {"name": "每日趨勢", "agent": "p19", "hour": 9, "deliver": {"file": "trend-{date}.md"}}
+            started = time.time() - 5
+            today = time.strftime("%Y-%m-%d", time.localtime(started))
+            # 1) 有檔：Telegram sendDocument 帶檔＋caption；Slack 走三步、掛到頻道
+            (wd / f"trend-{today}.md").write_text("# 報表\n", encoding="utf-8")
+            fake = _DeliverHTTP(); main.httpx.AsyncClient = lambda **kw: fake
+            asyncio.run(main.deliver_job("p19", job, "ok", started))
+            urls = [u for u, _ in fake.calls]
+            assert urls[0].endswith("/sendDocument") and fake.calls[0][1]["files"]["document"][0] == f"trend-{today}.md", urls
+            assert "每日趨勢" in fake.calls[0][1]["data"]["caption"] and fake.calls[0][1]["data"]["chat_id"] == "123"
+            assert [u.rsplit("/", 1)[-1] for u in urls[1:]] == ["files.getUploadURLExternal", "up", "files.completeUploadExternal"], urls
+            assert fake.calls[3][1]["json"]["channel_id"] == "C0ABC"
+            evs = [e["text"] for e in main.last_report["p19"]["events"]]
+            assert any("已送到 telegram:123" in t for t in evs) and any("已送到 slack:C0ABC" in t for t in evs), evs
+            # 2) 沒檔：送的是收工訊息＋「沒有產出」，工作串照樣留痕；不能假裝送了報表
+            (wd / f"trend-{today}.md").unlink()
+            fake = _DeliverHTTP(); main.httpx.AsyncClient = lambda **kw: fake
+            asyncio.run(main.deliver_job("p19", job, "ok", started))
+            assert fake.calls[0][0].endswith("/sendMessage") and "沒有產出" in fake.calls[0][1]["data"]["text"], fake.calls[0]
+            evs = [e["text"] for e in main.last_report["p19"]["events"]]
+            assert any("收工訊息已送到 telegram:123（任務結束但沒有產出" in t for t in evs), evs[-3:]
+            # 3) Slack 回 ok:false（HTTP 200）：不能寫成已送
+            (wd / f"trend-{today}.md").write_text("# 報表\n", encoding="utf-8")
+            fake = _DeliverHTTP(ok_slack=False); main.httpx.AsyncClient = lambda **kw: fake
+            asyncio.run(main.deliver_job("p19", job, "ok", started))
+            evs = [e["text"] for e in main.last_report["p19"]["events"]]
+            assert any("送 slack:C0ABC 失敗：missing_scope" in t for t in evs), evs[-3:]
+            assert not any("已送到 slack" in t for t in evs[-2:]), "Slack 200+ok:false 被寫成已送"
+            # 4) 沒有 deliver 設定的 job 什麼都不送
+            fake = _DeliverHTTP(); main.httpx.AsyncClient = lambda **kw: fake
+            asyncio.run(main.deliver_job("p19", {"name": "巡邏"}, "ok", started))
+            assert fake.calls == []
+        finally:
+            main.httpx.AsyncClient = old_client
+            main.TELEGRAM_BOT_TOKEN, main.SLACK_BOT_TOKEN, main.DELIVER_TO = old_tokens
+            main.CHANNELS_DIR = old_ch
 
 
 def full_stream() -> None:

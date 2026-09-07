@@ -1485,6 +1485,7 @@ async def office_event(ev: dict):
         # 而且會再叮一聲、再記一行「任務中斷」，跟上一行自相矛盾。
         if aid in stopped:
             stopped.discard(aid)
+            sched_running.pop(aid, None)   # 老闆中止的班表任務不交付——沒有東西可交
             release_work(aid)
             return {"ok": True}
         if chatting and (desk := WORK_DESK.get(aid)):
@@ -1524,6 +1525,8 @@ async def office_event(ev: dict):
             paid = f"（${cost:.4f}）" if cost else ""  # 中斷也標——燒掉的錢不因失敗就不見
             log_ev(aid, ("✔ 任務完成" if label == "ok" else "✗ 任務中斷") + paid)
             a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+            if run := sched_running.pop(aid, None):   # 班表任務：收工就交付；留痕掛在剛關掉的這張卡上
+                asyncio.create_task(deliver_job(aid, run["job"], label, run["started"]))
     else:
         # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
         lbl = label
@@ -2934,6 +2937,116 @@ async def office_dispatch(d: dict):
 # ── 班表（Devin 對照筆記 ③）：辦公室的例行任務——保全每週巡 repo 之類 ──────────
 # 掛在橋而不是 cogito 的 cron：走一般派工路徑，走位/工作串/報告卡全部免費，
 # 而且班表是「辦公室的制度」，不是「大腦的排程」。格式見 schedule.json.example。
+# ── 班表交付：例行任務收工，把報表送到遠端（Telegram／Slack）─────────────────────────
+# 老闆不在辦公室也要看得到產出。目標格式與 cogito 的 COGITO_CRON_NOTIFY 同款：<平台>:<id>，逗號分隔；
+# token 用與 cogito 同名的 TELEGRAM_BOT_TOKEN／SLACK_BOT_TOKEN（各自的 .env，永不提交）。
+# 交付是 job 的屬性（"deliver": {"file": "trend-{date}.md", "to": [...]}），沒寫就不送——
+# 送什麼由班表講清楚，不猜「工作區裡新出現的檔案」。
+DELIVER_TO = os.environ.get("OFFICE_DELIVER_TO", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+sched_running: dict[str, dict] = {}   # aid -> {"job": …, "started": epoch}：收工時據此交付
+
+
+def parse_targets(raw) -> list[tuple[str, str]]:
+    """<平台>:<id> 清單（逗號字串或 list）。只認 telegram／slack；長得像 token 的 id 一律擋——
+    這欄是收件地址、會出現在工作串上，誤貼憑證等於把它印在畫面（與 cogito parseTarget 同一條理由）。"""
+    items = raw if isinstance(raw, list) else str(raw or "").split(",")
+    out: list[tuple[str, str]] = []
+    for t in items:
+        plat, _, ident = str(t).strip().partition(":")
+        plat, ident = plat.strip().lower(), ident.strip()
+        if plat not in ("telegram", "slack") or not ident:
+            if str(t).strip():
+                print(f"⚠ 交付目標格式不對（要 <平台>:<id>）：{t!r}")
+            continue
+        if ident.lower().startswith(("xox", "xapp-", "bot")) or len(ident) > 40:
+            print(f"⚠ 交付目標 {plat} 的 id 長得像 token，不送：這欄要填頻道／聊天室 id")
+            continue
+        out.append((plat, ident))
+    return out
+
+
+def deliver_path(aid: str, job: dict, started: float) -> tuple[Path | None, str]:
+    """要送的檔：job.deliver.file 相對於員工工作區根，{date} 是開跑那天。回 (路徑, 為何沒有)。
+    檔案沒更新（mtime 早於開跑）也算沒有——把昨天那份標成今天送出去，是說謊。"""
+    spec = job.get("deliver") or {}
+    pat = str(spec.get("file") or "") if isinstance(spec, dict) else ""
+    if not pat:
+        return None, ""
+    name = pat.replace("{date}", time.strftime("%Y-%m-%d", time.localtime(started)))
+    base = agent_dir(aid)
+    if base is None:
+        return None, f"沒有工作區可找 {name}"
+    p = base / name
+    if not p.is_file():
+        return None, f"任務結束但沒有產出 {name}"
+    if p.stat().st_mtime < started - 1:
+        return None, f"任務結束但 {name} 沒有更新（最後修改 {time.strftime('%m-%d %H:%M', time.localtime(p.stat().st_mtime))}）"
+    return p, ""
+
+
+async def send_telegram(cl, chat: str, text: str, path: Path | None) -> None:
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    if path is not None:
+        r = await cl.post(f"{base}/sendDocument", data={"chat_id": chat, "caption": text[:1024]},
+                          files={"document": (path.name, path.read_bytes(), "text/markdown")})
+    else:
+        r = await cl.post(f"{base}/sendMessage", data={"chat_id": chat, "text": text[:4096]})
+    d = r.json()
+    if not d.get("ok"):
+        raise RuntimeError(str(d.get("description") or getattr(r, "status_code", "")))
+
+
+async def send_slack(cl, channel: str, text: str, path: Path | None) -> None:
+    hdr = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+
+    def ok(d: dict) -> dict:   # Slack 的錯在 body 不在 status code：HTTP 200 + ok=false 是常態
+        if not d.get("ok"):
+            raise RuntimeError(str(d.get("error") or "slack 回 ok=false"))
+        return d
+    if path is None:
+        ok((await cl.post("https://slack.com/api/chat.postMessage", headers=hdr,
+                          json={"channel": channel, "text": text})).json())
+        return
+    data = path.read_bytes()   # 新版上傳三步：要網址 → 傳 bytes → 收尾掛進頻道（files.upload 已停用）
+    up = ok((await cl.post("https://slack.com/api/files.getUploadURLExternal", headers=hdr,
+                           data={"filename": path.name, "length": str(len(data))})).json())
+    (await cl.post(up["upload_url"], content=data)).raise_for_status()
+    ok((await cl.post("https://slack.com/api/files.completeUploadExternal", headers=hdr,
+                      json={"files": [{"id": up["file_id"], "title": path.name}],
+                            "channel_id": channel, "initial_comment": text})).json())
+
+
+async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
+    """班表任務收工 → 交付。每個目標各自留痕：送到了才說送到，沒送到就寫為什麼。"""
+    spec = job.get("deliver")
+    if not spec:
+        return
+    targets = parse_targets(spec.get("to") if isinstance(spec, dict) and spec.get("to") else DELIVER_TO)
+    if not targets:
+        log_ev(aid, "📤 班表任務有 deliver 設定，但沒有任何交付目標（OFFICE_DELIVER_TO 或 job 的 to）——沒送")
+        return
+    path, why = deliver_path(aid, job, started)
+    who = agents[aid].name if aid in agents else aid
+    text = (f"🗓 {job.get('name', '')}｜{who}｜{time.strftime('%Y-%m-%d', time.localtime(started))}｜"
+            f"{'完成' if label == 'ok' else '中斷'}")
+    if path is None and why:
+        text += f"\n⚠ {why}"
+    async with httpx.AsyncClient(timeout=30) as cl:
+        for plat, ident in targets:
+            token = TELEGRAM_BOT_TOKEN if plat == "telegram" else SLACK_BOT_TOKEN
+            if not token:
+                log_ev(aid, f"⚠ 送 {plat}:{ident} 失敗：沒設 {'TELEGRAM_BOT_TOKEN' if plat == 'telegram' else 'SLACK_BOT_TOKEN'}")
+                continue
+            try:
+                await (send_telegram if plat == "telegram" else send_slack)(cl, ident, text, path)
+            except Exception as e:  # HTTP／API／檔案都可能出錯，任何一種都不能寫成「已送」
+                log_ev(aid, f"⚠ 送 {plat}:{ident} 失敗：{str(e)[:120]}")
+                continue
+            log_ev(aid, f"📤 {'報表 ' + path.name if path else '收工訊息'}已送到 {plat}:{ident}" + (f"（{why}）" if why else ""))
+
+
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
 sched_last: dict[str, str] = {}   # job name -> 上次觸發的 "YYYY-MM-DD HH"（防同一小時重複；隨 state 持久化）
 
@@ -2976,6 +3089,8 @@ async def run_due_jobs(now: time.struct_time) -> None:
                                    "engine": job.get("engine"), "scheduled": True})
         log_ev(aid, f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）" if r.get("ok")
                else f"🗓 班表任務「{name}」派不出去：{r.get('error')}")
+        if r.get("ok"):
+            sched_running[aid] = {"job": job, "started": time.time()}   # 收工時據此交付（見 deliver_job）
 
 
 async def schedule_loop() -> None:

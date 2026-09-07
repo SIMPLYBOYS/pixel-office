@@ -37,6 +37,12 @@ cd backend
 ⚠️ 覆寫保護：只有「檔案不存在」或「開頭是 `<!-- office-persona:` 標記」才會寫——手寫的
 一律保留並印警告。想自己維護某個頻道的檔案，把那兩行標記刪掉即可。
 
+**班表與交付**：`backend/schedule.json` 是辦公室的例行任務（格式見 `schedule.json.example`）：`hour` 必填、
+`weekday` 省略＝每天、`engine` 逐件事選 cogito／cli、`repo` 綁工作 repo。到點走一般派工路徑，走位、工作串、
+報告卡全部照常。job 帶 `"deliver": {"file": "trend-{date}.md"}` 時，收工後把那個檔送到 `OFFICE_DELIVER_TO`
+（`telegram:<chat_id>,slack:<channel_id>`，與 cogito 的 `COGITO_CRON_NOTIFY` 同格式），老闆不在辦公室也看得到。
+沒檔、檔沒更新、API 回錯，工作串都會明講；送到了才寫「已送到」。
+
 全辦公室共用的守則另有一份來源 `backend/personas/office.md`，啟動時同步到兩個引擎各自的「全員」座位：
 cogito 共享根 `workspace/AGENTS.md`（PromptComposer 先讀根、再疊頻道那份）與員工 CLI profile 的
 `$CLAUDE_CONFIG_DIR/CLAUDE.md`（Claude Code 的使用者層指示，實測會載入）。同一套覆寫保護。
