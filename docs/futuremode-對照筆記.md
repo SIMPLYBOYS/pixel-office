@@ -159,6 +159,13 @@ RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三
   所以插話後多等一輪 result 才算收工。
 驗紅三條：approve 不交回 hook（審批卡等到逾時）、無人值守不擋（變成等逾時）、插話不多等一輪（卡提早關）。
 
+**活跑（2026-09-08 11:41）抓到一條關鍵事實**：`-p` 下 PermissionRequest hook **只有帶 `--permission-prompts none` 才會被問**——
+沒帶時「無人可提問」直接拒，hook 連跑都沒跑（第一輪：WebFetch 立刻被拒，帳本只有 permission.denied）；帶了之後請求進辦公室，
+審批卡跳出、外殼放行、WebFetch 真的跑、拿回「Example Domain」，帳本 approval.asked → approval.approved by=office-web。
+旗標的語意不是「關掉提問」，是「提問改由 hook 回答」；合約測試釘住 argv。
+另一條：橋跑著時把帳本改名歸檔，記憶體序號接著寫進新檔、鏈從頭就斷——現在每次寫之前先看磁碟檔尾，輪替就從 1 重起鏈；
+測試整個行程改寫到暫存目錄，不再往真帳塞假的（踩過：真帳前 92 筆全是測試）。
+
 ### 回溯（兩個引擎）—— ✅ 已完成
 
 卡片開卡時記下引擎、session、開始時間（CLI 的 start 事件帶 session id；cogito 沒帶就是一個頻道一條 `office_<aid>`）。

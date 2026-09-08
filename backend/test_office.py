@@ -11,6 +11,11 @@ import time
 from pathlib import Path
 
 import main
+# 稽核帳本是 append-only 的真帳：測試裡的每個派工、審批都會落帳，跑一次全套就往真帳塞幾十筆假的（踩過：
+# 帳本第 1–92 筆全是測試）。整個測試行程改寫到暫存目錄，跟真帳分開。
+import tempfile as _tempfile
+main.AUDIT_DIR = Path(_tempfile.mkdtemp(prefix="office-audit-test-")) / "audit"
+main._audit_last.update({"seq": 0, "hash": "", "path": None})
 from fastapi.testclient import TestClient
 
 
@@ -1138,6 +1143,8 @@ for o in out:
                 sent = argv_log.read_text(encoding="utf-8").splitlines()[-1]
                 sid = main.cli_session_id("p05", main.CHANNELS_DIR / "office_p05")
                 assert f"--session-id {sid}" in sent, f"argv 沒帶 session：{sent}"
+                # 實測：沒有 --permission-prompts none，PermissionRequest hook 不會被問，權限請求直接拒——審批線等於沒接
+                assert "--permission-prompts none" in sent, f"argv 沒帶 --permission-prompts none，審批 hook 不會被問：{sent}"
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
@@ -2546,6 +2553,13 @@ def audit_ledger() -> None:
             # 刪掉第二筆 → 第 2 筆（原第三筆）序號對不上
             main.audit_path().write_text(lines[0] + "\n" + lines[2] + "\n", encoding="utf-8")
             v = main.audit_verify(); assert v["ok"] is False and v["broken_at"] == 2, v
+            main.audit_path().unlink(); main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            # 輪替：橋跑著時把帳本改名歸檔 → 下一筆從 1 重新起鏈，新檔自己驗得過（踩過：接著寫成 95、整條鏈從頭就斷）
+            main.audit("test.a", aid); main.audit("test.b", aid)
+            main.audit_path().rename(main.audit_path().with_name("ledger.archived.jsonl"))
+            e = main.audit("test.after-rotate", aid)
+            assert e["seq"] == 1 and e["prev"] == "", f"輪替後該重新起鏈：{e}"
+            assert main.audit_verify()["ok"], main.audit_verify()
             main.audit_path().unlink(); main._audit_last.update({"seq": 0, "hash": "", "path": None})
             # 裁決點：CLI 審批問→放行；再問→駁回；無人值守；cogito 政策拒絕（工具錯誤事件）
             cwd = str((main.CHANNELS_DIR or Path("/tmp/x")) / "office_p05")

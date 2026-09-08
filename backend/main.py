@@ -2600,8 +2600,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     cli_session_of[aid] = sess_args[1]
     # 提示不放 argv、改從 stdin 送（stream-json 輸入）：stdin 開著，任務中才能插話（/steer）。
     # 實測：第二則訊息會排隊、各自有一個 result；stdin 關掉行程才結束。
+    # --permission-prompts none：實測【沒有它 PermissionRequest hook 根本不會被問】——-p 沒有人可提問時直接拒，
+    # 帶了才會先問 hook（也就是問辦公室）、hook 不放行才拒。這不是「關掉提問」，是「提問改由 hook 回答」。
     argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION, *sess_args]
+            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
     # 那是它的預設，不是我們該替它決定的事。
     if model:
@@ -2872,11 +2874,40 @@ def _audit_tail() -> None:
         pass
 
 
+def _audit_disk_tail() -> tuple[int, str]:
+    """檔尾那一筆的 (seq, hash)；檔不在或空＝(0, "")。從檔尾往回讀，不掃整檔。"""
+    path = audit_path()
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return 0, ""
+            back = min(size, 8192)
+            f.seek(size - back)
+            chunk = f.read(back).decode("utf-8", "replace")
+    except OSError:
+        return 0, ""
+    for raw in reversed(chunk.splitlines()):
+        if raw.strip():
+            try:
+                d = json.loads(raw)
+                return int(d.get("seq", 0)), str(d.get("hash", ""))
+            except ValueError:
+                return 0, ""
+    return 0, ""
+
+
 def audit(kind: str, aid: str, **fields) -> dict:
     """落一筆。同步寫：一筆幾百 bytes，await 反而讓兩筆交錯。寫不進去只印警告——稽核帳壞了不能拖垮辦公室，
-    但也不能假裝寫了，所以回傳的 entry 帶 written=False。"""
+    但也不能假裝寫了，所以回傳的 entry 帶 written=False。
+    每次寫之前先看磁碟上檔尾是哪一筆：檔被輪替（改名歸檔）就從 1 重新起鏈，別的行程寫過就接著它——
+    踩過：橋還在跑時把帳本改名歸檔，記憶體裡的序號接著寫進新檔，新檔第一筆就是 95、prev 指向歸檔裡的一筆，整條鏈從頭就斷。"""
     if _audit_last["path"] != audit_path():
         _audit_tail()
+    seq, h = _audit_disk_tail()
+    if (seq, h) != (_audit_last["seq"], _audit_last["hash"]):
+        _audit_last.update({"seq": seq, "hash": h, "path": audit_path()})
     entry = {"seq": _audit_last["seq"] + 1, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "agent": aid, "kind": kind}
     for k, v in fields.items():
         if v is None or v == "":
