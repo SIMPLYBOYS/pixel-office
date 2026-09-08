@@ -458,6 +458,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     cli_subagents()
+    models_cogito_up()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2688,6 +2689,21 @@ for i, o in enumerate(out):
             if saved: main.engine_sent["kanban"] = saved
             else: main.engine_sent.pop("kanban", None)
             main.busy.discard("kanban"); main.busy.discard("p01"); main.sub_active.clear()
+
+
+def models_cogito_up() -> None:
+    """/office/models 要講 cogito 在不在：外殼靠它把預設引擎從關著的 cogito 改成 CLI、把拒絕講清楚。"""
+    async def down(): return None
+    async def up(): return ([{"id": "m1", "name": "M1"}], "live")
+    old = main.cogito_models
+    try:
+        with TestClient(main.app) as c:
+            main.cogito_models = down
+            r = c.get("/office/models").json(); assert r["ok"] and r["cogito_up"] is False, r
+            main.cogito_models = up
+            r = c.get("/office/models").json(); assert r["cogito_up"] is True and r["source"] == "live", r
+    finally:
+        main.cogito_models = old
 
 
 def full_stream() -> None:

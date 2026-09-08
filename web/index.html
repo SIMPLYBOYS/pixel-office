@@ -348,6 +348,7 @@
     height: 62px; min-height: 62px; max-height: 45vh;
   }
   .composer .hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
+.composer .hint.err { color: #c0392b; font-size: 12px; font-weight: 600; }
   /* 協作人數：只在選中看板時出現。放在輸入框【上方】而不是旁邊——它是這次任務的設定，
      不是送出動作的一部分，混進同一列會讓人以為要先選才能送。 */
   .crew { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap;
@@ -947,7 +948,11 @@ function paintEngineRow(a, workingNow) {
     sel.onchange = () => updateComposer();
     sel.dataset.bound = '1';
   }
-  const eff = modelInfo.engines?.[selected] || 'cogito';
+  let eff = modelInfo.engines?.[selected] || 'cogito';
+  // cogito 沒開、CLI 在：預設不該指向一個派不出去的引擎（實際回報：看板送出「沒有反應」，
+  // 其實是派給關著的 cogito 被拒）。這裡只改預設，選單仍可手動切回 cogito。
+  const cogitoDown = modelInfo.cogito_up === false && modelInfo.cli;
+  if (eff === 'cogito' && cogitoDown) eff = 'cli';
   if (sel.dataset.for !== selected) {   // 換人就跟著那個人目前生效的引擎
     sel.value = eff;
     sel.dataset.for = selected;
@@ -955,8 +960,9 @@ function paintEngineRow(a, workingNow) {
   sel.disabled = workingNow;
   const cli = sel.value === 'cli';
   $('engineNote').textContent = cli
-    ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——沒有審批與插話，中止是直接砍掉行程`
-    : '';
+    ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
+      + (cogitoDown ? '　⚠ cogito 沒開，先走 CLI' : '')
+    : (modelInfo.cogito_up === false ? '⚠ cogito 沒開——現在派給它會失敗，開了再派或改選 CLI' : '');
   // CLI 自己決定模型，這裡選了不生效。但【藏起來】會讓人以為功能不見了（實際回報）——
   // 改成停用＋講清楚原因，並把 CLI 上次實際跑的那個講出來（揭露 > 隱藏）。
   const mr = $('modelRow');
@@ -1451,8 +1457,11 @@ async function dispatch(text) {
                            model: $('modelSel').value || null,
                            engine: $('engineSel').value || null }),
   })).json();
-  $('hint').textContent = !r.ok ? `派工失敗：${r.error}`
+  // 失敗要看得見：先前只有 11px 的灰字，實際回報「按了送出沒有反應」——其實是 cogito 沒開、派工被拒，
+  // 但那行字跟平常的提示長得一樣。失敗改紅字並把原因講完；成功照舊。
+  $('hint').textContent = !r.ok ? `⛔ 派工失敗：${r.error}`
     : text.trim() === '/stop' ? '已中止 🛑' : '已交辦 ✓';
+  $('hint').classList.toggle('err', !r.ok);
   if (r.ok) { $('box').value = ''; loadModels(); feed(); }
 }
 

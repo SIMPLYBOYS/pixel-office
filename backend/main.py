@@ -3292,13 +3292,16 @@ async def office_models():
     """
     # 三段來源，由準到粗：cogito（它知道自己的 provider 支援什麼）→ 橋自己問官方
     # → 本地後備。source 一路講出來，降級不能是無聲的。
-    if got := await cogito_models():
+    got = await cogito_models()
+    if got:
         models, source = got
     elif mine := await api_models():
         models, source = mine, "api"
     else:
         models, source = known_models(), "local"
-    return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET,
+    # cogito_up：外殼據此決定預設引擎與提示。cogito 沒開時預設指向它，派工只會被拒——而那條拒絕先前只是
+    # 一行灰字（實際回報：看板送出「沒有反應」）。這是事實的揭露，不是幫使用者做決定：選單仍可手動切。
+    return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET, "cogito_up": bool(got),
             "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()},
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
             "cli": cli_available(), "cli_cmd": CLI_CMD,
