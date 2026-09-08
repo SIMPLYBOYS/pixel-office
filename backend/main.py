@@ -1452,7 +1452,11 @@ async def office_event(ev: dict):
                 task = ("🔄 續跑：" + prev["task"].removeprefix("🔄 續跑：")) if prev else "🔄 續跑上次中斷的任務"
                 if prev:
                     supersede_card(prev)
-            report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
+            card = report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
+            # 回溯的鑰匙：哪個引擎、哪條 session、幾點開始。有了它，卡片才連得到完整紀錄。
+            card["engine"] = str(ev.get("engine") or ENGINE_COGITO)
+            card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
+            card["ts"] = time.time()
             log_ev(aid, f"📋 接到任務：{task}")
             # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
@@ -2594,7 +2598,8 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     if model:
         argv += ["--model", model]
     await office_event({"v": 1, "agent": aid, "kind": "start",
-                        "label": text[:80], "detail": str(base)})
+                        "label": text[:80], "detail": str(base),
+                        "engine": ENGINE_CLI, "session": cli_session_of[aid]})   # 回溯用
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(base), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -2810,6 +2815,143 @@ def cli_turn_done(aid: str) -> bool:
     """收到一個 result：是不是最後一個？插話會多一輪，中間的 result 不是收工。"""
     cli_turns[aid] = max(0, cli_turns.get(aid, 1) - 1)
     return cli_turns[aid] == 0
+
+
+# ── 回溯：從卡片一鍵到完整紀錄 ─────────────────────────────────────────────
+# 卡片是投影（參數截 200 字、單卡 150 筆）。完整紀錄兩個引擎各在各的地方、格式不同：
+#   CLI   → $CLAUDE_CONFIG_DIR/projects/<cwd 編碼>/<session>.jsonl（每筆 tool_use／tool_result／text，含時間戳）
+#   cogito → workspace/.sessions/office_<aid>-*.json 的 history（assistant 的 content 是動作前的思考、tool_calls、
+#            user 帶 tool_call_id 的是工具結果；每筆有 ts）
+# 這裡把兩種解成同一種 step：{at, kind, name, text, ok}。老闆派的活共用固定 session，所以用卡的開始時間切；
+# 班表任務每次新 session，整檔就是一次執行。推理文字只有 cogito 有——CLI 的 thinking 只有簽章（實測）。
+COGITO_SESSIONS_DIR: Path | None = Path(os.environ["OFFICE_COGITO_SESSIONS"]).expanduser() if os.environ.get("OFFICE_COGITO_SESSIONS") else None
+TRACE_TEXT_MAX = 2000
+
+
+def cogito_sessions_dir() -> Path | None:
+    """cogito 的 session 目錄：明設就用，否則由 COGITO_CHANNELS 往上一層推（.sessions 與 channels 是兄弟）。
+    CHANNELS_DIR 定義在後面，所以這裡是函式不是常數。"""
+    if COGITO_SESSIONS_DIR is not None:
+        return COGITO_SESSIONS_DIR
+    return CHANNELS_DIR.parent / ".sessions" if CHANNELS_DIR else None
+
+
+def _iso_epoch(ts: str) -> float:
+    """CLI 的 2026-09-07T05:16:55.085Z 與 cogito 的 2026-09-02T13:22:13+08:00 都吃。"""
+    from datetime import datetime, timezone
+    try:
+        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return t.timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _clip(x) -> str:
+    t = x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+    return t if len(t) <= TRACE_TEXT_MAX else t[:TRACE_TEXT_MAX] + f"…（截 {len(t) - TRACE_TEXT_MAX} 字）"
+
+
+def _hhmmss(epoch: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(epoch)) if epoch else ""
+
+
+def trace_cli(session: str, t0: float, t1: float) -> tuple[list[dict], str]:
+    """讀 Claude Code 的 transcript。回 (steps, 來源路徑)；找不到回 ([], "")。"""
+    f = next(CLI_SESSION_DIR.glob(f"*/{session}.jsonl"), None)
+    if f is None:
+        return [], ""
+    steps: list[dict] = []
+    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        at = _iso_epoch(d.get("timestamp", ""))
+        if d.get("type") not in ("user", "assistant") or not (t0 - 5 <= at <= t1):
+            continue
+        m = d.get("message") or {}
+        c = m.get("content")
+        if isinstance(c, str):
+            if c.strip():
+                steps.append({"at": _hhmmss(at), "kind": "user", "name": "", "text": _clip(c), "ok": True})
+            continue
+        for b in c if isinstance(c, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use":
+                steps.append({"at": _hhmmss(at), "kind": "tool_use", "name": str(b.get("name", "")), "text": _clip(b.get("input")), "ok": True})
+            elif b.get("type") == "tool_result":
+                body = b.get("content")
+                if isinstance(body, list):
+                    body = "\n".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
+                steps.append({"at": _hhmmss(at), "kind": "tool_result", "name": "", "text": _clip(body or ""), "ok": not b.get("is_error")})
+            elif b.get("type") == "text" and str(b.get("text", "")).strip():
+                steps.append({"at": _hhmmss(at), "kind": "assistant", "name": "", "text": _clip(b["text"]), "ok": True})
+            elif b.get("type") == "thinking":
+                # 只有簽章沒文字：不列，列了只是一行空白假裝有推理
+                if str(b.get("thinking") or "").strip():
+                    steps.append({"at": _hhmmss(at), "kind": "thinking", "name": "", "text": _clip(b["thinking"]), "ok": True})
+    return steps, str(f)
+
+
+def trace_cogito(aid: str, t0: float, t1: float) -> tuple[list[dict], str]:
+    """讀 cogito 的 session 歷史（一個頻道一條、跨任務累積，所以用時間切）。"""
+    sdir = cogito_sessions_dir()
+    if sdir is None:
+        return [], ""
+    f = max(sdir.glob(f"office_{aid}-*.json"), key=lambda x: x.stat().st_mtime, default=None)
+    if f is None:
+        return [], ""
+    try:
+        hist = json.loads(f.read_text(encoding="utf-8")).get("history") or []
+    except (ValueError, OSError):
+        return [], str(f)
+    steps: list[dict] = []
+    for m in hist:
+        at = _iso_epoch(m.get("ts", ""))
+        if not (t0 - 5 <= at <= t1):
+            continue
+        role, content = m.get("role"), m.get("content") or ""
+        if role == "user" and m.get("tool_call_id"):
+            steps.append({"at": _hhmmss(at), "kind": "tool_result", "name": "", "text": _clip(content),
+                          "ok": not str(content).startswith(("政策拒絕執行", "此操作需人工審批", "錯誤", "Error"))})
+        elif role == "user":
+            steps.append({"at": _hhmmss(at), "kind": "user", "name": "", "text": _clip(content), "ok": True})
+        elif role == "assistant":
+            if str(content).strip():   # 動作前的思考文字：這是 cogito 才有的「當時怎麼想」
+                steps.append({"at": _hhmmss(at), "kind": "thinking" if m.get("tool_calls") else "assistant", "name": "", "text": _clip(content), "ok": True})
+            for tc in m.get("tool_calls") or []:
+                steps.append({"at": _hhmmss(at), "kind": "tool_use", "name": str(tc.get("name", "")), "text": _clip(tc.get("arguments")), "ok": True})
+    return steps, str(f)
+
+
+def card_window(aid: str, card: dict) -> tuple[float, float]:
+    """這張卡在時間軸上的範圍：開始＝ts；結束＝下一張卡的 ts，沒有就到現在。"""
+    t0 = float(card.get("ts") or 0)
+    cards = list(history.get(aid, []))
+    later = [float(c.get("ts") or 0) for c in cards if float(c.get("ts") or 0) > t0]
+    return t0, (min(later) if later else time.time())
+
+
+@app.get("/office/trace/{aid}/{cid}")
+def office_trace(aid: str, cid: int):
+    card = next((c for c in history.get(aid, []) if c.get("id") == cid), None)
+    if card is None:
+        return {"ok": False, "error": "沒有這張卡"}
+    if not card.get("ts"):
+        return {"ok": False, "error": "這張卡是舊格式，沒有記開始時間，連不到完整紀錄"}
+    t0, t1 = card_window(aid, card)
+    engine = card.get("engine") or ENGINE_COGITO
+    if engine == ENGINE_CLI:
+        steps, src = trace_cli(str(card.get("session") or ""), t0, t1)
+    else:
+        steps, src = trace_cogito(aid, t0, t1)
+    if not src:
+        return {"ok": False, "error": f"找不到 {engine} 的完整紀錄檔（session {card.get('session')}）"}
+    return {"ok": True, "engine": engine, "session": card.get("session"), "source": src,
+            "steps": steps, "has_thinking": any(x["kind"] == "thinking" for x in steps)}
 
 
 # ── 模型選擇（觀察 ③：外殼要能臨時換模型）─────────────────────────────

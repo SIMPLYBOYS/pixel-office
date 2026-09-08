@@ -449,6 +449,8 @@ def run() -> None:
     schedule_file_valid()
     schedule_visible()
     cli_hitl()
+    trace_links()
+    start_records_engine()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2446,6 +2448,77 @@ def cli_hitl() -> None:
         if saved_engine: main.engine_sent[aid] = saved_engine
         else: main.engine_sent.pop(aid, None)
         main.clear_approval(aid); main.cli_permission.pop(aid, None)
+
+
+def trace_links() -> None:
+    """回溯：卡片記引擎／session／開始時間；/office/trace 把 CLI transcript 與 cogito session 歷史解成同一種步驟清單，
+    用卡的時間切、只取這一次執行；CLI 的空 thinking 不列，cogito 的動作前思考列成 thinking。"""
+    import tempfile, datetime
+    with tempfile.TemporaryDirectory() as tmp:
+        old_cli_dir, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp) / "projects"
+        old_cog_dir, main.COGITO_SESSIONS_DIR = main.COGITO_SESSIONS_DIR, Path(tmp) / "sessions"
+        (main.CLI_SESSION_DIR / "enc-cwd").mkdir(parents=True); main.COGITO_SESSIONS_DIR.mkdir()
+        now = time.time()
+        def iso_utc(t): return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        def iso_tpe(t): return datetime.datetime.fromtimestamp(t, datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+        # CLI transcript：昨天一筆（不該進來）＋這次的 tool_use／tool_result（失敗）／空 thinking／text
+        lines = [
+            {"type": "user", "timestamp": iso_utc(now - 3600), "message": {"role": "user", "content": "昨天的任務"}},
+            {"type": "user", "timestamp": iso_utc(now - 20), "message": {"role": "user", "content": "整理趨勢"}},
+            {"type": "assistant", "timestamp": iso_utc(now - 18), "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "", "signature": "xxx"},
+                {"type": "tool_use", "id": "t1", "name": "WebFetch", "input": {"url": "https://github.com/trending"}}]}},
+            {"type": "user", "timestamp": iso_utc(now - 15), "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "Claude requested permissions to use WebFetch, but you haven't granted it yet.", "is_error": True}]}},
+            {"type": "assistant", "timestamp": iso_utc(now - 10), "message": {"role": "assistant", "content": [{"type": "text", "text": "抓不到，照實寫。"}]}},
+        ]
+        (main.CLI_SESSION_DIR / "enc-cwd" / "sess-cli.jsonl").write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+        # cogito session：history 有動作前思考＋tool_calls＋工具結果（政策拒絕）
+        hist = [
+            {"role": "user", "content": "舊任務", "ts": iso_tpe(now - 3600)},
+            {"role": "user", "content": "看一下 repo", "ts": iso_tpe(now - 20)},
+            {"role": "assistant", "content": "先列出檔案再決定。", "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "rm -rf /"}}], "ts": iso_tpe(now - 18), "usage": {}},
+            {"role": "user", "content": "政策拒絕執行。原因: 高危", "tool_call_id": "c1", "ts": iso_tpe(now - 15)},
+            {"role": "assistant", "content": "被擋了，改用 ls。", "ts": iso_tpe(now - 10), "usage": {}},
+        ]
+        (main.COGITO_SESSIONS_DIR / "office_p07-abcd.json").write_text(json.dumps({"id": "office_p07", "history": hist}), encoding="utf-8")
+        old_hist = {a: list(v) for a, v in main.history.items()}
+        try:
+            with TestClient(main.app) as c:
+                main.history.clear()
+                cli_card = main.report_card("p05", "整理趨勢"); cli_card.update({"engine": "cli", "session": "sess-cli", "ts": now - 25})
+                cog_card = main.report_card("p07", "看一下 repo"); cog_card.update({"engine": "cogito", "session": "office_p07", "ts": now - 25})
+                r = c.get(f"/office/trace/p05/{cli_card['id']}").json()
+                assert r["ok"] and r["engine"] == "cli" and r["source"].endswith("sess-cli.jsonl"), r
+                kinds = [(x["kind"], x["name"], x["ok"]) for x in r["steps"]]
+                assert kinds == [("user", "", True), ("tool_use", "WebFetch", True), ("tool_result", "", False), ("assistant", "", True)], kinds
+                assert not any("昨天" in x["text"] for x in r["steps"]), "用卡的時間切：昨天那筆不該進來"
+                assert r["has_thinking"] is False, "CLI 的 thinking 只有簽章，不能列成有推理"
+                r = c.get(f"/office/trace/p07/{cog_card['id']}").json()
+                assert r["ok"] and r["engine"] == "cogito", r
+                kinds = [(x["kind"], x["name"], x["ok"]) for x in r["steps"]]
+                assert kinds == [("user", "", True), ("thinking", "", True), ("tool_use", "bash", True), ("tool_result", "", False), ("assistant", "", True)], kinds
+                assert r["has_thinking"] is True and "先列出檔案" in r["steps"][1]["text"]
+                assert c.get("/office/trace/p05/99999").json()["ok"] is False
+                old = main.report_card("p05", "舊格式的卡"); old.pop("ts", None)
+                assert "舊格式" in c.get(f"/office/trace/p05/{old['id']}").json()["error"]
+        finally:
+            main.history.clear(); main.history.update({a: __import__("collections").deque(v, maxlen=20) for a, v in old_hist.items()})
+            main.CLI_SESSION_DIR, main.COGITO_SESSIONS_DIR = old_cli_dir, old_cog_dir
+
+
+def start_records_engine() -> None:
+    """start 事件開卡時要記下引擎、session、開始時間——沒有這三個，卡片連不到任何完整紀錄。"""
+    async def drive():
+        await main.office_event({"v": 1, "agent": "p12", "kind": "start", "label": "測試回溯", "engine": "cli", "session": "abc-123"})
+        card = main.last_report["p12"]
+        assert card["engine"] == "cli" and card["session"] == "abc-123" and card["ts"] > 0, card
+        await main.office_event({"v": 1, "agent": "p12", "kind": "done", "label": "ok"})
+        await main.office_event({"v": 1, "agent": "p12", "kind": "start", "label": "cogito 的"})
+        card = main.last_report["p12"]
+        assert card["engine"] == "cogito" and card["session"] == "office_p12", "cogito 的 start 沒帶欄位：預設一個頻道一條 session"
+        await main.office_event({"v": 1, "agent": "p12", "kind": "done", "label": "ok"})
+    asyncio.run(drive())
 
 
 def full_stream() -> None:

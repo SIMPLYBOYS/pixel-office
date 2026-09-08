@@ -159,6 +159,14 @@ RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三
   所以插話後多等一輪 result 才算收工。
 驗紅三條：approve 不交回 hook（審批卡等到逾時）、無人值守不擋（變成等逾時）、插話不多等一輪（卡提早關）。
 
+### 回溯（兩個引擎）—— ✅ 已完成
+
+卡片開卡時記下引擎、session、開始時間（CLI 的 start 事件帶 session id；cogito 沒帶就是一個頻道一條 `office_<aid>`）。
+`/office/trace/<aid>/<卡號>` 把兩種完整紀錄解成同一種步驟清單 {at, kind, name, text, ok}：CLI 讀 profile 的
+transcript jsonl，cogito 讀 `workspace/.sessions/office_<aid>-*.json` 的 history；老闆派的活共用固定 session，
+所以用卡的時間切，班表任務每次新 session 整檔就是一次。卡頭多一顆 🧾，點開在卡裡列步驟，失敗的標紅、
+cogito 動作前的思考列成 💭；CLI 的 thinking 只有簽章，不列也不假裝有。驗紅：拿掉時間切 → 昨天的紀錄混進來。
+
 ## 三、引擎怎麼選
 
 觸發統一用橋的班表；**執行引擎按例行事選**（job 的 `engine` 欄位；沒指定才落到外殼的選擇／人設）：
