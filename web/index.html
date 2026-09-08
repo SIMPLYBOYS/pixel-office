@@ -349,6 +349,9 @@
   }
   .composer .hint { font-size: 11px; color: var(--dim); margin-top: 6px; }
 .composer .hint.err { color: #c0392b; font-size: 12px; font-weight: 600; }
+/* 正在打字的那一行：閃爍游標，讓打字聲對得到位置 */
+.typing::after { content: '▍'; color: var(--dim); animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
   /* 協作人數：只在選中看板時出現。放在輸入框【上方】而不是旁邊——它是這次任務的設定，
      不是送出動作的一部分，混進同一列會讓人以為要先選才能送。 */
   .crew { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap;
@@ -841,8 +844,27 @@ async function status() {
       muted() ? '提示音已關（點我開啟）'
       : blocked ? '瀏覽器擋住音訊——點我解鎖（點 Unity 畫布不算互動）'
       : '提示音開著'}" onclick="toggleMute()">${muted() ? '🔕' : blocked ? '🔇' : '🔔'}</span>`;
-    $('status').innerHTML = `${bell}${canvas}<br>${disp}`;
+    // 🎯 自動跟隨：打字聲跟著【真的長出來的字】走，但那些字可能在摺起來的卡裡或捲出畫面外——
+    // 聽得到、找不到（實際回報）。開著時打字到哪就把卡展開、捲到看得見；關掉就維持原本的貼底跟捲。
+    const eye = `<span class="mute" title="${follow() ? '自動跟隨開著：打字到哪就展開、捲到哪（點我關）' : '自動跟隨關著：只在貼底時跟捲（點我開）'}"
+      onclick="toggleFollow()">${follow() ? '🎯' : '📍'}</span>`;
+    $('status').innerHTML = `${bell}${eye}${canvas}<br>${disp}`;
   } catch { $('status').textContent = ''; markBackendFail(); }  // 輪詢失敗 = 觸發斷線分級(L0自動重試→L3)
+}
+
+const follow = () => localStorage.follow !== '0';   // 預設開：這是在修「聽得到找不到」，不是新花樣
+function toggleFollow() { localStorage.follow = follow() ? '0' : '1'; status(); }
+
+// 把正在打字的那一行弄成看得見：摺起來的祖先卡（含子卡）展開、捲到它在 feed 視窗內。
+// 只在【看不見】時動手——看得見就什麼都不做，才不會跟使用者自己的捲動打架。
+function revealTyping(el) {
+  const f = $('feed');
+  for (let d = el.closest('details'); d && f.contains(d); d = d.parentElement && d.parentElement.closest('details')) {
+    if (!d.open) { d.open = true; if (d.dataset.id) tog(d.dataset.id, true); }
+  }
+  const r = el.getBoundingClientRect(), fr = f.getBoundingClientRect();
+  if (r.bottom > fr.bottom - 8) f.scrollTop += r.bottom - fr.bottom + 24;
+  else if (r.top < fr.top + 8) f.scrollTop -= fr.top - r.top + 24;
 }
 
 function toggleMute() {
@@ -1707,7 +1729,8 @@ function typewrite(el, text) {
     const cps = Math.max(BASE_CPS, text.length / MAX_SEC) * rush;
     const t0 = performance.now();
     let fin = false, sounded = 0;
-    const finish = () => { if (fin) return; fin = true; el.textContent = text; done(); };
+    el.classList.add('typing');   // 閃爍游標：打字聲對得到哪一行，就算沒開跟隨也找得到
+    const finish = () => { if (fin) return; fin = true; el.textContent = text; el.classList.remove('typing'); done(); };
     // rAF 在分頁被瀏覽器暫停時不會跑——沒有這道保險，整條佇列會卡住不動。
     // 逾時要跟著速度算：寫死 2500ms 的話，慢速長文會被它提早整段吐出來。
     const guard = setTimeout(finish, text.length / cps * 1000 + 1500);
@@ -1717,6 +1740,7 @@ function typewrite(el, text) {
       el.textContent = text.slice(0, n);
       if (n > sounded) { sounded = n; keyClick(); }   // 打字聲跟著【真的長出來的字】走
       keepBottom();
+      if (follow() && n > sounded - 1) revealTyping(el);   // 開著跟隨：字長到哪，畫面跟到哪
       if (n >= text.length) { clearTimeout(guard); finish(); return; }
       requestAnimationFrame(step);
     })(t0);
