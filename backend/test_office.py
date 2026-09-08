@@ -448,6 +448,7 @@ def run() -> None:
     schedule_delivery()
     schedule_file_valid()
     schedule_visible()
+    cli_hitl()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2351,6 +2352,100 @@ def schedule_visible() -> None:
         finally:
             main.SCHEDULE_FILE = old_file
             main.sched_last.clear(); main.sched_last.update(old_last)
+
+
+def cli_hitl() -> None:
+    """CLI 的人工介入：權限請求 → 審批卡 → 老闆放行／駁回 → hook 拿到決定；無人值守立刻拒；逾時拒；
+    插話多等一輪 result；審批 hook 會被同步進員工 profile。"""
+    import tempfile
+    aid = "p05"
+    old_avail, main.cli_available = main.cli_available, lambda: True
+    saved_engine = main.engine_sent.get(aid); main.engine_sent[aid] = main.ENGINE_CLI
+    main.busy.discard(aid); main.sched_running.pop(aid, None); main.clear_approval(aid)
+    cwd = str((main.CHANNELS_DIR or Path("/tmp/x")) / "office_p05")
+    req = {"cwd": cwd, "session_id": "s1", "tool_name": "WebFetch", "tool_input": {"url": "https://x.test/"}, "tool_use_id": "tu1"}
+
+    async def drive():
+        # 1) 放行：請求進來 → 審批卡（cogito 樣板，parse 得出工具）→ approve → hook 收到 allow
+        t = asyncio.create_task(main.office_permission(dict(req)))
+        await asyncio.sleep(0.15)
+        assert aid in main.pending_approval and main.approval_meta.get(aid, {}).get("tool") == "WebFetch", main.approval_meta.get(aid)
+        assert main.approval_from(aid) == "", "CLI 的審批來源是 office，外殼要能直接按"
+        r = await main.office_dispatch({"agent": aid, "text": "approve"})
+        assert r.get("ok"), r
+        d = await asyncio.wait_for(t, 3)
+        assert d["behavior"] == "allow", d
+        assert aid not in main.pending_approval and aid not in main.cli_permission
+        evs = [e["text"] for e in main.last_report[aid]["events"]]
+        assert any("老闆核准了這個操作" in x for x in evs), evs[-3:]
+        # 2) 駁回帶理由：hook 拿到 deny 與理由（agent 看得到，可以改走別的路）
+        t = asyncio.create_task(main.office_permission(dict(req)))
+        await asyncio.sleep(0.15)
+        r = await main.office_dispatch({"agent": aid, "text": "reject 這個網域不准抓"})
+        assert r.get("ok"), r
+        d = await asyncio.wait_for(t, 3)
+        assert d["behavior"] == "deny" and "不准抓" in d["message"], d
+        # 3) 無人值守（班表任務）：不開卡、立刻拒、留痕
+        main.sched_running[aid] = {"job": {"name": "x"}, "started": time.time()}
+        d = await main.office_permission(dict(req))
+        main.sched_running.pop(aid, None)
+        assert d["behavior"] == "deny" and "無人值守" in d["message"], d
+        assert aid not in main.pending_approval
+        assert any("⛔ 班表任務無人值守" in e["text"] for e in main.last_report[aid]["events"])
+        # 4) 逾時：沒人按 → 拒、卡收掉
+        old_t, main.CLI_APPROVAL_S = main.CLI_APPROVAL_S, 0.3
+        try:
+            d = await main.office_permission(dict(req))
+        finally:
+            main.CLI_APPROVAL_S = old_t
+        assert d["behavior"] == "deny" and "逾時" in d["message"] and aid not in main.pending_approval, d
+        # 5) 認不出的目錄：拒
+        d = await main.office_permission({**req, "cwd": "/tmp/nowhere", "session_id": "zz"})
+        assert d["behavior"] == "deny"
+        # 6) 插話：寫進 stdin、多等一輪；中間的 result 不算收工
+        class _Stdin:
+            def __init__(self): self.buf = b""; self.closed = False
+            def write(self, b): self.buf += b
+            async def drain(self): pass
+            def is_closing(self): return self.closed
+            def close(self): self.closed = True
+        class _Proc:
+            stdin = _Stdin()
+        main.cli_procs[aid] = _Proc(); main.cli_turns[aid] = 1; main.busy.add(aid)
+        try:
+            r = await main.office_dispatch({"agent": aid, "text": "/steer 先看 README"})
+            assert r.get("ok"), r
+            line = json.loads(_Proc.stdin.buf.decode("utf-8").strip().splitlines()[-1])
+            assert line["type"] == "user" and line["message"]["content"] == "先看 README", line
+            assert main.cli_turns[aid] == 2
+            assert main.cli_turn_done(aid) is False, "插話後第一個 result 不是收工"
+            assert main.cli_turn_done(aid) is True
+            _Proc.stdin.close()
+            r = await main.office_dispatch({"agent": aid, "text": "/steer 太晚了"})
+            assert r.get("ok") is False and "送不進" in r["error"], "stdin 關了就要明講，不假裝送了"
+        finally:
+            main.cli_procs.pop(aid, None); main.cli_turns.pop(aid, None); main.busy.discard(aid)
+    try:
+        asyncio.run(drive())
+        # 7) hook 同步進 profile：第一次寫、第二次 same、不動別的鍵
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cfg = os.environ.get("CLAUDE_CONFIG_DIR"); os.environ["CLAUDE_CONFIG_DIR"] = tmp
+            try:
+                (Path(tmp) / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Write"]}, "theme": "dark"}), encoding="utf-8")
+                assert main.sync_office_hook() == "wrote"
+                d = json.loads((Path(tmp) / "settings.json").read_text(encoding="utf-8"))
+                h = d["hooks"]["PermissionRequest"][0]["hooks"][0]
+                assert h["command"] == str(main.HOOK_SCRIPT) and h["timeout"] > main.CLI_APPROVAL_S and Path(h["command"]).exists()
+                assert d["permissions"]["allow"] == ["Write"] and d["theme"] == "dark", "同步不能動到別的鍵"
+                assert main.sync_office_hook() == "same"
+            finally:
+                if old_cfg is None: os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else: os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
+    finally:
+        main.cli_available = old_avail
+        if saved_engine: main.engine_sent[aid] = saved_engine
+        else: main.engine_sent.pop(aid, None)
+        main.clear_approval(aid); main.cli_permission.pop(aid, None)
 
 
 def full_stream() -> None:

@@ -147,6 +147,18 @@ RSS 用 WebFetch 讀得出項目（haiku 探針：technews 與 techcrunch 各三
 「跟昨天比」靠檔案最穩——兩個引擎的記憶機制（cogito 的頻道 session、CLI 的 `--resume`）都只是加分，
 且 CLI 那條 session 會無限增長，不該把連續性押在它上面。不需要改程式。
 
+## 二之後：可審計、可回溯、可人工介入（2026-09-08 起）
+
+### 人工介入（CLI）—— ✅ 已完成
+
+`-p` 沒有人能回答權限提問，先前一律拒絕、中途插不了話。Claude Code 有兩個為此準備的入口，都探過：
+- **PermissionRequest hook**（`backend/tools/office_permission_hook.py`，橋啟動時同步進員工 profile 的 settings.json）：
+  請求 POST 到橋的 `/office/permission`，橋用 cogito 審批卡的同一個樣板開卡（倒數、走到老闆房門口、外殼的放行／駁回鍵全部沿用），
+  等老闆決定後回 allow／deny 給 hook。無人值守（班表任務）立刻拒、逾時拒、橋連不上拒——沒人可問時「等」不是安全，與 cogito 的 WithUnattended 同一條。
+- **stream-json 輸入**：提示改從 stdin 送、stdin 保持開著，`/steer` 就是再送一則使用者訊息；實測第二則會排隊、各自一個 result，
+  所以插話後多等一輪 result 才算收工。
+驗紅三條：approve 不交回 hook（審批卡等到逾時）、無人值守不擋（變成等逾時）、插話不多等一輪（卡提早關）。
+
 ## 三、引擎怎麼選
 
 觸發統一用橋的班表；**執行引擎按例行事選**（job 的 `engine` 欄位；沒指定才落到外殼的選擇／人設）：

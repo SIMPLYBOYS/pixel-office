@@ -2584,7 +2584,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # 它靠工作區檔案接續（先讀昨天那份），不靠對話；固定 session 每天疊一次，老徐跑一次就 130K，
     # 疊到 compact 只會讓它記得「做過趨勢報告」，不會因此更會做。
     sess_args = ["--session-id", str(uuid.uuid4())] if fresh else cli_session_args(aid, base)
-    argv = [CLI_CMD, "-p", text, "--output-format", "stream-json", "--verbose",
+    cli_session_of[aid] = sess_args[1]
+    # 提示不放 argv、改從 stdin 送（stream-json 輸入）：stdin 開著，任務中才能插話（/steer）。
+    # 實測：第二則訊息會排隊、各自有一個 result；stdin 關掉行程才結束。
+    argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--permission-mode", CLI_PERMISSION, *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
     # 那是它的預設，不是我們該替它決定的事。
@@ -2594,13 +2597,19 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                         "label": text[:80], "detail": str(base)})
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(base), stdout=asyncio.subprocess.PIPE,
+            *argv, cwd=str(base), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=1 << 22)   # 單行可能很長（工具參數）
     except OSError as e:
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                             "detail": f"起不了 CLI（{CLI_CMD}）：{e}"})
         return
     cli_procs[aid] = proc
+    cli_turns[aid] = 1
+    if not await cli_send(aid, text):   # 提示送不進去＝這個 CLI 不吃 stdin，明講，不假裝派了
+        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+                            "detail": "提示送不進 CLI 的 stdin（行程一起來就結束？）"})
+        cli_procs.pop(aid, None)
+        return
     tool_names: dict[str, str] = {}
     warned: set[str] = set()
     done_sent = False
@@ -2637,11 +2646,15 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                         })
                     continue
                 if d.get("type") == "result":
+                    if not cli_turn_done(aid):   # 插話排隊中：這輪的 result 不是收工，CLI 接著處理下一則
+                        continue
                     done_sent = True
                     # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
                     # 標成花費就是說謊，所以不送 cost——額度用量另外講（見 msg）。
                     for ev in cli_done_events(d):   # 被權限擋下的交付不算完成（見函式說明）
                         await office_event({"v": 1, "agent": aid, **ev})
+                    if proc.stdin is not None and not proc.stdin.is_closing():
+                        proc.stdin.close()       # 關 stdin，行程才會結束
                     continue
                 for ev in cli_events(d, tool_names):
                     # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠
@@ -2669,6 +2682,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         raise
     finally:
         cli_procs.pop(aid, None)
+        cli_turns.pop(aid, None)
+        if fut := cli_permission.get(aid):        # 行程沒了，等著的審批也沒有意義
+            if not fut.done():
+                fut.set_result((False, "CLI 行程已結束"))
         if not done_sent:
             # CLI 沒吐 result 就死了（崩潰、被殺、輸出壞掉）。不補這一筆的話，
             # 卡片會永遠停在「進行中」、NPC 永遠不回座位——watchdog 五分鐘後才兜底。
@@ -2677,6 +2694,122 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                 err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
             await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                                 "detail": f"CLI 異常結束（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
+
+
+# ── CLI 的人工介入：審批（PermissionRequest hook → 橋）與插話（stream-json stdin）───────────
+# -p 模式沒有人能回答權限提問，先前一律變成拒絕、中途也插不了話。Claude Code 有兩個為此準備的入口：
+# PermissionRequest hook（tools/office_permission_hook.py，橋啟動時同步進員工 profile）把請求送來這裡，
+# 橋開審批卡、等老闆決定；--input-format stream-json 讓 stdin 保持開著，/steer 就是再送一則使用者訊息。
+# 投影不用改：審批卡、倒數、走到老闆房門口，全部沿用 cogito 那條。
+HOOK_SCRIPT = Path(__file__).parent / "tools" / "office_permission_hook.py"
+CLI_APPROVAL_S = float(os.environ.get("OFFICE_CLI_APPROVAL_S", "300"))   # 無人回應就自動拒絕（與 cogito 同款 5 分鐘）
+cli_permission: dict[str, asyncio.Future] = {}   # aid -> 等老闆決定的 future（allow?, why）
+cli_turns: dict[str, int] = {}                    # aid -> 還要等幾個 result 才算收工（1 ＋ 插話數）
+cli_session_of: dict[str, str] = {}               # aid -> 這次跑的 session id（hook 用 cwd 認人，這是備援）
+CWD_AGENT_RE = re.compile(r"/office_(kanban|p\d+)(?:/|$)")
+
+
+def sync_office_hook() -> str:
+    """把審批 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
+    掛在 profile 而不是各工作區：權限線是辦公室的制度，不該每個員工各一份、漏一個就變成無聲拒絕。"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return "skip"
+    p = Path(cfg).expanduser() / "settings.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except ValueError:
+        print(f"⚠ {p} 不是合法 JSON，審批 hook 沒掛上——CLI 員工的權限請求會一律被拒")
+        return "skip"
+    want = {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}
+    entries = d.setdefault("hooks", {}).setdefault("PermissionRequest", [])
+    for entry in entries:
+        for h in entry.get("hooks", []):
+            if h.get("command") == want["command"]:
+                if h.get("timeout") == want["timeout"]:
+                    return "same"
+                h["timeout"] = want["timeout"]
+                p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                return "wrote"
+    entries.append({"matcher": "", "hooks": [want]})
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"審批 hook 已掛進 {p}")
+    return "wrote"
+
+
+def agent_from_cwd(cwd: str) -> str | None:
+    m = CWD_AGENT_RE.search(str(cwd or ""))
+    return m.group(1) if m and m.group(1) in agents else None
+
+
+@app.post("/office/permission")
+async def office_permission(d: dict):
+    """員工 CLI 的權限請求 → 辦公室審批卡 → 等老闆決定 → 回 {behavior, message}。
+    無人值守（班表）一律立刻拒絕，跟 cogito 的 WithUnattended 同一條規則：沒人可問時「等」不是安全。"""
+    aid = agent_from_cwd(d.get("cwd")) or next((a for a, s in cli_session_of.items() if s == d.get("session_id")), None)
+    tool = str(d.get("tool_name") or "?")
+    params = json.dumps(d.get("tool_input"), ensure_ascii=False) if d.get("tool_input") is not None else ""
+    if aid is None:
+        return {"behavior": "deny", "message": "辦公室認不出這個工作目錄屬於哪位員工，拒絕"}
+    if aid in sched_running:
+        log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{tool}｜{params[:120]}")
+        return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"}
+    if aid in cli_permission or aid in pending_approval:
+        return {"behavior": "deny", "message": "上一張審批還在等老闆決定，這一個先拒絕；等那張處理完再試"}
+    # 沿用 cogito 審批卡的樣板：parse_approval 的正則、外殼的版面、倒數，全部不用改
+    text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params[:600]}`\n"
+            f"任務 ID: `{d.get('tool_use_id') or '-'}`\n"
+            f"👉 直接回復 `approve` / `reject` 即可。{max(1, int(CLI_APPROVAL_S // 60))} 分鐘內無響應將自動拒絕。")
+    await office_chat({"agent": f"office:{aid}", "text": text})
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    cli_permission[aid] = fut
+    try:
+        allowed, why = await asyncio.wait_for(fut, timeout=CLI_APPROVAL_S)
+    except asyncio.TimeoutError:
+        allowed, why = False, "無人回應，逾時自動拒絕"
+        clear_approval(aid)
+        await sync_emote(aid)
+        log_ev(aid, f"⏰ 審批逾時無人回應，自動拒絕：{tool}")
+    finally:
+        cli_permission.pop(aid, None)
+    return {"behavior": "allow" if allowed else "deny", "message": why}
+
+
+async def resolve_cli_permission(aid: str, allowed: bool, why: str) -> bool:
+    """老闆按了放行／駁回：把決定交回等著的 hook，並做跟 cogito 那條一樣的收卡投影。"""
+    fut = cli_permission.get(aid)
+    if fut is None or fut.done():
+        return False
+    fut.set_result((allowed, why))
+    clear_approval(aid)
+    await sync_emote(aid)
+    notify("agent", aid, alert="done")
+    await bubble(aid, "✓ 放行" if allowed else "⚠ 駁回")
+    log_ev(aid, f"🧑‍💼 老闆{'核准' if allowed else '駁回'}了這個操作" + (f"：{why}" if why and not allowed else ""))
+    if desk := WORK_DESK.get(aid):
+        await goto(aid, desk)
+    return True
+
+
+async def cli_send(aid: str, text: str) -> bool:
+    """往員工 CLI 的 stdin 送一則使用者訊息（stream-json 輸入格式）。送不進去回 False，不假裝送了。"""
+    proc = cli_procs.get(aid)
+    if proc is None or proc.stdin is None or proc.stdin.is_closing():
+        return False
+    try:
+        proc.stdin.write((json.dumps({"type": "user", "message": {"role": "user", "content": text}},
+                                     ensure_ascii=False) + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError, RuntimeError):
+        return False
+    return True
+
+
+def cli_turn_done(aid: str) -> bool:
+    """收到一個 result：是不是最後一個？插話會多一輪，中間的 result 不是收工。"""
+    cli_turns[aid] = max(0, cli_turns.get(aid, 1) - 1)
+    return cli_turns[aid] == 0
 
 
 # ── 模型選擇（觀察 ③：外殼要能臨時換模型）─────────────────────────────
@@ -2819,6 +2952,8 @@ async def office_dispatch(d: dict):
             return {"ok": False, "error": f"{agents[aid].name} 沒有進行中的任務"}
         if proc := cli_procs.get(aid):
             proc.kill()      # CLI 沒有優雅中止的入口，砍掉就是砍掉——done 由 finally 補
+            if (fut := cli_permission.get(aid)) and not fut.done():
+                fut.set_result((False, "老闆中止了任務"))
             how = ""
         elif cli_mode:
             how = "（沒有進行中的 CLI 行程——直接收掉這張卡）"
@@ -2835,7 +2970,7 @@ async def office_dispatch(d: dict):
     # 核准【刻意不比照】。審批擋的是高危操作：送不出去卻把卡收掉，使用者會以為
     # rm -rf 已經授權執行了，實際上 agent 會等到逾時然後【自動拒絕】——那是相反的結果。
     # 寧可卡留著、明講送不出去（見下面轉發失敗的訊息）。
-    if verb == "reject" and aid in pending_approval:
+    if verb == "reject" and aid in pending_approval and aid not in cli_permission:
         how = await tell_cogito_reject(aid)
         clear_approval(aid)
         await sync_emote(aid)                # 頭上的倒數餅圖跟著收
@@ -2880,7 +3015,19 @@ async def office_dispatch(d: dict):
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled"))))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
     if cli_mode:
-        return {"ok": False, "error": f"CLI 模式不支援「{verb}」——審批與插話是 cogito 的機制"}
+        if verb in ("approve", "reject"):
+            why = text[len(verb):].strip()
+            if await resolve_cli_permission(aid, verb == "approve", why or ("老闆核准" if verb == "approve" else "老闆駁回")):
+                return {"ok": True}
+            return {"ok": False, "error": f"{agents[aid].name} 沒有待審批的操作"}
+        if verb == "/steer":
+            if not await cli_send(aid, text[len("/steer"):].strip()):
+                return {"ok": False, "error": "插話送不進 CLI（stdin 已關或行程不在）——這一次的任務已經在收尾"}
+            cli_turns[aid] = cli_turns.get(aid, 1) + 1    # 多一則訊息＝多等一個 result
+            log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
+            await bubble(aid, "📨 插話")
+            return {"ok": True}
+        return {"ok": False, "error": f"CLI 模式不支援「{verb}」"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
     # 人數上限只對看板有意義（其他人本來就是一個人做），而且不能套在 approve/reject//stop
@@ -3440,6 +3587,7 @@ async def _startup() -> None:
     load_state()
     sync_souls()
     sync_office_guide()   # 共通守則：cogito 根 AGENTS.md ＋ 員工 CLI profile 的 CLAUDE.md
+    sync_office_hook()    # 審批線：PermissionRequest hook 掛進員工 CLI profile
     sync_agents()   # kanban 頻道的具名 agent（主持人才點得到名）
     # 提案數要在【第一次開名冊之前】就是對的。只靠 sweep（30 秒一輪）的話，剛啟動那段
     # 名冊會說「0 條」——那不是「還沒載入」，是一句錯的話（實際上看板就有 33 條）。
