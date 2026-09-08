@@ -1457,6 +1457,8 @@ async def office_event(ev: dict):
             card["engine"] = str(ev.get("engine") or ENGINE_COGITO)
             card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
             card["ts"] = time.time()
+            audit("task.start", aid, card=card["id"], engine=card["engine"], session=card["session"],
+                  task=task[:200], scheduled=aid in sched_running)
             log_ev(aid, f"📋 接到任務：{task}")
             # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
@@ -1529,6 +1531,7 @@ async def office_event(ev: dict):
             paid = f"（${cost:.4f}）" if cost else ""  # 中斷也標——燒掉的錢不因失敗就不見
             log_ev(aid, ("✔ 任務完成" if label == "ok" else "✗ 任務中斷") + paid)
             a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+            audit("task.done", aid, card=(card or {}).get("id"), label=label, cost=cost, detail=str(ev.get("detail") or "")[:300])
             if run := sched_running.pop(aid, None):   # 班表任務：收工就交付；留痕掛在剛關掉的這張卡上
                 asyncio.create_task(deliver_job(aid, run["job"], label, run["started"]))
     else:
@@ -1540,6 +1543,9 @@ async def office_event(ev: dict):
         line = tl_text(kind, lbl, ev.get("detail", ""))
         if line:
             log_ev(aid, line)
+        if kind == "error" and str(ev.get("detail", "")).startswith(POLICY_DENY_PREFIXES):
+            # cogito guard 的 Deny／無人值守拒絕只印在它的 stdout；橋這裡是唯一會落帳的地方
+            audit("policy.denied", aid, tool=str(label)[:60], reason=str(ev.get("detail", ""))[:300], engine=ENGINE_COGITO)
 
     # 閒聊：接到/收工不是任務事件，不冒泡；回話（msg）照樣冒——那是員工在回應老闆
     text = None if (chatting and kind in ("start", "done")) else office_bubble(kind, label)
@@ -1680,6 +1686,9 @@ async def office_chat(ev: dict):
         if meta := parse_approval(text):
             approval_meta[aid] = meta
         approval_at[aid] = time.time()
+        m = approval_meta.get(aid) or {}
+        audit("approval.asked", aid, tool=m.get("tool"), params=str(m.get("params") or "")[:300], task_id=m.get("task_id"),
+              source=approval_src.get(aid, ""), engine=ENGINE_CLI if aid in cli_procs else ENGINE_COGITO)
         # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
         busy.add(aid)
         work_last[aid] = time.monotonic()
@@ -2654,6 +2663,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     if not cli_turn_done(aid):   # 插話排隊中：這輪的 result 不是收工，CLI 接著處理下一則
                         continue
                     done_sent = True
+                    for x in d.get("permission_denials") or []:
+                        if isinstance(x, dict):
+                            audit("permission.denied", aid, tool=str(x.get("tool_name") or "?"),
+                                  params=json.dumps(x.get("tool_input"), ensure_ascii=False)[:300], engine=ENGINE_CLI)
                     # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
                     # 標成花費就是說謊，所以不送 cost——額度用量另外講（見 msg）。
                     for ev in cli_done_events(d):   # 被權限擋下的交付不算完成（見函式說明）
@@ -2759,6 +2772,7 @@ async def office_permission(d: dict):
         return {"behavior": "deny", "message": "辦公室認不出這個工作目錄屬於哪位員工，拒絕"}
     if aid in sched_running:
         log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{tool}｜{params[:120]}")
+        audit("policy.denied", aid, tool=tool, params=params[:300], reason="unattended", engine=ENGINE_CLI)
         return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"}
     if aid in cli_permission or aid in pending_approval:
         return {"behavior": "deny", "message": "上一張審批還在等老闆決定，這一個先拒絕；等那張處理完再試"}
@@ -2773,6 +2787,7 @@ async def office_permission(d: dict):
         allowed, why = await asyncio.wait_for(fut, timeout=CLI_APPROVAL_S)
     except asyncio.TimeoutError:
         allowed, why = False, "無人回應，逾時自動拒絕"
+        audit("approval.timeout", aid, tool=tool, engine=ENGINE_CLI)
         clear_approval(aid)
         await sync_emote(aid)
         log_ev(aid, f"⏰ 審批逾時無人回應，自動拒絕：{tool}")
@@ -2787,6 +2802,7 @@ async def resolve_cli_permission(aid: str, allowed: bool, why: str) -> bool:
     if fut is None or fut.done():
         return False
     fut.set_result((allowed, why))
+    audit("approval.approved" if allowed else "approval.rejected", aid, by="office-web", why=why[:200], engine=ENGINE_CLI)
     clear_approval(aid)
     await sync_emote(aid)
     notify("agent", aid, alert="done")
@@ -2815,6 +2831,113 @@ def cli_turn_done(aid: str) -> bool:
     """收到一個 result：是不是最後一個？插話會多一輪，中間的 result 不是收工。"""
     cli_turns[aid] = max(0, cli_turns.get(aid, 1) - 1)
     return cli_turns[aid] == 0
+
+
+# ── 稽核帳本：append-only、hash 鏈、兩個引擎共用 ─────────────────────────────
+# 工作串是可覆寫的投影（state 檔整份重寫），要「每個裁決都留得下證據」得另外有一本只能往後寫的帳。
+# 每筆帶前一筆的 hash，自己的 hash 蓋住前一筆＋內容：改掉任何一筆，後面全部對不上（/office/audit 會驗）。
+# 記的是【裁決與事實】：任務開始／結束、審批被問／放行／駁回／逾時、政策拒絕、權限被擋、插話、中止、交付。
+# x402 那次的 ledger 形狀（Deny 也落帳）搬回來，對象從支付改成所有裁決。
+import hashlib
+AUDIT_DIR = Path(os.environ["OFFICE_AUDIT_DIR"]).expanduser() if os.environ.get("OFFICE_AUDIT_DIR") else Path(__file__).parent / "audit"
+AUDIT_FILE_NAME = "ledger.jsonl"
+_audit_last: dict = {"seq": 0, "hash": "", "path": None}
+POLICY_DENY_PREFIXES = ("政策拒絕執行", "此操作需人工審批")   # cogito guard 的兩種拒絕（Deny／無人值守）
+
+
+def audit_path() -> Path:
+    return AUDIT_DIR / AUDIT_FILE_NAME
+
+
+def _audit_hash(entry: dict) -> str:
+    body = {k: v for k, v in entry.items() if k != "hash"}
+    return hashlib.sha256((entry.get("prev", "") + json.dumps(body, ensure_ascii=False, sort_keys=True)).encode("utf-8")).hexdigest()
+
+
+def _audit_tail() -> None:
+    """載入時從檔尾接回鏈：seq 與最後一筆的 hash。檔不在＝從 0 開始。"""
+    path = audit_path()
+    _audit_last.update({"seq": 0, "hash": "", "path": path})
+    if not path.exists():
+        return
+    last = ""
+    with path.open("rb") as f:
+        for raw in f:
+            if raw.strip():
+                last = raw.decode("utf-8", "replace")
+    try:
+        d = json.loads(last)
+        _audit_last.update({"seq": int(d.get("seq", 0)), "hash": str(d.get("hash", ""))})
+    except ValueError:
+        pass
+
+
+def audit(kind: str, aid: str, **fields) -> dict:
+    """落一筆。同步寫：一筆幾百 bytes，await 反而讓兩筆交錯。寫不進去只印警告——稽核帳壞了不能拖垮辦公室，
+    但也不能假裝寫了，所以回傳的 entry 帶 written=False。"""
+    if _audit_last["path"] != audit_path():
+        _audit_tail()
+    entry = {"seq": _audit_last["seq"] + 1, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "agent": aid, "kind": kind}
+    for k, v in fields.items():
+        if v is None or v == "":
+            continue
+        entry[k] = v[:500] if isinstance(v, str) else v
+    entry["prev"] = _audit_last["hash"]
+    entry["hash"] = _audit_hash(entry)
+    try:
+        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        with audit_path().open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"⚠ 稽核帳寫不進去（{e}）：{kind} {aid}")
+        return {**entry, "written": False}
+    _audit_last.update({"seq": entry["seq"], "hash": entry["hash"]})
+    return entry
+
+
+def audit_verify() -> dict:
+    """重算整條鏈。任何一筆被改、被刪、被插，從那筆起就對不上。"""
+    path = audit_path()
+    if not path.exists():
+        return {"ok": True, "entries": 0, "broken_at": None}
+    prev, n = "", 0
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not raw.strip():
+            continue
+        n += 1
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return {"ok": False, "entries": n, "broken_at": n, "reason": "不是合法 JSON"}
+        if d.get("seq") != n:
+            return {"ok": False, "entries": n, "broken_at": n, "reason": f"序號不連續（期望 {n}，實得 {d.get('seq')}）"}
+        if d.get("prev", "") != prev:
+            return {"ok": False, "entries": n, "broken_at": n, "reason": "prev 對不上前一筆的 hash（有東西被改、刪或插）"}
+        if _audit_hash(d) != d.get("hash"):
+            return {"ok": False, "entries": n, "broken_at": n, "reason": "內容與 hash 不符（這一筆被改過）"}
+        prev = d["hash"]
+    return {"ok": True, "entries": n, "broken_at": None}
+
+
+def audit_recent(aid: str = "", limit: int = 50) -> list[dict]:
+    path = audit_path()
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not aid or d.get("agent") == aid:
+            out.append(d)
+    return list(reversed(out[-limit:]))
+
+
+@app.get("/office/audit")
+def office_audit(agent: str = "", limit: int = 50):
+    """這位員工（或全員）最近的裁決紀錄，加上整條鏈驗證結果——看得到，也證得了沒被動過。"""
+    return {"ok": True, "items": audit_recent(agent, max(1, min(limit, 500))), "verify": audit_verify(), "path": str(audit_path())}
 
 
 # ── 回溯：從卡片一鍵到完整紀錄 ─────────────────────────────────────────────
@@ -3103,6 +3226,7 @@ async def office_dispatch(d: dict):
             how = await tell_cogito_stop(aid)
         else:
             how = "（未設 COGITO_HTTP——畫面收掉了，但沒叫停任何東西）"
+        audit("task.stopped", aid, by="office-web", engine=ENGINE_CLI if cli_mode else ENGINE_COGITO, note=how[:200])
         await force_stop(aid, how)
         return {"ok": True, "stopped": True}
     # 駁回跟中止同一個道理：它是使用者的【決定】，不是對上游的請求。所以先收卡再轉發，
@@ -3113,6 +3237,7 @@ async def office_dispatch(d: dict):
     # rm -rf 已經授權執行了，實際上 agent 會等到逾時然後【自動拒絕】——那是相反的結果。
     # 寧可卡留著、明講送不出去（見下面轉發失敗的訊息）。
     if verb == "reject" and aid in pending_approval and aid not in cli_permission:
+        audit("approval.rejected", aid, by="office-web", why=text[len("reject"):].strip()[:200], engine=ENGINE_COGITO)
         how = await tell_cogito_reject(aid)
         clear_approval(aid)
         await sync_emote(aid)                # 頭上的倒數餅圖跟著收
@@ -3167,6 +3292,7 @@ async def office_dispatch(d: dict):
                 return {"ok": False, "error": "插話送不進 CLI（stdin 已關或行程不在）——這一次的任務已經在收尾"}
             cli_turns[aid] = cli_turns.get(aid, 1) + 1    # 多一則訊息＝多等一個 result
             log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
+            audit("steer", aid, by="office-web", text=text[len('/steer'):].strip()[:200], engine=ENGINE_CLI)
             await bubble(aid, "📨 插話")
             return {"ok": True}
         return {"ok": False, "error": f"CLI 模式不支援「{verb}」"}
@@ -3208,8 +3334,11 @@ async def office_dispatch(d: dict):
     if verb == "/steer":
         # 投影：插話上工作串（卡片正開著，直接掛進去）＋泡泡。cogito 端下一輪生效。
         log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
+        audit("steer", aid, by="office-web", text=text[len('/steer'):].strip()[:200], engine=ENGINE_COGITO)
         await bubble(aid, "📨 插話")
     elif verb in ("approve", "reject"):
+        audit("approval.approved" if verb == "approve" else "approval.rejected", aid, by="office-web",
+              why=text[len(verb):].strip()[:200], engine=ENGINE_COGITO)
         clear_approval(aid)  # cogito 確認收到才收卡
         await sync_emote(aid)                # 決定做了，頭上的問號立刻收（不等 sweep）
         notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
@@ -3344,8 +3473,10 @@ async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
                 await (send_telegram if plat == "telegram" else send_slack)(cl, ident, text, path)
             except Exception as e:  # HTTP／API／檔案都可能出錯，任何一種都不能寫成「已送」
                 log_ev(aid, f"⚠ 送 {plat}:{ident} 失敗：{str(e)[:120]}")
+                audit("delivery.failed", aid, target=f"{plat}:{ident}", file=path.name if path else "", error=str(e)[:200], job=job.get("name"))
                 continue
             log_ev(aid, f"📤 {'報表 ' + path.name if path else '收工訊息'}已送到 {plat}:{ident}" + (f"（{why}）" if why else ""))
+            audit("delivery.sent", aid, target=f"{plat}:{ident}", file=path.name if path else "", note=why, job=job.get("name"))
 
 
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"

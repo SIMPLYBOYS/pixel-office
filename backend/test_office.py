@@ -451,6 +451,7 @@ def run() -> None:
     cli_hitl()
     trace_links()
     start_records_engine()
+    audit_ledger()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2519,6 +2520,65 @@ def start_records_engine() -> None:
         assert card["engine"] == "cogito" and card["session"] == "office_p12", "cogito 的 start 沒帶欄位：預設一個頻道一條 session"
         await main.office_event({"v": 1, "agent": "p12", "kind": "done", "label": "ok"})
     asyncio.run(drive())
+
+
+def audit_ledger() -> None:
+    """稽核帳本：append-only、hash 鏈、改一筆就驗得出來；裁決點都落帳（審批問／放行／駁回、政策拒絕、無人值守）；
+    端點按人過濾、最新在前、附鏈驗證。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+        main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        aid = "p05"
+        old_avail, main.cli_available = main.cli_available, lambda: True
+        saved_engine = main.engine_sent.get(aid); main.engine_sent[aid] = main.ENGINE_CLI
+        main.busy.discard(aid); main.sched_running.pop(aid, None); main.clear_approval(aid)
+        try:
+            # 鏈：三筆，prev 接 hash，驗證過
+            e1 = main.audit("test.one", aid, note="a"); e2 = main.audit("test.two", aid, note="b"); e3 = main.audit("test.three", aid)
+            assert e2["prev"] == e1["hash"] and e3["prev"] == e2["hash"] and e1["prev"] == "" and e3["seq"] == 3
+            assert main.audit_verify() == {"ok": True, "entries": 3, "broken_at": None}
+            # 竄改第二筆的內容 → 從第 2 筆斷
+            lines = main.audit_path().read_text(encoding="utf-8").splitlines()
+            d = json.loads(lines[1]); d["note"] = "b-改過"; lines[1] = json.dumps(d, ensure_ascii=False)
+            main.audit_path().write_text("\n".join(lines) + "\n", encoding="utf-8")
+            v = main.audit_verify(); assert v["ok"] is False and v["broken_at"] == 2, v
+            # 刪掉第二筆 → 第 2 筆（原第三筆）序號對不上
+            main.audit_path().write_text(lines[0] + "\n" + lines[2] + "\n", encoding="utf-8")
+            v = main.audit_verify(); assert v["ok"] is False and v["broken_at"] == 2, v
+            main.audit_path().unlink(); main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            # 裁決點：CLI 審批問→放行；再問→駁回；無人值守；cogito 政策拒絕（工具錯誤事件）
+            cwd = str((main.CHANNELS_DIR or Path("/tmp/x")) / "office_p05")
+            req = {"cwd": cwd, "session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "curl x"}, "tool_use_id": "tu9"}
+            async def drive():
+                t = asyncio.create_task(main.office_permission(dict(req))); await asyncio.sleep(0.15)
+                await main.office_dispatch({"agent": aid, "text": "approve"}); await asyncio.wait_for(t, 3)
+                t = asyncio.create_task(main.office_permission(dict(req))); await asyncio.sleep(0.15)
+                await main.office_dispatch({"agent": aid, "text": "reject 不要用 curl"}); await asyncio.wait_for(t, 3)
+                main.sched_running[aid] = {"job": {"name": "x"}, "started": time.time()}
+                await main.office_permission(dict(req)); main.sched_running.pop(aid, None)
+                await main.office_event({"v": 1, "agent": "p07", "kind": "error", "label": "bash", "detail": "政策拒絕執行。原因: 高危"})
+                await main.office_event({"v": 1, "agent": "p07", "kind": "error", "label": "bash", "detail": "exit 1: 一般的失敗"})
+            asyncio.run(drive())
+            kinds = [(e["agent"], e["kind"]) for e in reversed(main.audit_recent())]
+            assert kinds == [("p05", "approval.asked"), ("p05", "approval.approved"), ("p05", "approval.asked"), ("p05", "approval.rejected"),
+                             ("p05", "policy.denied"), ("p07", "policy.denied")], kinds
+            rec = main.audit_recent()
+            assert rec[0]["reason"].startswith("政策拒絕") and rec[0]["engine"] == "cogito"
+            assert rec[1]["reason"] == "unattended" and rec[1]["tool"] == "Bash"
+            assert any(e["kind"] == "approval.rejected" and "不要用 curl" in e.get("why", "") for e in rec)
+            assert main.audit_verify()["ok"] and main.audit_verify()["entries"] == 6
+            with TestClient(main.app) as c:
+                r = c.get("/office/audit", params={"agent": "p07"}).json()
+                assert r["ok"] and [e["kind"] for e in r["items"]] == ["policy.denied"] and r["verify"]["ok"], r
+                r = c.get("/office/audit", params={"limit": 2}).json()
+                assert [e["seq"] for e in r["items"]] == [6, 5], "最新在前、limit 有效"
+        finally:
+            main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            main.cli_available = old_avail
+            if saved_engine: main.engine_sent[aid] = saved_engine
+            else: main.engine_sent.pop(aid, None)
+            main.clear_approval(aid); main.cli_permission.pop(aid, None)
 
 
 def full_stream() -> None:

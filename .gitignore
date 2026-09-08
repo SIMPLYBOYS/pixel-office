@@ -54,3 +54,6 @@ unity/Assets/Resources/OfficeFont.otf.meta
 # 手動備份（web/index.html.bak 之類）——改壞了回得去，但不該進版控
 *.bak
 .demo-logs/
+
+# 稽核帳本（append-only，部署資料，不進 git）
+backend/audit/

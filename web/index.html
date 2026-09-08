@@ -111,6 +111,12 @@
 .badge.stopped { color: #c9a227; }   /* 使用者自己喊停：沒做完，但不是壞掉——跟 ✗ 失敗分開 */
   /* 產出目錄：卡頭就給一個入口，不必展開才點得到 */
   /* 完整紀錄：每步一行，工具參數／結果用 pre 摺在固定高度內；失敗的標紅 */
+  /* 稽核帳本：一筆一行，時間／種類／對象；被拒、失敗、逾時標紅 */
+  .audit .arow { display: grid; grid-template-columns: 7.5em 11em 1fr; gap: 6px; font-size: 11px; padding: 1px 0; }
+  .audit .aat { color: var(--dim); font-family: ui-monospace, Menlo, monospace; }
+  .audit .akind { white-space: nowrap; }
+  .audit .awhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .audit .arow.bad .akind { color: #c0392b; }
   .trace { margin: 6px 0 2px; border-top: 1px dashed var(--line, #ccc); padding-top: 6px; font-size: 11.5px; }
   .trace .thead { color: var(--dim); margin-bottom: 4px; }
   .trace .st { display: grid; grid-template-columns: 11em 1fr; gap: 6px; margin: 2px 0; }
@@ -434,6 +440,7 @@
     <details class="prof board" id="board" hidden></details>
     <details class="prof memo" id="memo" hidden></details>
     <details class="prof" id="profile" hidden></details>
+    <details class="prof audit" id="audit" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
     <div class="composer">
@@ -1332,6 +1339,36 @@ async function profile(id) {
     renderBody(soul, r.soul, false);
   }
   box.addEventListener('toggle', () => { localStorage.profOpen = box.open ? '1' : '0'; });
+  auditcard(id);
+}
+
+// 稽核帳本：這位員工最近的裁決（審批被問／放行／駁回／逾時、政策拒絕、權限被擋、插話、中止、交付）
+// 加整條鏈的驗證結果。工作串是可覆寫的投影，這本是 append-only、hash 鏈——證得了沒被動過。
+const AUDIT_ICON = { 'task.start': '📋', 'task.done': '✔', 'task.stopped': '⏹', 'approval.asked': '⏳', 'approval.approved': '✓',
+  'approval.rejected': '✗', 'approval.timeout': '⏰', 'policy.denied': '⛔', 'permission.denied': '⛔', 'steer': '📨',
+  'delivery.sent': '📤', 'delivery.failed': '⚠' };
+async function auditcard(id) {
+  const box = $('audit');
+  if (!box) return;
+  let r;
+  try { r = await (await fetch(`/office/audit?agent=${encodeURIComponent(id)}&limit=20`)).json(); }
+  catch (e) { r = { ok: false, error: e.message }; }
+  if (!r.ok || !r.items.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const v = r.verify || {};
+  const chain = v.ok ? `鏈完整・共 ${v.entries} 筆` : `⚠ 鏈在第 ${v.broken_at} 筆斷了：${v.reason || ''}`;
+  box.innerHTML = `<summary>🧾 稽核帳本<small>${r.items.length} 筆・${esc(chain)}</small></summary>`;
+  box.open = localStorage.auditOpen === '1';
+  for (const e of r.items) {
+    const what = e.tool || e.task || e.target || e.text || e.why || e.reason || e.detail || '';
+    const row = el('div', '', 'arow' + (/denied|rejected|failed|timeout|stopped/.test(e.kind) ? ' bad' : ''));
+    row.append(el('span', (e.at || '').slice(5, 16).replace('T', ' '), 'aat'),
+               el('span', `${AUDIT_ICON[e.kind] || '·'} ${e.kind}`, 'akind'),
+               el('span', String(what).slice(0, 120), 'awhat'));
+    row.title = JSON.stringify(e, null, 1);
+    box.appendChild(row);
+  }
+  box.addEventListener('toggle', () => { localStorage.auditOpen = box.open ? '1' : '0'; });
 }
 
 // 送出前的反悔窗。派工是【不可逆】的——一旦進了 cogito 就開始花錢，也沒有「收回」這回事，
