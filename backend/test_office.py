@@ -457,6 +457,7 @@ def run() -> None:
     trace_links()
     start_records_engine()
     audit_ledger()
+    cli_subagents()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -1145,6 +1146,7 @@ for o in out:
                 assert f"--session-id {sid}" in sent, f"argv 沒帶 session：{sent}"
                 # 實測：沒有 --permission-prompts none，PermissionRequest hook 不會被問，權限請求直接拒——審批線等於沒接
                 assert "--permission-prompts none" in sent, f"argv 沒帶 --permission-prompts none，審批 hook 不會被問：{sent}"
+                assert "--agents" in sent and "--forward-subagent-text" in sent, f"argv 要帶人設與子 agent 文字轉發：{sent[:200]}"
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
@@ -2593,6 +2595,99 @@ def audit_ledger() -> None:
             if saved_engine: main.engine_sent[aid] = saved_engine
             else: main.engine_sent.pop(aid, None)
             main.clear_approval(aid); main.cli_permission.pop(aid, None)
+
+
+def cli_subagents() -> None:
+    """看板走 CLI：人設隨 --agents 帶上；Claude Code 的子 agent 事件（實測形狀）翻成橋已懂的 cogito 詞彙，
+    起身入座、子卡、交件全沿用；背景子 agent 沒回來前 result 不算收工。"""
+    import tempfile
+    # 1) --agents：七個 slug、有 model 的帶 model、prompt 是人設不帶同步標記
+    j = json.loads(main.cli_agents_json())
+    assert set(j) >= {"xiaomei", "laoxu", "xiaohua", "azhe", "xiaokui", "laowang", "ahai"}, sorted(j)
+    assert j["xiaohua"].get("model") == "claude-haiku-4-5" and "office-persona" not in j["xiaomei"]["prompt"] and "小美" in j["xiaomei"]["prompt"]
+    assert main.slug_to_name("xiaomei") == "小美" and main.slug_to_name("general-purpose") == "general-purpose"
+    # 2) cli_events：實測的事件形狀 → cogito 詞彙
+    tn, subs = {}, {}
+    ev = lambda d: main.cli_events(d, tn, subs)
+    assert ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "T1", "name": "Agent",
+               "input": {"subagent_type": "xiaomei", "description": "小美的意見", "run_in_background": True}}]}}) == [], "Agent 工具呼叫本身不投影（由 task_started 投）"
+    out = ev({"type": "system", "subtype": "task_started", "tool_use_id": "T1", "subagent_type": "xiaomei", "description": "小美的意見", "is_backgrounded": True})
+    assert out == [{"kind": "tool", "label": "spawn_subagent:小美", "detail": "小美的意見"}], out
+    assert ev({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "T1", "content": [{"type": "text", "text": "Async agent launched successfully. agentId: abc"}]}]}}) == [], "背景啟動回執不是交件"
+    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"content": [{"type": "tool_use", "id": "S1", "name": "Read", "input": {"file_path": "a.md"}}]}})
+    assert out == [{"kind": "tool", "label": "[Subagent:小美] Read", "detail": '{"file_path": "a.md"}'}], out
+    out = ev({"type": "user", "parent_tool_use_id": "T1", "message": {"content": [{"type": "tool_result", "tool_use_id": "S1", "content": "內容", "is_error": False}]}})
+    assert out == [{"kind": "result", "label": "[Subagent:小美] Read", "detail": "內容"}], out
+    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"content": [{"type": "text", "text": "不建議立即擴增。"}]}})
+    assert out == [{"kind": "msg", "label": "[Subagent:小美] 不建議立即擴增。"}] and subs["T1"]["text"] == "不建議立即擴增。"
+    out = ev({"type": "system", "subtype": "task_notification", "tool_use_id": "T1", "task_id": "ab61", "status": "completed"})
+    assert out == [{"kind": "result", "label": "subagent_await", "detail": "背景子 agent ab61 [小美]：✅ 已完成\n不建議立即擴增。"}], out
+    assert main.BG_DONE_RE.search(out[0]["detail"]).group(1) == "小美", "收件格式要對得上橋的 BG_DONE_RE"
+    assert "T1" not in subs
+    # 前景子 agent：Agent 的 tool_result 就是交件
+    ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "T2", "name": "Agent", "input": {"subagent_type": "laoxu"}}]}})
+    ev({"type": "system", "subtype": "task_started", "tool_use_id": "T2", "subagent_type": "laoxu", "description": "老徐", "is_backgrounded": False})
+    out = ev({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "T2", "content": "需要，先試一間。"}]}})
+    assert out == [{"kind": "result", "label": "spawn_subagent:老徐", "detail": "需要，先試一間。"}], out
+    # 3) 整條走假 CLI：看板派工 → 小美起身支援 → 背景交件 → 看板收工在第二個 result 才發生
+    fake = r"""#!/usr/bin/env python3
+import json, sys, time
+out = [
+ {"type":"system","subtype":"init","model":"m","cwd":"x","tools":["Agent","Read"],"skills":[],"mcp_servers":[]},
+ {"type":"assistant","message":{"content":[{"type":"tool_use","id":"T1","name":"Agent","input":{"subagent_type":"xiaomei","description":"小美的意見","run_in_background":True}}]}},
+ {"type":"system","subtype":"task_started","tool_use_id":"T1","subagent_type":"xiaomei","description":"小美的意見","is_backgrounded":True},
+ {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"ab61"}]},
+ {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"T1","content":[{"type":"text","text":"Async agent launched successfully."}]}]}},
+ {"type":"assistant","message":{"content":[{"type":"text","text":"已派出小美，等待中"}]}},
+ {"type":"result","subtype":"success","is_error":False,"num_turns":2,"result":"已派出小美，等待中"},
+ {"type":"assistant","parent_tool_use_id":"T1","message":{"content":[{"type":"text","text":"不建議立即擴增。"}]}},
+ {"type":"system","subtype":"task_notification","tool_use_id":"T1","task_id":"ab61","status":"completed"},
+ {"type":"system","subtype":"background_tasks_changed","tasks":[]},
+ {"type":"assistant","message":{"content":[{"type":"text","text":"小美：不建議立即擴增。完成"}]}},
+ {"type":"result","subtype":"success","is_error":False,"num_turns":1,"result":"完成"},
+]
+for i, o in enumerate(out):
+    print(json.dumps(o, ensure_ascii=False), flush=True)
+    if i == 6: time.sleep(0.6)   # 第一個 result 之後停一下：這段時間看板卡必須還開著
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakeclaude"; bin_.write_text(fake, encoding="utf-8"); bin_.chmod(0o755)
+        old_cmd, main.CLI_CMD = main.CLI_CMD, str(bin_)
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
+        old_sess, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp) / "sessions"; main.CLI_SESSION_DIR.mkdir()
+        saved = main.engine_sent.get("kanban")
+        try:
+            with TestClient(main.app) as c:
+                main.engine_sent["kanban"] = main.ENGINE_CLI
+                main.busy.discard("kanban"); main.busy.discard("p01"); main.sub_active.clear()
+                before = (main.last_report.get("kanban") or {}).get("id")
+                r = c.post("/office/dispatch", json={"agent": "kanban", "text": "要不要加會議室", "engine": "cli"}).json()
+                assert r["ok"] and r["engine"] == "cli", r
+                # 第一個 result 之後：小美在支援、看板卡還開著
+                seen_open = False
+                for _ in range(60):
+                    time.sleep(0.05)
+                    k = main.last_report.get("kanban")
+                    if k and k.get("id") != before and "p01" in main.busy and k["status"] == "working":
+                        seen_open = True; break
+                assert seen_open, "背景子 agent 還在跑時，看板卡就該開著、小美該在支援中"
+                for _ in range(100):
+                    time.sleep(0.05)
+                    k = main.last_report.get("kanban")
+                    if k and k.get("id") != before and k["status"] != "working":
+                        break
+                assert k["status"] == "ok", k
+                assert "p01" not in main.busy, "小美交件後該解除忙碌"
+                sub = main.last_report["p01"]
+                assert sub["task"].startswith("支援看板") and sub["status"] == "ok", sub
+                assert any("不建議立即擴增" in e["text"] for e in sub["events"]), [e["text"] for e in sub["events"]][-4:]
+                kev = [e["text"] for e in k["events"]]
+                assert any("委派給 小美" in t for t in kev), kev
+        finally:
+            main.CLI_CMD, main.CHANNELS_DIR, main.CLI_SESSION_DIR = old_cmd, old_ch, old_sess
+            if saved: main.engine_sent["kanban"] = saved
+            else: main.engine_sent.pop("kanban", None)
+            main.busy.discard("kanban"); main.busy.discard("p01"); main.sub_active.clear()
 
 
 def full_stream() -> None:

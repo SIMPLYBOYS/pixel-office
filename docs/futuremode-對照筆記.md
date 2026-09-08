@@ -186,6 +186,21 @@ cogito 動作前的思考列成 💭；CLI 的 thinking 只有簽章，不列也
 回溯兩邊都能從卡一鍵到完整紀錄（推理文字只有 cogito 有）；稽核一本帳共用。還沒做的：審批者身分（現在一律 office-web，單一老闆）、
 帳本外送（放到辦公室以外的地方才算真的不可竄改）、cogito 端 guard 直接落帳（現在靠字首認）。
 
+### 看板走 CLI —— ✅ 已完成（2026-09-08）
+
+Claude Code 本來就有子 agent，看板跑不起來是辦公室三條線沒接：
+1. **人設可點名**：`~/.claude/agents` 不吃 CLAUDE_CONFIG_DIR、project 層要每個工作區各放一份，所以改成 `--agents` JSON
+   隨派工帶上（session-only、永遠跟人設同步）。`subagent_type` 只准小寫英文，persona yaml 多 `slug`（xiaomei／laoxu…）。
+2. **主持人守則引擎中立**：點名表兩欄（cogito 名字／Claude Code 代號）、背景派工與等待各自的說法；Claude Code 沒有 await 工具，
+   完成通知會自己來，守則明講不要輪詢。
+3. **投影**：實測 Claude Code 的子 agent 事件形狀——`system/task_started`（tool_use_id、subagent_type、description）、
+   帶 `parent_tool_use_id` 的 assistant／user（要 `--forward-subagent-text`）、`system/task_notification`（交件）、
+   `background_tasks_changed`。橋把它們翻成 cogito 的詞彙 `spawn_subagent:<名>`、`[Subagent:<名>] …`、`subagent_await` 收件格式，
+   起身入座、子卡、交付戲一行不改。背景子 agent 沒回來前 `result` 不算收工（`-p` 會等它們再跑一輪），驗紅過。
+4. **審批**：子 agent 的權限請求走同一個 hook，cwd 一樣是看板工作區，對到看板；卡上暫時看不出是哪個子 agent 的（hook 輸入沒帶）。
+
+活跑探針：`--agents` 定義 xiaomei／laoxu，主持人背景派兩人、各自回意見、完成通知、彙整——三個 result、一次 `-p`。
+
 ## 三、引擎怎麼選
 
 觸發統一用橋的班表；**執行引擎按例行事選**（job 的 `engine` 欄位；沒指定才落到外殼的選擇／人設）：

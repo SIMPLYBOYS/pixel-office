@@ -2434,11 +2434,84 @@ def cli_available() -> bool:
     return shutil.which(CLI_CMD) is not None
 
 
-def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
+def cli_agents_json() -> str:
+    """七個員工的人設 → Claude Code 的 --agents JSON（session-only，隨派工帶上，永遠跟人設同步）。
+    為什麼不寫檔：~/.claude/agents 不吃 CLAUDE_CONFIG_DIR，project 層又得每個工作區各放一份；
+    帶在 argv 上零檔案、零漂移。subagent_type 只准小寫英文，所以用 persona 的 slug。"""
+    out: dict[str, dict] = {}
+    persona_dir = Path(__file__).parent / "personas"
+    for aid, a in npcs().items():
+        slug = str(a.persona.get("slug") or "").strip()
+        if not slug:
+            continue
+        body = (persona_dir / f"{aid}.md").read_text(encoding="utf-8") if (persona_dir / f"{aid}.md").exists() else ""
+        p = a.persona
+        head = f"# 你是{p.get('name', aid)}（{p.get('role', '員工')}）" + (f"\n\n個性：{p['personality']}" if p.get("personality") else "") + \
+               (f"\n說話風格：{p['style']}" if p.get("style") else "")
+        d = {"description": "；".join(x for x in (p.get("role", ""), p.get("personality", "")) if x),
+             "prompt": f"{head}\n\n{body.strip()}\n\n你是辦公室裡的子 agent：回答限 300 字內，只給結論與理由，有疑慮直說；讀檔給路徑就自己讀，不要求主持人貼內容。"}
+        if a.model:
+            d["model"] = a.model
+        out[slug] = d
+    return json.dumps(out, ensure_ascii=False)
+
+
+def slug_to_name(slug: str) -> str:
+    """Claude Code 的 subagent_type（xiaomei）→ 人名（小美）；不認得就原樣回，橋會退成探路者。"""
+    for a in npcs().values():
+        if str(a.persona.get("slug") or "") == slug:
+            return a.name
+    return slug
+
+
+def cli_events(d: dict, tool_names: dict[str, str], subs: dict | None = None) -> list[dict]:
     """一筆 CLI 事件 → 零到多筆 office 事件。tool_names 記 tool_use_id → 工具名，
-    因為結果事件只帶 id，而辦公室要顯示「哪個工具回來了」。"""
+    因為結果事件只帶 id，而辦公室要顯示「哪個工具回來了」。
+
+    subs：子 agent 狀態（Agent 工具的 tool_use_id → {name, text}）。Claude Code 的子 agent事件形狀（實測）：
+      system/task_started {tool_use_id, subagent_type, description, is_backgrounded} → 委派上工
+      帶 parent_tool_use_id 的 assistant／user → 子 agent 自己的工具與發言（要 --forward-subagent-text）
+      system/task_notification {tool_use_id, status} → 背景子 agent 交件（成果＝它最後那段文字）
+      主串流裡 Agent 的 tool_result「Async agent launched successfully」只是啟動回執，不是交件
+    這裡把它們翻成橋已經懂的 cogito 詞彙：spawn_subagent:<名>、[Subagent:<名>] …、subagent_await 的收件格式，
+    投影（起身入座、冒泡、子卡、交付戲）一行都不用改。"""
     out: list[dict] = []
     t = d.get("type")
+    subs = subs if subs is not None else {}
+    parent = d.get("parent_tool_use_id")
+    if t == "system":
+        st = d.get("subtype")
+        if st == "task_started" and d.get("tool_use_id"):
+            name = slug_to_name(str(d.get("subagent_type") or ""))
+            subs[str(d["tool_use_id"])] = {"name": name, "text": ""}
+            out.append({"kind": "tool", "label": f"spawn_subagent:{name}", "detail": str(d.get("description") or "")[:400]})
+        elif st == "task_notification" and str(d.get("tool_use_id")) in subs:
+            sub = subs.pop(str(d["tool_use_id"]))
+            ok = str(d.get("status") or "") == "completed"
+            head = (f"背景子 agent {d.get('task_id') or '-'} [{sub['name']}]：✅ 已完成\n" if ok
+                    else f"背景子 agent {d.get('task_id') or '-'} [{sub['name']}]：⚪ 已結束（失敗：{d.get('status')}）")
+            out.append({"kind": "result", "label": "subagent_await", "detail": head + (sub["text"] if ok else "")})
+        return out
+    if parent and str(parent) in subs:   # 子 agent 自己的事件：掛到扮演它的人身上
+        name = subs[str(parent)]["name"]
+        for c in (d.get("message") or {}).get("content") or []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use":
+                tool_names[str(c.get("id", ""))] = str(c.get("name", "tool"))
+                out.append({"kind": "tool", "label": f"[Subagent:{name}] {c.get('name', 'tool')}",
+                            "detail": json.dumps(c.get("input"), ensure_ascii=False)})
+            elif c.get("type") == "tool_result":
+                body = c.get("content")
+                if isinstance(body, list):
+                    body = " ".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
+                out.append({"kind": "error" if c.get("is_error") else "result",
+                            "label": f"[Subagent:{name}] {tool_names.get(str(c.get('tool_use_id', '')), 'tool')}",
+                            "detail": str(body or "")[:400]})
+            elif c.get("type") == "text" and str(c.get("text", "")).strip():
+                subs[str(parent)]["text"] = c["text"]   # 最後一段文字＝它的交付
+                out.append({"kind": "msg", "label": f"[Subagent:{name}] {c['text']}"})
+        return out
     if t == "assistant":
         for c in (d.get("message") or {}).get("content") or []:
             if not isinstance(c, dict):
@@ -2450,6 +2523,8 @@ def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
             elif c.get("type") == "tool_use":
                 name = str(c.get("name", "tool"))
                 tool_names[str(c.get("id", ""))] = name
+                if name in ("Agent", "Task"):
+                    continue   # 委派由 system/task_started 投影（那裡才有 subagent_type），這顆工具事件是重複的
                 out.append({"kind": "tool", "label": name,
                             "detail": json.dumps(c.get("input"), ensure_ascii=False)})
     elif t == "user":
@@ -2459,8 +2534,16 @@ def cli_events(d: dict, tool_names: dict[str, str]) -> list[dict]:
             body = c.get("content")
             if isinstance(body, list):   # 內容可能分段（文字＋圖片）
                 body = " ".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
+            tid = str(c.get("tool_use_id", ""))
+            if tool_names.get(tid) in ("Agent", "Task"):
+                if tid in subs and "Async agent launched" not in str(body or ""):
+                    # 前景子 agent：這個 tool_result 就是交件（背景的走 task_notification）
+                    sub = subs.pop(tid)
+                    out.append({"kind": "error" if c.get("is_error") else "result",
+                                "label": f"spawn_subagent:{sub['name']}", "detail": str(body or "")[:400]})
+                continue   # 背景啟動回執「Async agent launched…」不是交件，不投影
             out.append({"kind": "error" if c.get("is_error") else "result",
-                        "label": tool_names.get(str(c.get("tool_use_id", "")), "tool"),
+                        "label": tool_names.get(tid, "tool"),
                         "detail": str(body or "")[:400]})
     elif t == "rate_limit_event":
         if line := rate_limit_line(d.get("rate_limit_info") or {}):
@@ -2603,7 +2686,9 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # --permission-prompts none：實測【沒有它 PermissionRequest hook 根本不會被問】——-p 沒有人可提問時直接拒，
     # 帶了才會先問 hook（也就是問辦公室）、hook 不放行才拒。這不是「關掉提問」，是「提問改由 hook 回答」。
     argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *sess_args]
+            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none",
+            # 子 agent：人設隨派工帶上（session-only，永遠跟人設同步）；子 agent 的文字要轉發，橋才投影得出誰在說什麼
+            "--agents", cli_agents_json(), "--forward-subagent-text", *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
     # 那是它的預設，不是我們該替它決定的事。
     if model:
@@ -2627,6 +2712,8 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         cli_procs.pop(aid, None)
         return
     tool_names: dict[str, str] = {}
+    subs: dict[str, dict] = {}        # 子 agent 狀態（見 cli_events）
+    bg_tasks: set[str] = set()        # 還在跑的背景子 agent：它們沒回來之前，result 不是收工
     warned: set[str] = set()
     done_sent = False
     try:
@@ -2661,7 +2748,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                                     for m2 in (d.get("mcp_servers") or []) if isinstance(m2, dict)],
                         })
                     continue
+                if d.get("type") == "system" and d.get("subtype") == "background_tasks_changed":
+                    bg_tasks.clear()
+                    bg_tasks.update(str(x.get("task_id")) for x in (d.get("tasks") or []) if isinstance(x, dict))
                 if d.get("type") == "result":
+                    if bg_tasks:   # 背景子 agent 還在跑：-p 會等它們回來再跑一輪，這個 result 不是收工
+                        continue
                     if not cli_turn_done(aid):   # 插話排隊中：這輪的 result 不是收工，CLI 接著處理下一則
                         continue
                     done_sent = True
@@ -2676,7 +2768,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     if proc.stdin is not None and not proc.stdin.is_closing():
                         proc.stdin.close()       # 關 stdin，行程才會結束
                     continue
-                for ev in cli_events(d, tool_names):
+                for ev in cli_events(d, tool_names, subs):
                     # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠
                     if ev["kind"] == "msg" and ev["label"].startswith(("⏳", "⚠")):
                         # 頭上掛額度警示。這是目前【唯一】完全沒有身體投影的狀態：
