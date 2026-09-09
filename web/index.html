@@ -848,11 +848,18 @@ async function status() {
     // 聽得到、找不到（實際回報）。開著時打字到哪就把卡展開、捲到看得見；關掉就維持原本的貼底跟捲。
     const eye = `<span class="mute" title="${follow() ? '自動跟隨開著：打字到哪就展開、捲到哪（點我關）' : '自動跟隨關著：只在貼底時跟捲（點我開）'}"
       onclick="toggleFollow()">${follow() ? '🎯' : '📍'}</span>`;
-    $('status').innerHTML = `${bell}${eye}${canvas}<br>${disp}`;
+    // 打字速度：1×（預設）→ 2× → 即時 → 1×。有人覺得慢、有人要讀得下——給個鈕，不替所有人選一個。
+    const sp = speed();
+    const gauge = `<span class="mute" title="訊息打字速度：${sp === 0 ? '即時（不打字，整則直接出）' : sp + '×'}（點我切換 1× → 2× → 即時）"
+      onclick="cycleSpeed()">${sp === 0 ? '⏩' : sp === 2 ? '⚡' : '🐢'}</span>`;
+    $('status').innerHTML = `${bell}${eye}${gauge}${canvas}<br>${disp}`;
   } catch { $('status').textContent = ''; markBackendFail(); }  // 輪詢失敗 = 觸發斷線分級(L0自動重試→L3)
 }
 
 const follow = () => localStorage.follow !== '0';   // 預設開：這是在修「聽得到找不到」，不是新花樣
+// 打字速度倍率：1、2 或 0（即時）。存 localStorage，跟靜音、跟隨同一級的個人偏好。
+const speed = () => { const v = parseInt(localStorage.speed ?? '1', 10); return [0, 1, 2].includes(v) ? v : 1; };
+function cycleSpeed() { localStorage.speed = { 1: '2', 2: '0', 0: '1' }[speed()]; status(); }
 function toggleFollow() { localStorage.follow = follow() ? '0' : '1'; status(); }
 
 // 把正在打字的那一行弄成看得見：摺起來的祖先卡（含子卡）展開、捲到它在 feed 視窗內。
@@ -1725,14 +1732,14 @@ const BASE_CPS = 38;    // 基礎打字速度（字/秒）：慢到讀得下去�
 const MAX_SEC = 16;     // 單則封頂秒數：再長的文字也要在這個時間內打完。8 秒時一段 1500 字的會議發言
                         // 是 190 字/秒——那不是串流，是閃現（實際回報：開會時訊息快到讀不了）
 function typewrite(el, text) {
-  if (document.hidden) { el.textContent = text; return Promise.resolve(); }  // 背景分頁：直接上字
+  if (document.hidden || speed() === 0) { el.textContent = text; return Promise.resolve(); }  // 背景分頁／即時模式：直接上字
   return new Promise(done => {
     // 慢是為了好讀，不是為了讓畫面落後現實：佇列愈積愈深就愈快，深到 30 則還有秒出的閥（見 drain）。
     // 先前寫死「總長 ≲1.4 秒」，長訊息等於一閃而過——那不是串流，是閃現。
     // 佇列積深就加速，但封頂 2 倍：先前封頂 4 倍，開會時三個子 agent 同時轉發文字、佇列常年在十幾則，
     // 等於整場都用四倍速在跑。超過 30 則仍有秒出的閥（見 drain），落後現實太多時靠它，不靠速度。
     const rush = 1 + Math.min(queue.length, 8) / 8;
-    const cps = Math.max(BASE_CPS, text.length / MAX_SEC) * rush;
+    const cps = Math.max(BASE_CPS, text.length / MAX_SEC) * rush * speed();   // 使用者選的倍率最後乘上去
     const t0 = performance.now();
     let fin = false, sounded = 0;
     el.classList.add('typing');   // 閃爍游標：打字聲對得到哪一行，就算沒開跟隨也找得到
