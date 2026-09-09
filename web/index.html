@@ -246,7 +246,10 @@
   .prof summary .rl:hover { opacity: 1; color: var(--accent); }
   /* 兩顆並排時只有第一顆該吃掉剩餘空間，否則 🗑 會被推到離 ↻ 很遠 */
   .prof summary .rl ~ .rl { margin-left: 0; }
-  .feed { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  /* 上 padding 移到第一個元素：sticky 標題釘在 top:0 時，上方那 12px 的縫（捲過去的內容會從那裡露出來，
+     實際回報「標題後面有訊息滑動的影子」）就不存在了 */
+  .feed { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
+  .feed > :first-child { margin-top: 12px; }
   .ev { margin-bottom: 10px; }
   @keyframes evin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   .ev.in { animation: evin .28s ease-out; }
@@ -310,6 +313,9 @@
      只釘【直接子】summary：委派子卡也有 summary，一起釘會兩層互相蓋住。 */
   .tcard > summary { position: sticky; top: 0; z-index: 2; background: var(--card);
                      border-radius: 10px 10px 0 0; }
+  /* 圓角缺口後面畫回 feed 底色：釘住時卡片內容從兩個角落露出來（elementFromPoint 打到 .tbody），
+     這層在 summary 自己的堆疊裡墊底、又壓在內容上，缺口看到的就是 feed 底色，跟沒釘住時一樣 */
+  .tcard > summary::before { content: ''; position: absolute; inset: 0 -1px; background: var(--bg); z-index: -1; }
   /* 分隔線從 .tbody 移上來：border-top 掛在內容上會跟著捲走，釘住的標題就失去下緣，
      變成一排字浮在另一排字上面。掛在 summary 才會跟著釘住的那一列走。 */
   .tcard[open] > summary { border-bottom: 1px solid var(--line); }
