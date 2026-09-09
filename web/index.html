@@ -857,7 +857,9 @@ function toggleFollow() { localStorage.follow = follow() ? '0' : '1'; status(); 
 
 // 把正在打字的那一行弄成看得見：摺起來的祖先卡（含子卡）展開、捲到它在 feed 視窗內。
 // 只在【看不見】時動手——看得見就什麼都不做，才不會跟使用者自己的捲動打架。
+let approvalOpen = false;   // 選中的這位有審批卡開著（feed() 每輪更新）
 function revealTyping(el) {
+  if (approvalOpen) return;   // 審批中不跟隨：字照長，但畫面不追
   const f = $('feed');
   for (let d = el.closest('details'); d && f.contains(d); d = d.parentElement && d.parentElement.closest('details')) {
     if (!d.open) { d.open = true; if (d.dataset.id) tog(d.dataset.id, true); }
@@ -1703,6 +1705,7 @@ function titleAlert() {
 // 必須在打字的【每一幀】跟捲——文字是逐字長出來的，只在事件插入時捲一次會落後。
 let stuck = true;
 function keepBottom() {
+  if (approvalOpen) return;   // 審批中：畫面別動，老闆在讀那張卡（決定送出後 feed() 會把它清掉）
   if (stuck) { const f = $('feed'); f.scrollTop = f.scrollHeight; }
 }
 addEventListener('DOMContentLoaded', () => {
@@ -2347,7 +2350,12 @@ async function feed() {
     dayCounts(f);
 
     const card = $('approvalCard');
-    if (r.approval) {
+    approvalOpen = !!r.approval;   // 球在老闆手上：feed 停止自動捲動與跟隨，畫面別動（見 keepBottom／revealTyping）
+    const sig = r.approval ? JSON.stringify([r.approval, r.approval_from, r.approval_meta && r.approval_meta.task_id]) : '';
+    if (r.approval && card.dataset.sig === sig) {
+      card.style.display = 'block';   // 同一張審批：不重畫。每次 SSE 都會進來這裡，重建 innerHTML 等於按鈕在手指下被換掉
+    } else if (r.approval) {
+      card.dataset.sig = sig;
       card.style.display = 'block';
       card.className = 'appr';
       const btns = r.approval_from
@@ -2370,7 +2378,7 @@ async function feed() {
         renderBody(card.querySelector('.tx'), r.approval, false);
         apprDeadline = null;
       }
-    } else { card.style.display = 'none'; apprDeadline = null; }
+    } else { card.style.display = 'none'; card.dataset.sig = ''; apprDeadline = null; }
     keepBottom();   // 必須在審批卡渲染【之後】：它會把 feed 擠短，先貼底等於沒貼
   } catch { /* 後端暫時斷線：下輪再試 */ }
 }
