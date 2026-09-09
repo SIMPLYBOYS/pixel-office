@@ -15,6 +15,7 @@ import main
 # 帳本第 1–92 筆全是測試）。整個測試行程改寫到暫存目錄，跟真帳分開。
 import tempfile as _tempfile
 main.AUDIT_DIR = Path(_tempfile.mkdtemp(prefix="office-audit-test-")) / "audit"
+os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test-not-real")   # 讓「不傳給子行程」這條斷言有東西可驗
 main._audit_last.update({"seq": 0, "hash": "", "path": None})
 from fastapi.testclient import TestClient
 
@@ -1082,7 +1083,7 @@ argv = sys.argv[1:]
 picked = argv[argv.index("--model") + 1] if "--model" in argv else "cli-自己的預設"
 # 把收到的參數留下來：合約測試要確認 session 旗標【真的送到 CLI】，
 # 光驗 cli_session_args() 算得對，接線被拔掉一樣不會紅
-open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8").write(" ".join(argv) + chr(10))
+open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8").write(" ".join(argv) + (" ENV_HAS_API_KEY" if os.environ.get("ANTHROPIC_API_KEY") else " ENV_NO_API_KEY") + chr(10))
 out = [
  {"type":"system","subtype":"init","model":picked,"cwd":"x",
   "tools":["Read","Edit","Bash","Task"],
@@ -1150,6 +1151,8 @@ for o in out:
                 # 實測：沒有 --permission-prompts none，PermissionRequest hook 不會被問，權限請求直接拒——審批線等於沒接
                 assert "--permission-prompts none" in sent, f"argv 沒帶 --permission-prompts none，審批 hook 不會被問：{sent}"
                 assert "--agents" in sent and "--forward-subagent-text" in sent, f"argv 要帶人設與子 agent 文字轉發：{sent[:200]}"
+                # 員工 CLI 走訂閱：橋的 ANTHROPIC_API_KEY 不能傳下去（Claude Code 會優先用 API key 計費；踩過「Credit balance is too low」）
+                assert "ENV_NO_API_KEY" in sent, "子行程拿到了 ANTHROPIC_API_KEY——員工會用 API 計費而不是訂閱"
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果

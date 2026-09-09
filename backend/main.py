@@ -2701,8 +2701,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                         "label": text[:80], "detail": str(base),
                         "engine": ENGINE_CLI, "session": cli_session_of[aid]})   # 回溯用
     try:
+        # 員工 CLI 走訂閱（office profile 的登入），【不能】把橋自己的 ANTHROPIC_* 帶給它：Claude Code 看到
+        # ANTHROPIC_API_KEY 會優先用 API key 計費。實際踩到：一場會議的子 agent 被「Credit balance is too low」打掉——
+        # 帳算到 console 的餘額上，訂閱額度根本沒用到。
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(base), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            *argv, cwd=str(base), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=1 << 22)   # 單行可能很長（工具參數）
     except OSError as e:
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",

@@ -2098,6 +2098,22 @@ function appendEv(body, e, live) {
   });
 }
 
+// 會議流：子 agent 的新訊息一律【接在主任務串的最底部】、帶人名前綴，依時間交錯。
+// 先前只長在各自的子卡裡——子卡嵌在委派事件那個位置（串的中段），三個人同時講話就是
+// 三個地方同時冒字，眼睛跟不上（實際回報）。子卡留著當每個人的完整紀錄（預設摺起、不打字）。
+function mergeSubs(body, evs, live) {
+  const fresh = [];
+  for (const e of evs) {
+    const s = e.subcard;
+    if (!s) continue;
+    const key = 'm' + s.id, n = +(body.dataset[key] || 0), sevs = s.events || [];
+    for (let i = n; i < sevs.length; i++) fresh.push({ at: sevs[i].at || '', text: `【${s.name}】${sevs[i].text}` });
+    body.dataset[key] = sevs.length;
+  }
+  fresh.sort((a, b) => a.at.localeCompare(b.at));   // 同一輪拿到多人的新話：照時間排，不照誰的卡先
+  for (const line of fresh) appendEv(body, line, live);
+}
+
 // 委派子卡：同一條任務串裡直接看到「誰接手、做了什麼、回報什麼」
 function subEl(s, live) {
   const el = document.createElement('details');
@@ -2111,7 +2127,7 @@ function subEl(s, live) {
       <span class="badge"></span><span class="spreview"></span><span class="trange"></span>
     </summary><div class="subbody"></div>`;
   bindToggle(el, s.id);
-  sync(el, s, '.subbody', live);
+  sync(el, s, '.subbody', false);   // 子卡不打字：即時對話在主串底部的會議流
   return el;
 }
 
@@ -2265,10 +2281,11 @@ function sync(el, t, bodySel, live) {
   for (let i = +(el.dataset.n || 0); i < evs.length; i++) appendEv(body, evs[i], live);
   el.dataset.n = evs.length;
 
-  for (const e of evs) {   // 既有子卡也要跟著長
+  for (const e of evs) {   // 既有子卡也要跟著長——但只同步、不打字：即時對話在下面的會議流
     const sub = e.subcard && body.querySelector(`.subcard[data-id="${e.subcard.id}"]`);
-    if (sub) sync(sub, e.subcard, '.subbody', live);
+    if (sub) sync(sub, e.subcard, '.subbody', false);
   }
+  mergeSubs(body, evs, live);
 
   // 報告全文常＝某一則訊息的完整版，重複就不貼。
   // ⚠ 比對前要剝掉投影前綴：事件是「💬 內容」而報告是「內容」，直接 startsWith 永遠不成立，
