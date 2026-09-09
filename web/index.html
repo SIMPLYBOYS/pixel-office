@@ -111,6 +111,19 @@
 .badge.stopped { color: #c9a227; }   /* 使用者自己喊停：沒做完，但不是壞掉——跟 ✗ 失敗分開 */
   /* 產出目錄：卡頭就給一個入口，不必展開才點得到 */
   /* 完整紀錄：每步一行，工具參數／結果用 pre 摺在固定高度內；失敗的標紅 */
+  /* 收件匣：待處理在上（審批帶倒數與按鈕），最近在下；未讀粗體加點 */
+  .inbox .irow { display: grid; grid-template-columns: 3.2em 4.5em 1fr auto auto; gap: 6px; align-items: center; font-size: 11.5px; padding: 3px 0; border-bottom: 1px dashed var(--line, #333); }
+  .inbox .irow.todo { background: #2b2417; border: 1px solid #6d5a2a; border-radius: 6px; padding: 5px 6px; margin: 3px 0; }
+  .inbox .iat, .inbox .ileft { color: var(--dim); font-family: ui-monospace, Menlo, monospace; }
+  .inbox .ileft.urgent { color: #c0392b; font-weight: 700; }
+  .inbox .iwho { cursor: pointer; font-weight: 600; white-space: nowrap; }
+  .inbox .iwhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inbox .iwhat code { font-size: 10.5px; color: var(--dim); }
+  .inbox .irow.bad .iwhat { color: #c0392b; }
+  .inbox .irow.unread .iwhat::before { content: '●'; color: #e0a530; margin-right: 4px; font-size: 8px; }
+  .inbox .irow:not(.todo) { cursor: pointer; }
+  .inbox .ihint { color: var(--dim); font-size: 10.5px; grid-column: span 2; }
+  .inbox button.yes, .inbox button.no { font-size: 11px; padding: 2px 8px; }
   /* 稽核帳本：一筆一行，時間／種類／對象；被拒、失敗、逾時標紅 */
   .audit .arow { display: grid; grid-template-columns: 7.5em 11em 1fr; gap: 6px; font-size: 11px; padding: 1px 0; }
   .audit .aat { color: var(--dim); font-family: ui-monospace, Menlo, monospace; }
@@ -442,6 +455,7 @@
          抓到資料才會取消 hidden。 -->
     <details class="prof ws" id="ws" hidden></details>
     <details class="prof board" id="board" hidden></details>
+    <details class="prof inbox" id="inbox" hidden></details>
     <details class="prof memo" id="memo" hidden></details>
     <details class="prof" id="profile" hidden></details>
     <details class="prof audit" id="audit" hidden></details>
@@ -1377,6 +1391,79 @@ async function profile(id) {
   }
   box.addEventListener('toggle', () => { localStorage.profOpen = box.open ? '1' : '0'; });
   auditcard(id);
+}
+
+// 收件匣：老闆該處理的事，一個面板。右欄一次只給一個人的串，三個人同時做事就是在三條串之間切——
+// 跟盯三個終端沒兩樣（實際回報）。這裡只列需要老闆的事：審批與看板等開工（現在就要），
+// 收工／失敗／被擋／交付（看一眼就好）。已讀是老闆這個人的事，不是辦公室的事實，存瀏覽器。
+const inboxRead = () => parseInt(localStorage.inboxRead || '0', 10);
+async function inboxcard() {
+  const box = $('inbox');
+  if (!box) return;
+  let r;
+  try { r = await (await fetch('/office/inbox?limit=40')).json(); } catch { return; }
+  if (!r.ok) return;
+  const unread = r.recent.filter(x => x.seq > inboxRead()).length;
+  const sig = JSON.stringify([r.todo.map(t => t.id), r.recent.slice(0, 40).map(x => x.id), unread]);
+  if (box.dataset.sig === sig) { tickInbox(); return; }   // 沒變就不重畫（跟能力面板同一個做法）
+  box.dataset.sig = sig;
+  box.hidden = !(r.todo.length || r.recent.length);
+  if (box.hidden) return;
+  box.innerHTML = `<summary>📥 收件匣<small>${r.todo.length ? `待處理 ${r.todo.length}・` : ''}未讀 ${unread}</small>
+    <span class="wdbtn" title="全部標為已讀" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxRead = String(${r.max_seq}); inboxcard();">✓ 全讀</span></summary>`;
+  box.open = localStorage.inboxOpen !== '0';   // 預設開：這是主面板
+  for (const t of r.todo) {
+    const row = el('div', '', 'irow todo');
+    if (t.kind === 'approval') {
+      const btns = t.from
+        ? `<span class="ihint">↩︎ 來自 ${esc(t.from)}，請回原平台核准</span>`
+        : `<button class="yes" onclick="event.stopPropagation(); dispatchFor('${t.agent}', 'approve')">核准</button>
+           <button class="no" onclick="event.stopPropagation(); dispatchFor('${t.agent}', 'reject')">駁回</button>`;
+      row.innerHTML = `<span class="ileft" data-left="${t.left_s}" data-t0="${Date.now()}"></span>
+        <span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwhat">⏳ 審批 <b>${esc(t.tool)}</b> <code>${esc((t.params || '').slice(0, 90))}</code></span>${btns}`;
+    } else {
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwhat">🗓 ${esc(t.text)}</span>
+        <button class="yes" onclick="event.stopPropagation(); dispatchFor('${t.agent}', '開工。照板子推進，先做相依都滿足的票，最多 3 人並行。')">開工</button>`;
+    }
+    box.appendChild(row);
+  }
+  for (const x of r.recent) {
+    const row = el('div', '', 'irow ' + (x.sev || '') + (x.seq > inboxRead() ? ' unread' : ''));
+    row.append(el('span', (x.at || '').slice(11, 16), 'iat'),
+               el('span', x.name, 'iwho'),
+               el('span', x.text, 'iwhat'));
+    row.title = '點開這個人的工作串' + (x.card ? `（卡 ${x.card}）` : '');
+    row.onclick = () => { pick(x.agent); if (x.card) openCard(x.agent, x.card); };
+    box.appendChild(row);
+  }
+  box.addEventListener('toggle', () => { localStorage.inboxOpen = box.open ? '1' : '0'; });
+  tickInbox();
+}
+function tickInbox() {   // 審批倒數：橋給剩餘秒數，這裡往下數
+  for (const el_ of document.querySelectorAll('#inbox .ileft[data-left]')) {
+    const s = Math.max(0, Math.round(+el_.dataset.left - (Date.now() - +el_.dataset.t0) / 1000));
+    el_.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    el_.classList.toggle('urgent', s < 60);
+  }
+}
+setInterval(tickInbox, 1000);
+// 給指定的人下指令（收件匣裡放行別人的審批，不必先切到他）
+async function dispatchFor(agent, text) {
+  const r = await (await fetch('/office/dispatch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent, text }) })).json();
+  $('hint').textContent = r.ok ? `已送給 ${esc(agentsData[agent]?.name || agent)} ✓` : `⛔ 失敗：${r.error}`;
+  $('hint').classList.toggle('err', !r.ok);
+  inboxcard(); roster();
+}
+// 跳到某人的某張卡：切人後等 feed 畫好，把那張卡展開、對齊到頂
+async function openCard(agent, cid) {
+  for (let i = 0; i < 40; i++) {
+    const el_ = $('feed').querySelector(`.tcard[data-id="${cid}"]`);
+    if (el_ && $('feed').dataset.agent === agent) { el_.open = true; tog(cid, true); stuck = false; alignTop(el_); return; }
+    await sleep(100);
+  }
 }
 
 // 稽核帳本：這位員工最近的裁決（審批被問／放行／駁回／逾時、政策拒絕、權限被擋、插話、中止、交付）
@@ -2438,6 +2525,7 @@ function openStream() {
   es.onmessage = e => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.alert) cue(ev.alert);          // 不管在看哪一位，該響的都要響
+    inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
     if (ev.type === 'roster') roster();
     else if (ev.type === 'agent') {
       if (ev.id === selected) {
@@ -2465,6 +2553,8 @@ capcard();
 // 能力也會變（cogito 加掛 MCP、換技能；CLI 跑完會回報它自己那份）。輪得比名冊慢——
 // 這種事以分鐘計，而且橋端本來就有五分鐘快取，問太勤只是白跑。
 setInterval(capcard, 30000);
+inboxcard();
+setInterval(inboxcard, 30000);
 setInterval(roster, 10000);
 setInterval(feed, 8000);
 </script>

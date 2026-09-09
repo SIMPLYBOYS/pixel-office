@@ -462,6 +462,8 @@ def run() -> None:
     models_cogito_up()
     sub_report_dedup()
     cli_permission_queue()
+    inbox()
+    slug_table_matches_personas()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2757,6 +2759,56 @@ def cli_permission_queue() -> None:
         if saved: main.engine_sent[aid] = saved
         else: main.engine_sent.pop(aid, None)
         main.clear_approval(aid); main.cli_permission.pop(aid, None)
+
+
+def inbox() -> None:
+    """收件匣：待處理＝現在的審批（快逾時在前）與看板等開工；最近＝帳本裡收工／失敗／被擋／交付，最新在前、帶人名與卡號。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        saved = {a: (main.pending_approval.get(a), main.approval_meta.get(a), main.approval_at.get(a)) for a in ("p05", "p07")}
+        try:
+            main.audit("task.done", "p19", card=11, label="ok", detail="報表寫好了")
+            main.audit("permission.denied", "p05", tool="WebFetch", params="{}")
+            main.audit("delivery.sent", "p19", target="telegram:1", file="trend-x.md")
+            main.audit("task.done", "p07", card=12, label="error", detail="被中止")
+            main.audit("steer", "p07", text="x")   # 不是收件匣的事
+            now = time.time()
+            main.pending_approval["p05"] = "x"; main.approval_meta["p05"] = {"tool": "Bash", "params": "{\"command\":\"curl\"}", "task_id": "t1", "timeout_s": 300}; main.approval_at["p05"] = now - 250
+            main.pending_approval["p07"] = "y"; main.approval_meta["p07"] = {"tool": "Read", "params": "{}", "task_id": "t2", "timeout_s": 300}; main.approval_at["p07"] = now - 10
+            with TestClient(main.app) as c:
+                main.pending_approval["p05"] = "x"; main.pending_approval["p07"] = "y"   # lifespan 會重載 state
+                r = c.get("/office/inbox").json()
+            assert r["ok"]
+            todo = [t for t in r["todo"] if t["kind"] == "approval"]
+            assert [t["agent"] for t in todo] == ["p05", "p07"], "快逾時的在前"
+            assert todo[0]["tool"] == "Bash" and 40 <= todo[0]["left_s"] <= 60 and todo[0]["name"] == "阿海", todo[0]
+            kinds = [(x["agent"], x["kind"]) for x in r["recent"]]
+            assert kinds == [("p07", "task.done"), ("p19", "delivery.sent"), ("p05", "permission.denied"), ("p19", "task.done")], kinds
+            assert r["recent"][0]["sev"] == "bad" and r["recent"][0]["card"] == 12 and r["recent"][0]["name"] == "老王"
+            assert r["recent"][-1]["text"].startswith("✔ 完成：報表寫好了") and r["recent"][-1]["sev"] == "ok"
+            assert r["max_seq"] == 5
+        finally:
+            main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            for a, (pa, pm, at) in saved.items():
+                main.clear_approval(a)
+                if pa: main.pending_approval[a] = pa; main.approval_meta[a] = pm; main.approval_at[a] = at
+
+
+def slug_table_matches_personas() -> None:
+    """看板守則那張「cogito 名字／Claude Code 代號」表，每一列都要對到同名人設的 slug。
+    錯一個就是派錯人：實際發生過 p07（老王）的 slug 寫成 azhe，主持人點 azhe 要後端阿哲，來的是 UI 設計師老王。"""
+    import re
+    md = (Path(main.__file__).parent / "personas" / "kanban.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| `([^`]+)` \| `([a-z-]+)` \|", md, re.M)
+    assert len(rows) >= 7, rows
+    by_name = {a.name: a for a in main.npcs().values()}
+    for name, slug in rows:
+        assert name in by_name, f"守則表裡的 {name} 不在名冊"
+        got = by_name[name].persona.get("slug")
+        assert got == slug, f"{name} 的 slug 是 {got!r}，守則表寫 {slug!r}——主持人會派錯人"
+    slugs = [a.persona.get("slug") for a in main.npcs().values()]
+    assert len(set(slugs)) == len(slugs), f"slug 重複：{slugs}"
 
 
 def full_stream() -> None:

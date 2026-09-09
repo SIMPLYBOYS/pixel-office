@@ -3076,6 +3076,63 @@ def office_audit(agent: str = "", limit: int = 50):
     return {"ok": True, "items": audit_recent(agent, max(1, min(limit, 500))), "verify": audit_verify(), "path": str(audit_path())}
 
 
+# ── 收件匣：老闆該處理的事，一個面板 ─────────────────────────────────────────────
+# 右欄一次只給一個人的工作串，三個人同時做事就是在三條串之間切——跟盯三個終端沒兩樣（實際回報）。
+# 老闆不該盯產出，該盯的是需要他的事，而那些事本來就少：審批（現在就要）、看板停下來問要不要開工、
+# 收工／失敗／被擋／交付（看一眼就好）。資料全在帳本與現況裡，這裡只是把它們排成一列；「看過了」
+# 是老闆這個人的事，不是辦公室的事實，所以已讀狀態留在瀏覽器。
+INBOX_KINDS = {"task.done", "task.stopped", "approval.timeout", "policy.denied", "permission.denied",
+               "delivery.sent", "delivery.failed"}
+
+
+def inbox_items(limit: int = 60) -> dict:
+    now = time.time()
+    todo: list[dict] = []
+    for aid, text in pending_approval.items():
+        m = approval_meta.get(aid) or {}
+        left = max(0, int(m.get("timeout_s", 300) - (now - approval_at.get(aid, now))))
+        todo.append({"id": f"appr:{aid}:{m.get('task_id') or approval_at.get(aid, 0)}", "kind": "approval", "agent": aid,
+                     "name": agents[aid].name if aid in agents else aid, "tool": m.get("tool", ""),
+                     "params": str(m.get("params") or "")[:300], "left_s": left, "from": approval_from(aid),
+                     "text": text if not m else ""})
+    todo.sort(key=lambda x: x["left_s"])   # 快逾時的先
+    # 看板停下來問「要開工嗎」：板子寫好、還沒派實作——這是一件待你決定的事，跟審批同級
+    k = last_report.get(KANBAN)
+    if k and k.get("status") == "ok" and "開工" in str(k.get("report") or "") + " ".join(str(e.get("text", "")) for e in k.get("events", [])[-3:]):
+        todo.append({"id": f"start:{k['id']}", "kind": "ask_start", "agent": KANBAN, "name": agents[KANBAN].name if KANBAN in agents else "看板",
+                     "card": k["id"], "text": "板子開好了，主持人在等你說開工", "at": k.get("at", "")})
+    recent: list[dict] = []
+    for e in audit_recent("", 400):
+        if e.get("kind") not in INBOX_KINDS:
+            continue
+        aid = e.get("agent", "")
+        kind = e["kind"]
+        if kind == "task.done":
+            what = ("✔ 完成" if e.get("label") == "ok" else "✗ 中斷") + (f"：{e['detail'][:80]}" if e.get("detail") else "")
+            sev = "ok" if e.get("label") == "ok" else "bad"
+        elif kind == "delivery.sent":
+            what, sev = f"📤 {e.get('file') or '收工訊息'} → {e.get('target')}", "ok"
+        elif kind == "delivery.failed":
+            what, sev = f"⚠ 送 {e.get('target')} 失敗：{e.get('error', '')[:60]}", "bad"
+        elif kind in ("policy.denied", "permission.denied"):
+            what, sev = f"⛔ {e.get('tool', '')} 被擋" + (f"：{e['reason'][:60]}" if e.get("reason") else ""), "bad"
+        elif kind == "approval.timeout":
+            what, sev = f"⏰ 審批逾時自動拒絕：{e.get('tool', '')}", "bad"
+        else:
+            what, sev = "⏹ 老闆中止", "bad"
+        recent.append({"id": f"seq:{e['seq']}", "seq": e["seq"], "at": e.get("at", ""), "agent": aid,
+                       "name": agents[aid].name if aid in agents else aid, "kind": kind, "text": what, "sev": sev,
+                       "card": e.get("card")})
+        if len(recent) >= limit:
+            break
+    return {"ok": True, "todo": todo, "recent": recent, "max_seq": _audit_last.get("seq", 0)}
+
+
+@app.get("/office/inbox")
+def office_inbox(limit: int = 60):
+    return inbox_items(max(1, min(limit, 200)))
+
+
 # ── 回溯：從卡片一鍵到完整紀錄 ─────────────────────────────────────────────
 # 卡片是投影（參數截 200 字、單卡 150 筆）。完整紀錄兩個引擎各在各的地方、格式不同：
 #   CLI   → $CLAUDE_CONFIG_DIR/projects/<cwd 編碼>/<session>.jsonl（每筆 tool_use／tool_result／text，含時間戳）
