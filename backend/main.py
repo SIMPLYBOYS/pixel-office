@@ -1059,7 +1059,11 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
         card["report"] = detail
     mark = "✔ 回報：" if ok else "✗ 失敗："
     await bubble(npc, "✓ 回報完成" if ok else "⚠ 回報出錯了")
-    log_ev(npc, f"{mark}{detail[:200]}")
+    # 子 agent 的最後一段話多半已經以 msg 串流進這張卡（CLI 轉發子 agent 文字；cogito 的 [Subagent] msg 亦然），
+    # 交件再整段貼一次就是同一段話出現兩次（實際回報：「訊息重疊」）。已在卡上的只留一行收件標記。
+    head = detail.strip()[:40]
+    streamed = bool(head) and card is not None and any(str(e.get("text", "")).strip()[:40] == head for e in card.get("events", []))
+    log_ev(npc, f"{mark}（全文如上一則）" if streamed else f"{mark}{detail[:200]}")
     agents[npc].remember("完成了委派工作" if ok else "委派的工作失敗了")
     return True
 
@@ -2868,8 +2872,13 @@ async def office_permission(d: dict):
         log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{tool}｜{params[:120]}")
         audit("policy.denied", aid, tool=tool, params=params[:300], reason="unattended", engine=ENGINE_CLI)
         return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"}
-    if aid in cli_permission or aid in pending_approval:
-        return {"behavior": "deny", "message": "上一張審批還在等老闆決定，這一個先拒絕；等那張處理完再試"}
+    # 同一個人（看板＝主持人加一批子 agent）同時來好幾張：排隊等前一張處理完，不直接拒——
+    # 實測三個子 agent 同時讀檔，第二、三張被「上一張還在等」拒掉，等於只有一個人拿得到權限。
+    deadline = time.time() + CLI_APPROVAL_S
+    while aid in cli_permission or aid in pending_approval:
+        if time.time() > deadline:
+            return {"behavior": "deny", "message": "前一張審批一直沒處理完，這一個等到逾時，拒絕"}
+        await asyncio.sleep(0.3)
     # 沿用 cogito 審批卡的樣板：parse_approval 的正則、外殼的版面、倒數，全部不用改
     text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params[:600]}`\n"
             f"任務 ID: `{d.get('tool_use_id') or '-'}`\n"

@@ -1719,13 +1719,16 @@ addEventListener('DOMContentLoaded', () => {
 // 打字機：用 rAF 依【時間】推進，速度恆定才滑順（cogito 的 provider 阻塞式生成、沒有
 // token delta 可串，所以這是事件級串流：每則一到就逐字浮現）。
 const BASE_CPS = 38;    // 基礎打字速度（字/秒）：慢到讀得下去，又不會等到不耐煩
-const MAX_SEC = 8;      // 單則封頂秒數：再長的文字也要在這個時間內打完
+const MAX_SEC = 16;     // 單則封頂秒數：再長的文字也要在這個時間內打完。8 秒時一段 1500 字的會議發言
+                        // 是 190 字/秒——那不是串流，是閃現（實際回報：開會時訊息快到讀不了）
 function typewrite(el, text) {
   if (document.hidden) { el.textContent = text; return Promise.resolve(); }  // 背景分頁：直接上字
   return new Promise(done => {
     // 慢是為了好讀，不是為了讓畫面落後現實：佇列愈積愈深就愈快，深到 30 則還有秒出的閥（見 drain）。
     // 先前寫死「總長 ≲1.4 秒」，長訊息等於一閃而過——那不是串流，是閃現。
-    const rush = 1 + Math.min(queue.length, 12) / 4;
+    // 佇列積深就加速，但封頂 2 倍：先前封頂 4 倍，開會時三個子 agent 同時轉發文字、佇列常年在十幾則，
+    // 等於整場都用四倍速在跑。超過 30 則仍有秒出的閥（見 drain），落後現實太多時靠它，不靠速度。
+    const rush = 1 + Math.min(queue.length, 8) / 8;
     const cps = Math.max(BASE_CPS, text.length / MAX_SEC) * rush;
     const t0 = performance.now();
     let fin = false, sounded = 0;

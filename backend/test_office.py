@@ -459,6 +459,8 @@ def run() -> None:
     audit_ledger()
     cli_subagents()
     models_cogito_up()
+    sub_report_dedup()
+    cli_permission_queue()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2704,6 +2706,54 @@ def models_cogito_up() -> None:
             r = c.get("/office/models").json(); assert r["cogito_up"] is True and r["source"] == "live", r
     finally:
         main.cogito_models = old
+
+
+def sub_report_dedup() -> None:
+    """子 agent 的交件若已經以 msg 串流進卡，收件只留一行標記，不再整段重貼（實際回報：訊息重疊）。"""
+    async def drive():
+        main.busy.discard("p01"); main.sub_active.clear()
+        await main.office_event({"v": 1, "agent": "kanban", "kind": "tool", "label": "spawn_subagent:小美", "detail": "小美的意見"})
+        assert "p01" in main.busy
+        text = "不建議立即擴增會議室。理由：需求沒驗證。"
+        await main.office_event({"v": 1, "agent": "kanban", "kind": "msg", "label": f"[Subagent:小美] {text}"})   # 串流進小美的卡
+        await main.office_event({"v": 1, "agent": "kanban", "kind": "result", "label": "subagent_await", "detail": f"背景子 agent x [小美]：✅ 已完成\n{text}"})
+        evs = [e["text"] for e in main.last_report["p01"]["events"]]
+        assert evs[-1] == "✔ 回報：（全文如上一則）", evs[-3:]
+        assert sum(1 for t in evs if text in t) == 1, f"同一段話出現了兩次：{evs}"
+        assert main.last_report["p01"]["report"] == text, "報告欄位仍是全文（卡片面板要用）"
+        # 沒串流過的交件：照舊整段貼
+        await main.office_event({"v": 1, "agent": "kanban", "kind": "tool", "label": "spawn_subagent:小美", "detail": "再問一次"})
+        await main.office_event({"v": 1, "agent": "kanban", "kind": "result", "label": "subagent_await", "detail": "背景子 agent y [小美]：✅ 已完成\n這次沒有先講過。"})
+        assert main.last_report["p01"]["events"][-1]["text"] == "✔ 回報：這次沒有先講過。"
+    asyncio.run(drive())
+
+
+def cli_permission_queue() -> None:
+    """同一個人同時來兩張權限請求（看板一批子 agent）：第二張排隊等第一張處理完，不直接拒。"""
+    aid = "p05"
+    old_avail, main.cli_available = main.cli_available, lambda: True
+    saved = main.engine_sent.get(aid); main.engine_sent[aid] = main.ENGINE_CLI
+    main.busy.discard(aid); main.sched_running.pop(aid, None); main.clear_approval(aid)
+    cwd = str((main.CHANNELS_DIR or Path("/tmp/x")) / "office_p05")
+    mk = lambda i: {"cwd": cwd, "session_id": "s", "tool_name": "Read", "tool_input": {"file_path": f"/f{i}"}, "tool_use_id": f"t{i}"}
+    async def drive():
+        t1 = asyncio.create_task(main.office_permission(mk(1))); await asyncio.sleep(0.15)
+        t2 = asyncio.create_task(main.office_permission(mk(2))); await asyncio.sleep(0.5)
+        assert not t2.done(), "第二張該排隊，不該立刻被拒"
+        assert main.approval_meta[aid]["params"].endswith('"/f1"}'), "第一張先上卡"
+        await main.office_dispatch({"agent": aid, "text": "approve"})
+        d1 = await asyncio.wait_for(t1, 3); assert d1["behavior"] == "allow"
+        await asyncio.sleep(0.8)   # 第二張輪到：自己開卡
+        assert aid in main.pending_approval and main.approval_meta[aid]["params"].endswith('"/f2"}'), main.approval_meta.get(aid)
+        await main.office_dispatch({"agent": aid, "text": "approve"})
+        d2 = await asyncio.wait_for(t2, 3); assert d2["behavior"] == "allow", d2
+    try:
+        asyncio.run(drive())
+    finally:
+        main.cli_available = old_avail
+        if saved: main.engine_sent[aid] = saved
+        else: main.engine_sent.pop(aid, None)
+        main.clear_approval(aid); main.cli_permission.pop(aid, None)
 
 
 def full_stream() -> None:
