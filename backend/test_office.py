@@ -2639,6 +2639,8 @@ def audit_archive() -> None:
             assert main.inbox_items()["recent"] == [], "收件匣的「最近」讀新本，封存後就是空的"
             e = main.audit("task.done", "p19", card=2, label="ok")
             assert e["seq"] == 2 and e["prev"] == items[0]["hash"], "封存後照常往後寫"
+            main._audit_last["seq"] = 0   # 模擬橋剛重啟、還沒寫過帳：外殼拿的水位必須是磁碟檔尾，不然「清除」等於藏到 0＝沒藏
+            assert main.inbox_items()["max_seq"] == 2, main.inbox_items()["max_seq"]
         finally:
             main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
     print("  ✓ 帳本封存：舊本保留、新本接得回、畫面清空")

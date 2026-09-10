@@ -3156,7 +3156,8 @@ def inbox_items(limit: int = 60) -> dict:
                        "card": e.get("card")})
         if len(recent) >= limit:
             break
-    return {"ok": True, "todo": todo, "recent": recent, "max_seq": _audit_last.get("seq", 0)}
+    # 水位看磁碟檔尾：橋重啟後到第一筆 audit() 之前 _audit_last 還是 0，外殼拿 0 當「全讀／清除」的水位就什麼都藏不掉（實際回報）
+    return {"ok": True, "todo": todo, "recent": recent, "max_seq": _audit_disk_tail()[0]}
 
 
 @app.get("/office/inbox")
