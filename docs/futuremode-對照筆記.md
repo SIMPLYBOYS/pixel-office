@@ -240,6 +240,22 @@ ponytail: 輪替由 LLM 照規則改 JSON，沒有腳本強制；若實跑發現
 到點與補跑同一個入口 `fire_job`，守門只寫一次：**今天那份報表已經在了就不重跑**——補跑過再到點、到點過再手按，都只跑一次。
 沒有 `deliver.file` 的班表看不出「有沒有產出」，只靠戳記防同一小時重複。
 
+### 小安改專注職缺（2026-09-10 下午）
+
+Aaron 看了 Threads 報告：內容凌亂、沒附連結、主題太散。決定：**小安只做職缺與外包需求收集**，來源順序 **MCP → 公開 API／WebFetch → WebSearch**；
+Threads 班表從 schedule.json 下架（範例檔保留）。實測出來的資料源：
+
+| 來源 | 結果 |
+|---|---|
+| **JobSpy MCP**（`mcp__jobspy__search_jobs`，Indeed 台灣＋LinkedIn） | 免金鑰，20 筆／秒，有日期有連結。裝法見 `backend/tools/office_mcp_setup.sh`（docker 替身、釘 sdk 1.10.2 與 zod 3.25，否則工具 schema 是空的、Claude Code 看不到） |
+| LinkedIn 訪客搜尋 API（`/jobs-guest/jobs/api/seeMoreJobPostings/search`，`f_TPR=r604800`） | WebFetch 200，10 筆／頁，有相對時間 |
+| Freelancer 公開 API（`/api/projects/0.1/projects/active/`） | 只有 `full_description=true` 且 **query 是單一個字** 才會過濾（"AI agent" 回全站 721 筆） |
+| Yourator `/api/v4/jobs` | 第三順位（只有「一天內／一週內更新」粒度） |
+| 104／Cake／1111／Upwork | 機器人驗證，不試 |
+| JobFrog（jobfrog.tech） | DNS 解不到，連不上；Tasker／PRO360 搜尋頁路徑 404，未接 |
+
+報告格式改成固定五段、每列必須有連結與刊登日、表外每段最多兩行——「沒連結＝沒資料」寫進人設。
+
 ### 收件匣清除與帳本封存（2026-09-10）
 
 老闆說有些訊息冗余、不想再看。兩層，刻意分開：

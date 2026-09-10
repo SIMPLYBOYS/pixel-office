@@ -46,6 +46,16 @@
     "text": "每日 PM 市場觀點（班表任務，不是老闆派的）。你是產品經理，這份給老闆看：市場今天發生什麼、對我們的產品開發意味什麼、要做什麼與不做什麼。我們的產品是 Pixffice：像素辦公室裡的數字員工（AI agent）團隊，有人設、班表、審批、工作串，老闆在外殼派工與驗收。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；2) 資料來源只用 WebFetch 抓 RSS——英文：https://techcrunch.com/feed/ 、https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114 、https://finance.yahoo.com/news/rssindex 、https://feeds.content.dowjones.io/public/rss/mw_topstories （MarketWatch）、https://asia.nikkei.com/rss/feed/nar ；中文：https://technews.tw/feed/ 、https://www.inside.com.tw/feed/rss 、https://buzzorange.com/techorange/feed/ （TechOrange）。只取 24 小時內的項目；任一來源抓不到就寫進報告的「來源狀態」，不要補、不要換別的來源。不要用 gh／curl，Bash 在這裡沒有網路。3) 先讀目前目錄裡昨天的 pm-<昨天>.md（沒有就跳過），昨天列「觀察」的今天要交代有沒有進展；4) 在目前目錄寫 pm-<今天>.md：來源狀態；市場一分鐘 5 條（一句話＋連結）；PM 觀點 3 條——挑對 AI agent、數字員工、辦公室協作有意義的，每條寫「訊息｜對 Pixffice 的意涵｜做／不做／觀察｜若要做，一句可機械檢查的驗收標準」；這週不做什麼（一條，附理由）；與昨天相比；5) 只讀不改、不 push、不寫實作程式碼。沒有來源的不寫；結論裡不能出現「大概」「應該」。"
   },
   {
+    "name": "jobs-daily-小安",
+    "hour": 9,
+    "engine": "cli",
+    "agent": "p10",
+    "deliver": {
+      "file": "jobs-{date}.md"
+    },
+    "text": "每日職缺整理（班表任務，不是老闆派的）。你是秘書，只做收集與條件比對，不替老闆決定、絕不投遞、不聯絡任何人。【條件核對表——請老闆在 schedule.json 裡改成自己的】：地點台北或可遠端；方向 AI agent／後端／平台工程／LLM 應用；年資五年以上；排除：純前端、需長期出差、外派；外包／接案：AI agent、LLM 整合、後端自動化這類需求也收。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；不要用 gh／curl，Bash 在這裡沒有網路。2) 讀目前目錄裡昨天那份 jobs-<昨天>.md（沒有就寫「沒有昨天那份」），今天要標「新出現／延續／消失」。3) 來源依序，前一個能用就別浪費時間在後面的：a. 【第一優先 MCP】mcp__jobspy__search_jobs：siteNames 'indeed,linkedin'、location 'Taiwan'、countryIndeed 'Taiwan'、hoursOld 168、resultsWanted 25，searchTerm 至少跑四次：'AI Agent'、'LLM'、'Backend Engineer'、'Platform Engineer'（中文再跑 'AI 工程師'、'後端工程師'）；isRemote true 再跑一次 'AI Agent'。每筆拿 title／company／location／datePosted／jobUrl／（有就用）minAmount／maxAmount／description。b. 【第二】WebFetch LinkedIn 訪客搜尋 https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=<關鍵字>&location=Taiwan&f_TPR=r604800&start=0 （每頁 10 筆，start 加 25 翻頁）補 MCP 沒回的關鍵字；c. 【外包】WebFetch Freelancer 公開 API https://www.freelancer.com/api/projects/0.1/projects/active/?query=<單一英文字>&full_description=true&limit=30&compact=true&job_details=true （query 只吃單一個字才會過濾，分別跑 LLM、chatbot、langchain、openai、agent；取 title／budget／type／time_submitted／bid_stats／seo_url，連結是 https://www.freelancer.com/projects/<seo_url>；只留 time_submitted 在 7 天內、且標題或說明與 AI／LLM／agent／自動化有關的）；d. 【第三】WebFetch Yourator JSON https://www.yourator.co/api/v4/jobs?term%5B%5D=<關鍵字>&page=1 （payload.jobs，欄位 name／company.brand／location／salary／lastActiveAt／path，連結 https://www.yourator.co<path>，只留「一天內更新」「一週內更新」）。104、Cake、1111、Upwork 有機器人驗證拿不到，不要試；JobFrog（jobfrog.tech）目前連不上，試一次連不上就記在來源狀態、不要再試。4) 去重：同一公司同一職稱只留一筆（優先留有日期與薪資的那筆）。只留刊登日在 7 天內的；沒有日期的不列進正式表、另放「日期不明」一小節最多 5 筆。5) 在目前目錄寫 jobs-<今天>.md，格式固定、不要加別的段：第一段「來源狀態」一張表（來源｜查了什麼｜回幾筆｜7 天內幾筆｜問題）；第二段「職缺」一張表最多 20 筆，欄位「公司｜職稱｜地點／遠端｜薪資（有寫才寫，沒寫留空）｜條件符合 n／總數｜刊登日｜連結」，依符合數再依日期排序，【每一列都必須有連結與刊登日，缺一不列】；第三段「外包／接案」一張表最多 10 筆，欄位「平台｜需求標題｜預算｜類型（固定／時薪）｜投標數｜刊登日｜連結」；第四段「與昨天相比」三行：新出現 n 筆（列公司＋職稱）、消失 n 筆、延續 n 筆；第五段「要問老闆」最多 3 條，只列不判斷。整份不寫感想、不寫過程敘述、不重複資料；表格外的文字每段不超過兩行。6) 只讀不改、不投遞、不註冊、不聯絡、不留下老闆任何個資。"
+  },
+  {
     "name": "threads-daily-小安",
     "hour": 9,
     "engine": "cli",
