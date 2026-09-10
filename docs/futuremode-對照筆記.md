@@ -222,6 +222,16 @@ Claude Code 本來就有子 agent，看板跑不起來是辦公室三條線沒�
 決定（Aaron，2026-09-10）：只剩一站不值得每天跑，**jobs 班表取消**，小安只留 Threads 班表；找職缺留在人設裡當臨時派工用。
 要重開得先有第二個來源：走瀏覽器（playwright）或各站 API 金鑰。
 
+### Threads 主題輪替（2026-09-10）
+
+小安第一份 Threads 報告問了三件事，Aaron 的答覆：查法改成**先巡追蹤帳號的個人頁再搜**（搜尋引擎對 Threads 索引落後約一個月，這是小安實測出來的）；
+x402 放寬到 30 天；加一個主題「職缺招募／接案外包」；並要一個 **trend rotate**：主題連續幾天沒料就自動冷藏、把之前冷藏的主題撿回來查，名單靠命中的作者長大——資料飛輪。
+
+做法：小安在自己的工作區維護 `topics.json`（主題：queries／window_days／miss_streak／hits_total／status；帳號：last_hit／miss_streak），
+規則寫死在班表任務文裡：主題 miss_streak 到 3 冷藏並復活 parked 最早的 cold 主題；帳號 miss_streak 到 7 移到 cold_accounts；命中的新作者自動入名單。
+報告多一節「主題輪替」把每次增減與理由寫出來，老闆看得到機制在轉。
+ponytail: 輪替由 LLM 照規則改 JSON，沒有腳本強制；若實跑發現算錯 streak 或亂加帳號，再把規則搬進 `backend/tools/` 的小腳本讓她跑。
+
 ### 漏跑補跑（2026-09-10）
 
 橋在 9:00 沒開著，那天的報告就沒有。補法：收件匣列出「今天到點卻沒跑」的班表（沒戳記、也沒今天那份 `deliver.file`），
