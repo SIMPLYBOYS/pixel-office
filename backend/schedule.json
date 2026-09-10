@@ -38,16 +38,5 @@
       "file": "threads-{date}.md"
     },
     "text": "每日 Threads 整理（班表任務，不是老闆派的）。你是秘書，查回來的是材料不是判斷。【老闆要看的主題——請老闆在 schedule.json 裡改成自己的】：AI agent 自動付款、x402、數字員工／agent 團隊產品、Claude Code 多 agent 協作。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；2) 先讀目前目錄裡昨天那份（沒有就跳過），今天要標出「新出現／延續／消失」；不要用 gh／curl，Bash 在這裡沒有網路；抓不到、搜不到就在報告裡照實寫，不補、不猜。3) Threads 沒有公開讀取 API：用 WebSearch 搜 site:threads.net 與 site:threads.com 加上主題關鍵字（中英都搜），再用 WebFetch 逐篇看公開貼文；只取最近 7 天，每則列「作者｜發文時間｜一句摘要（原話用引號，不改寫）｜連結」，最多 15 則，依主題分組；4) 在目前目錄寫 threads-<今天>.md：來源狀態（搜了哪些關鍵字、各幾則、搜不到的說搜不到）；各主題的貼文清單；與昨天相比；最後「老闆可能要決定的事」最多 3 條，只列不判斷；5) 只讀不改、不留言、不回覆、不以老闆名義做任何事。"
-  },
-  {
-    "name": "jobs-daily-小安",
-    "hour": 9,
-    "engine": "cli",
-    "agent": "p10",
-    "deliver": {
-      "file": "jobs-{date}.md"
-    },
-    "text": "每日職缺整理（班表任務，不是老闆派的）。你是秘書，只做條件比對，不替老闆決定、絕不投遞。【條件核對表——請老闆在 schedule.json 裡改成自己的】：地點台北或可遠端；方向 AI agent／後端／平台工程；年資五年以上；排除：純前端、需長期出差、外派。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；不要用 gh／curl，Bash 在這裡沒有網路。2) 先讀目前目錄裡昨天那份（沒有就跳過），今天要標出「新出現／延續／消失」。3) 來源只有 Yourator（104、Cake、1111 都有機器人驗證，WebFetch 拿不到，不要再試、也不要在報告裡假裝看過）。依條件列 3～4 個關鍵字（例：AI Agent、LLM、後端、平台工程），每個關鍵字 WebFetch 這個 JSON 端點：https://www.yourator.co/api/v4/jobs?term%5B%5D=<關鍵字 URL 編碼>&page=1 ；回傳 payload.jobs 每頁 20 筆，欄位 name／company.brand／location／salary／lastActiveAt／path，payload.hasMore 為 true 就再抓 page=2，最多到第 3 頁。只留 lastActiveAt 是「一天內更新」或「一週內更新」的，其餘一律不列；同一 path 出現多次只留一個。初篩符合方向與地點的，再 WebFetch 職缺內頁 https://www.yourator.co<path> 核對年資、遠端、排除條件；內頁抓不到就在符合欄標「？」。WebSearch 只當補充，且要標「日期不明」，不能算進 7 天內。抓不到、搜不到就在報告裡照實寫，不補、不猜。4) 在目前目錄寫 jobs-<今天>.md：來源狀態（哪個關鍵字幾頁幾筆、哪些內頁沒抓到）；比對表「公司｜職稱｜地點／遠端｜薪資（有寫才寫）｜必要條件符合幾項／幾項｜連結｜更新（照 lastActiveAt 原字）」，最多 12 筆、依符合項數排序；條件裡沒講清楚的欄位標「？」列在「要問老闆」；與昨天相比：新出現的、已下架的。5) 只讀不改、不投遞、不註冊、不留下老闆任何個資。",
-    "minute": 30
   }
 ]

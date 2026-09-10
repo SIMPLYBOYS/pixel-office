@@ -219,8 +219,8 @@ Claude Code 本來就有子 agent，看板跑不起來是辦公室三條線沒�
   欄位 name／company.brand／location／salary／lastActiveAt／path），職缺內頁是伺服器端渲染，WebFetch 兩者都拿得到。
   `lastActiveAt` 只有「一天內／一週內更新」這種粒度，沒有刊登日——7 天內就用這欄。
 
-決定：jobs 班表只留 Yourator，任務文明講其他三站拿不到、不要再試也不要假裝看過；WebSearch 補的一律標「日期不明」。
-要更多來源得走瀏覽器（playwright）或各站 API 金鑰，目前不做。
+決定（Aaron，2026-09-10）：只剩一站不值得每天跑，**jobs 班表取消**，小安只留 Threads 班表；找職缺留在人設裡當臨時派工用。
+要重開得先有第二個來源：走瀏覽器（playwright）或各站 API 金鑰。
 
 ## 四、一句話總結
 
