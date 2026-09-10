@@ -230,6 +230,7 @@ x402 放寬到 30 天；加一個主題「職缺招募／接案外包」；並�
 做法：小安在自己的工作區維護 `topics.json`（主題：queries／window_days／miss_streak／hits_total／status；帳號：last_hit／miss_streak），
 規則寫死在班表任務文裡：主題 miss_streak 到 3 冷藏並復活 parked 最早的 cold 主題；帳號 miss_streak 到 7 移到 cold_accounts；命中的新作者自動入名單。
 報告多一節「主題輪替」把每次增減與理由寫出來，老闆看得到機制在轉。
+**查法再修（同日，Aaron 看報告指出搜尋結果太差）**：回頭看 trace，7 次 WebSearch 全是「site:threads.net／.com ＋ 中英 OR 串 ＋ September 2026／本週」這種查詢。我自己用同一顆 WebSearch 實測：短中文查詢（「數字員工 AI agent」「x402 支付」「徵 AI agent 工程師」）配 `allowed_domains: ["threads.com"]`，每個都回 10 則對題貼文、含本週的；`threads.net` 對 Anthropic 爬蟲是擋的（帶進 allowed_domains 直接 400），她的 site:threads.net 查詢因此全回非 Threads 結果。所以「索引落後一個月」一半是查法造成的。任務文改成：只用 threads.com、一種語言一查、2～4 詞、不用 OR、不加日期字、每主題中文≥3 英文≥1，先用貼文代碼判新舊再逐篇核對。
 ponytail: 輪替由 LLM 照規則改 JSON，沒有腳本強制；若實跑發現算錯 streak 或亂加帳號，再把規則搬進 `backend/tools/` 的小腳本讓她跑。
 
 ### 漏跑補跑（2026-09-10）
