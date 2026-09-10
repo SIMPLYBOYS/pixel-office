@@ -3707,7 +3707,7 @@ def schedule_of(aid: str, jobs: list[dict] | None = None) -> list[dict]:
         if str(j.get("agent", "")) != aid or not isinstance(j.get("hour"), int):
             continue
         wd = j.get("weekday")
-        when = (WEEKDAYS[wd] if isinstance(wd, int) and 0 <= wd <= 6 else "每天") + f" {j['hour']:02d}:00"
+        when = (WEEKDAYS[wd] if isinstance(wd, int) and 0 <= wd <= 6 else "每天") + f" {j['hour']:02d}:{int(j.get('minute') or 0):02d}"
         d = j.get("deliver") if isinstance(j.get("deliver"), dict) else {}
         out.append({"name": str(j.get("name", "")), "when": when, "engine": str(j.get("engine") or ""),
                     "deliver": str(d.get("file") or ""), "last": sched_last.get(str(j.get("name", "")), "")})
@@ -3715,7 +3715,8 @@ def schedule_of(aid: str, jobs: list[dict] | None = None) -> list[dict]:
 
 
 async def run_due_jobs(now: time.struct_time) -> None:
-    """weekday（0=週一；省略＝每天）＋hour 命中、這一小時還沒跑過 → 派工。job 可帶 engine（cli／cogito）。
+    """weekday（0=週一；省略＝每天）＋hour 命中（minute 省略＝整點；有就等到那一分之後）、這一小時還沒跑過 → 派工。
+    job 可帶 engine（cli／cogito）。同一個人兩張班表要錯開：人在忙的那一輪會被跳過，不排隊。
 
     人在忙就【跳過這一輪】而不是排隊——班表任務是例行巡邏，錯過一輪下次照排；
     排隊反而會在他收工的瞬間搶走老闆正要派的活。跳過有留痕，不是靜默消失。
@@ -3727,6 +3728,8 @@ async def run_due_jobs(now: time.struct_time) -> None:
         if not name or aid not in agents or not str(job.get("text", "")).strip():
             continue
         if job.get("weekday") not in (None, now.tm_wday) or job.get("hour") != now.tm_hour:
+            continue
+        if now.tm_min < int(job.get("minute") or 0):   # 同一小時內錯開：09:30 就等到 :30 那一分鐘之後才點（一小時仍只點一次）
             continue
         if sched_last.get(name) == stamp:
             continue

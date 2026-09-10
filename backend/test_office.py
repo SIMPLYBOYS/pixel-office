@@ -2119,6 +2119,18 @@ def schedule_jobs() -> None:
             assert cli_cwd == [main.CHANNELS_DIR / "office_p19"], f"沒綁 repo 的班表任務要在工作區根跑，不是上一張卡的 worktree：{cli_cwd}"
         assert main.sched_running.get("p19", {}).get("job", {}).get("name") == "每日趨勢", "派出去的班表任務要記著，收工才知道要交付"
         assert main.pending_note.get("p19", "").startswith("🗓 班表任務「每日趨勢」開跑"), "開跑那行要寄放到新卡，不是直接寫進上一張卡"
+        # minute：同一小時內錯開。:30 的班表在 :29 不點、:30 之後才點（一小時仍只點一次）
+        sched.write_text(json.dumps([{"name": "半點的", "hour": now.tm_hour, "minute": 30, "agent": "p12", "text": "半點才做"}], ensure_ascii=False))
+        main.busy.discard("p12"); main.sched_last.pop("半點的", None)
+        early = time.struct_time((now.tm_year, now.tm_mon, now.tm_mday, now.tm_hour, 29, 0, now.tm_wday, now.tm_yday, now.tm_isdst))
+        asyncio.run(main.run_due_jobs(early)); assert not any(t == "半點才做" for t in sent), "還沒到 :30 不該點"
+        late = time.struct_time((now.tm_year, now.tm_mon, now.tm_mday, now.tm_hour, 31, 0, now.tm_wday, now.tm_yday, now.tm_isdst))
+        asyncio.run(main.run_due_jobs(late)); assert "半點才做" in sent, f":31 該點了：{sent}"
+        main.sched_last.pop("半點的", None); main.pending_note.pop("p12", None); main.sched_running.pop("p12", None)
+        # 把班表檔與 sent 還原成上面那兩條 job 的狀態，後面「同一小時不重複」「忙碌跳過」的斷言才算的是原本那兩條
+        sched.write_text(json.dumps([{"name": "巡邏", "weekday": now.tm_wday, "hour": now.tm_hour, "agent": "p07", "text": "例行巡檢"},
+                                     {"name": "每日趨勢", "hour": now.tm_hour, "engine": "cli", "agent": "p19", "text": "整理趨勢"}], ensure_ascii=False))
+        sent[:] = [t for t in sent if t != "半點才做"]
         old_evs = [e["text"] for e in (main.last_report.get("p19") or {"events": []})["events"]]
         assert not any("每日趨勢」開跑" in t for t in old_evs), "開跑那行掛到上一張卡的尾巴了"
         main.pending_note.pop("p19", None)
@@ -2345,6 +2357,7 @@ def schedule_file_valid() -> None:
             assert j.get("agent") in main.agents, f"{tag}：員工 {j.get('agent')!r} 不存在（名冊：{sorted(main.agents)}）"
             assert isinstance(j.get("hour"), int) and 0 <= j["hour"] <= 23, f"{tag}：hour 要 0–23"
             assert j.get("weekday") is None or (isinstance(j["weekday"], int) and 0 <= j["weekday"] <= 6), f"{tag}：weekday 要 0–6 或省略"
+            assert j.get("minute") is None or (isinstance(j["minute"], int) and 0 <= j["minute"] <= 59), f"{tag}：minute 要 0–59 或省略"
             assert j.get("engine") in (None, main.ENGINE_CLI, main.ENGINE_COGITO), f"{tag}：engine 只能是 cli／cogito"
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
