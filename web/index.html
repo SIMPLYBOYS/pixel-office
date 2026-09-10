@@ -1412,6 +1412,10 @@ async function inboxcard() {
   let r;
   try { r = await (await fetch('/office/inbox?limit=40')).json(); } catch { return; }
   if (!r.ok) return;
+  // 清除：老闆說「這些我不用再看」——藏到這個序號為止，之後新來的照常出現。是老闆的偏好不是辦公室的事實，存瀏覽器；
+  // 帳本本身一筆不少（要真的收起來是稽核面板的「封存」）。
+  const hide = parseInt(localStorage.inboxHide || '0', 10);
+  r.recent = r.recent.filter(x => x.seq > hide);
   const unread = r.recent.filter(x => x.seq > inboxRead()).length;
   const sig = JSON.stringify([r.todo.map(t => t.id), r.recent.slice(0, 40).map(x => x.id), unread]);
   if (box.dataset.sig === sig) { tickInbox(); return; }   // 沒變就不重畫（跟能力面板同一個做法）
@@ -1420,7 +1424,8 @@ async function inboxcard() {
   if (box.hidden) return;
   box.innerHTML = `<summary>📥 收件匣<small>${r.todo.length ? `待處理 ${r.todo.length}・` : ''}未讀 ${unread}</small>
     ${r.todo.filter(t => t.kind === 'missed').length > 1 ? `<span class="wdbtn" title="今天到點沒跑的班表全部補跑（今天已有報表的不重跑）" onclick="event.preventDefault(); event.stopPropagation(); runJob('');">▶ 補跑全部</span>` : ''}
-    <span class="wdbtn" title="全部標為已讀" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxRead = String(${r.max_seq}); inboxcard();">✓ 全讀</span></summary>`;
+    <span class="wdbtn" title="全部標為已讀" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxRead = String(${r.max_seq}); inboxcard();">✓ 全讀</span>
+    ${r.recent.length ? `<span class="wdbtn" title="把「最近」清掉（只影響你這個瀏覽器；帳本一筆不少）" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxHide = String(${r.max_seq}); localStorage.inboxRead = String(${r.max_seq}); inboxcard();">🗑 清除</span>` : ''}</summary>`;
   box.open = localStorage.inboxOpen !== '0';   // 預設開：這是主面板
   for (const t of r.todo) {
     const row = el('div', '', 'irow todo');
@@ -1505,7 +1510,8 @@ async function auditcard(id) {
   box.hidden = false;
   const v = r.verify || {};
   const chain = v.ok ? `鏈完整・共 ${v.entries} 筆` : `⚠ 鏈在第 ${v.broken_at} 筆斷了：${v.reason || ''}`;
-  box.innerHTML = `<summary>🧾 稽核帳本<small>${r.items.length} 筆・${esc(chain)}</small></summary>`;
+  box.innerHTML = `<summary>🧾 稽核帳本<small>${r.items.length} 筆・${esc(chain)}</small>
+    <span class="wdbtn" title="封存整本（全員）：改名歸檔、不刪，新本第一筆記下上一本的檔名與最後 hash" onclick="event.preventDefault(); event.stopPropagation(); archiveLedger('${id}');">📦 封存</span></summary>`;
   box.open = localStorage.auditOpen === '1';
   for (const e of r.items) {
     const what = e.tool || e.task || e.target || e.text || e.why || e.reason || e.detail || '';
@@ -1517,6 +1523,15 @@ async function auditcard(id) {
     box.appendChild(row);
   }
   box.addEventListener('toggle', () => { localStorage.auditOpen = box.open ? '1' : '0'; });
+}
+
+async function archiveLedger(id) {
+  if (!confirm('把整本稽核帳本封存？舊本改名保留在 backend/audit/，畫面與收件匣的「最近」會清空。')) return;
+  const r = await (await fetch('/office/audit/archive', { method: 'POST' })).json();
+  $('hint').textContent = r.ok ? `已封存 ${r.entries} 筆 → ${r.archived}` : `⛔ ${r.error}`;
+  $('hint').classList.toggle('err', !r.ok);
+  localStorage.inboxHide = '0'; localStorage.inboxRead = '0';   // 新本序號從 1 起，舊的藏匿水位要歸零
+  auditcard(id); inboxcard();
 }
 
 // 送出前的反悔窗。派工是【不可逆】的——一旦進了 cogito 就開始花錢，也沒有「收回」這回事，

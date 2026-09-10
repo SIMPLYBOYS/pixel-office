@@ -3077,6 +3077,24 @@ def audit_recent(aid: str = "", limit: int = 50) -> list[dict]:
     return list(reversed(out[-limit:]))
 
 
+def audit_archive() -> dict:
+    """封存：這本改名歸檔（不刪——稽核帳只能往後寫，「清除」是把它收進抽屜），新本第一筆記下歸檔檔名、筆數與最後一筆的 hash，
+    兩本接得起來。畫面（稽核面板、收件匣的「最近」）只讀現在這本，所以老闆看到的就是清空了。"""
+    path = audit_path()
+    seq, h = _audit_disk_tail()
+    if not path.exists() or seq == 0:
+        return {"ok": False, "error": "帳本是空的，沒有東西可封存"}
+    name = f"ledger-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    path.rename(path.with_name(name))
+    e = audit("ledger.archived", "", file=name, entries=seq, last_hash=h)
+    return {"ok": e.get("written", True), "archived": name, "entries": seq}
+
+
+@app.post("/office/audit/archive")
+def office_audit_archive():
+    return audit_archive()
+
+
 @app.get("/office/audit")
 def office_audit(agent: str = "", limit: int = 50):
     """這位員工（或全員）最近的裁決紀錄，加上整條鏈驗證結果——看得到，也證得了沒被動過。"""

@@ -459,6 +459,7 @@ def run() -> None:
     trace_links()
     start_records_engine()
     audit_ledger()
+    audit_archive()
     cli_subagents()
     models_cogito_up()
     sub_report_dedup()
@@ -2615,6 +2616,32 @@ def start_records_engine() -> None:
         assert card["engine"] == "cogito" and card["session"] == "office_p12", "cogito 的 start 沒帶欄位：預設一個頻道一條 session"
         await main.office_event({"v": 1, "agent": "p12", "kind": "done", "label": "ok"})
     asyncio.run(drive())
+
+
+def audit_archive() -> None:
+    """封存：舊本改名保留、鏈完整；新本第一筆記下舊本檔名／筆數／最後 hash；畫面與收件匣只讀新本所以清空；空本不封存。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+        main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        try:
+            assert main.audit_archive()["ok"] is False, "空本沒東西可封存"
+            main.audit("task.done", "p19", card=1, label="ok"); last = main.audit("delivery.sent", "p19", target="telegram:1")
+            assert len(main.inbox_items()["recent"]) == 2
+            r = main.audit_archive()
+            assert r["ok"] and r["entries"] == 2 and r["archived"].startswith("ledger-") and r["archived"].endswith(".jsonl"), r
+            arch = main.AUDIT_DIR / r["archived"]
+            assert arch.exists() and len(arch.read_text(encoding="utf-8").splitlines()) == 2, "舊本要原封不動留著"
+            items = main.audit_recent()
+            assert len(items) == 1 and items[0]["kind"] == "ledger.archived" and items[0]["seq"] == 1 and items[0]["prev"] == "", items
+            assert items[0]["file"] == r["archived"] and items[0]["entries"] == 2 and items[0]["last_hash"] == last["hash"], "新本第一筆要接得回舊本"
+            assert main.audit_verify() == {"ok": True, "entries": 1, "broken_at": None}
+            assert main.inbox_items()["recent"] == [], "收件匣的「最近」讀新本，封存後就是空的"
+            e = main.audit("task.done", "p19", card=2, label="ok")
+            assert e["seq"] == 2 and e["prev"] == items[0]["hash"], "封存後照常往後寫"
+        finally:
+            main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+    print("  ✓ 帳本封存：舊本保留、新本接得回、畫面清空")
 
 
 def audit_ledger() -> None:
