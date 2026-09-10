@@ -809,6 +809,13 @@ BG_DONE_RE = re.compile(r"^背景子 agent \S+ \[([^\]]*)\]：([✅⚪🟢])", r
 sub_active: dict[tuple[str, str], list[str]] = {}
 
 
+def in_pool(aid: str) -> bool:
+    """能不能被【動態】指派：頻道自動配人、會議代打。人設 pool: false 的人（秘書小安，崗位在櫃檯）只接老闆直接派的活——
+    否則 Slack 一個新頻道進來就可能把秘書抓去寫週報，會議缺人也拿她代打。"""
+    a = agents.get(aid)
+    return bool(a) and a.persona.get("pool", True) is not False
+
+
 def npc_by_name(name: str) -> str | None:
     """用【人名】反查 persona id（小美 → p01）。"""
     return next((aid for aid, a in npcs().items() if a.name == name), None)
@@ -989,7 +996,7 @@ def meet_spot() -> str:
 
 
 def pick_sub_npc(parent: str, name: str) -> str | None:
-    free = [x for x in npcs() if x != parent and x not in busy]   # 看板沒有身體，不能被派去支援
+    free = [x for x in npcs() if in_pool(x) and x != parent and x not in busy]   # 看板沒有身體，不能被派去支援
     # 先用人名對名冊，再退回角色表。
     # kanban 頻道的具名 agent 用的是【人名】（小美、老徐…），SUB_NPC 那張表收的卻是【角色名】
     # （planner、implementer…）。只查角色表的話「派給小美」會落到隨便一個閒著的人身上——
@@ -1361,7 +1368,7 @@ def resolve_npc(ext: str) -> str | None:
         return ext.split(":", 1)[1]  # Web 外殼派工：conv 就是指名的員工
     if ext in conv_npc:
         return conv_npc[ext]
-    free = [x for x in npcs() if x not in busy and x not in conv_npc.values()]
+    free = [x for x in npcs() if in_pool(x) and x not in busy and x not in conv_npc.values()]
     if not free:
         return None  # 全員有主：事件丟棄（辦公室演不了，任務本身照跑）
     conv_npc[ext] = free[0]

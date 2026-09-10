@@ -464,6 +464,7 @@ def run() -> None:
     cli_permission_queue()
     inbox()
     slug_table_matches_personas()
+    fixed_post_not_pooled()
     clear_all()
     note_not_echoed()
     stop_clears_approval()
@@ -2809,6 +2810,22 @@ def slug_table_matches_personas() -> None:
         assert got == slug, f"{name} 的 slug 是 {got!r}，守則表寫 {slug!r}——主持人會派錯人"
     slugs = [a.persona.get("slug") for a in main.npcs().values()]
     assert len(set(slugs)) == len(slugs), f"slug 重複：{slugs}"
+
+
+def fixed_post_not_pooled() -> None:
+    """人設 pool: false（秘書小安）不進動態指派池：頻道自動配人、會議代打都不找她；老闆直接派仍可以。"""
+    assert main.in_pool("p01") and not main.in_pool("p10")
+    saved = dict(main.conv_npc); main.conv_npc.clear(); saved_busy = set(main.busy); main.busy.clear()
+    try:
+        main.busy.update(a for a in main.npcs() if a != "p10")          # 只剩小安有空
+        assert main.resolve_npc("slack:Z1") is None or main.resolve_npc("slack:Z1") != "p10", "頻道配人不該抓秘書"
+        main.conv_npc.clear()
+        assert main.pick_sub_npc("kanban", "不存在的人") != "p10", "會議代打不該抓秘書"
+        main.busy.clear()
+        assert main.pick_sub_npc("kanban", "小安") != "p10", "點名小安也不該讓她離開櫃檯去代打——她不在池裡"
+        assert main.resolve_npc("p10") == "p10", "老闆直接派給她仍然可以"
+    finally:
+        main.conv_npc.clear(); main.conv_npc.update(saved); main.busy.clear(); main.busy.update(saved_busy)
 
 
 def full_stream() -> None:
