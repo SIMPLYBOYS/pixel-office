@@ -210,6 +210,18 @@ Claude Code 本來就有子 agent，看板跑不起來是辦公室三條線沒�
 
 第一步只做 ①＋一條 GitHub trend 範例班表，跑幾天看實際產出，再決定 ②③ 的深度。
 
+### 職缺站實測（2026-09-10，小安 jobs 班表）
+
+第一份報告 0 筆、四個操作被擋——不是小安偷懶，是資料源：從這台機器與 Claude Code 的 WebFetch 各探一次，
+- 104：搜尋頁／職缺頁全 403／402（Cloudflare 驗證），curl 換瀏覽器 UA 也一樣；
+- Cake：curl 200 但 WebFetch 403（看 UA 擋）；1111：搜尋頁是 JS 殼，WebFetch 只看到「安全驗證失敗」；
+- **Yourator**：搜尋頁是 JS 殼，但 `/api/v4/jobs?term[]=<關鍵字>&page=N` 是公開 JSON（每頁 20 筆、`hasMore` 翻頁，
+  欄位 name／company.brand／location／salary／lastActiveAt／path），職缺內頁是伺服器端渲染，WebFetch 兩者都拿得到。
+  `lastActiveAt` 只有「一天內／一週內更新」這種粒度，沒有刊登日——7 天內就用這欄。
+
+決定：jobs 班表只留 Yourator，任務文明講其他三站拿不到、不要再試也不要假裝看過；WebSearch 補的一律標「日期不明」。
+要更多來源得走瀏覽器（playwright）或各站 API 金鑰，目前不做。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。
