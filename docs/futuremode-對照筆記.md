@@ -252,7 +252,8 @@ Threads 班表從 schedule.json 下架（範例檔保留）。實測出來的資
 | Freelancer 公開 API（`/api/projects/0.1/projects/active/`） | 只有 `full_description=true` 且 **query 是單一個字** 才會過濾（"AI agent" 回全站 721 筆） |
 | Yourator `/api/v4/jobs` | 第三順位（只有「一天內／一週內更新」粒度） |
 | 104／Cake／1111／Upwork | 機器人驗證，不試 |
-| JobFrog（jobfrog.tech） | DNS 解不到，連不上；Tasker／PRO360 搜尋頁路徑 404，未接 |
+| **JobFrog**（正確網址 www.job-frog.com，Aaron 補的） | Next.js：首頁與 /today 是 JS 殼，但 **/companies/<slug>（92 家）伺服器端列最新 30 筆含「N 天前」、/jobs/<id> 有「發布：日期」**；sitemap 3684 筆但 WebFetch 讀會截斷。robots：`*` 允許、禁 /api/ /go/，ClaudeBot（訓練爬蟲）禁、Content-Signal use=reference——只讀公司頁與職缺頁，不碰 API 與跳轉連結。列第二順位 |
+| Tasker／PRO360 | 搜尋頁路徑 404，未接 |
 
 報告格式改成固定五段、每列必須有連結與刊登日、表外每段最多兩行——「沒連結＝沒資料」寫進人設。
 
