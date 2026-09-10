@@ -3108,6 +3108,12 @@ def inbox_items(limit: int = 60) -> dict:
     if k and k.get("status") == "ok" and "開工" in str(k.get("report") or "") + " ".join(str(e.get("text", "")) for e in k.get("events", [])[-3:]):
         todo.append({"id": f"start:{k['id']}", "kind": "ask_start", "agent": KANBAN, "name": agents[KANBAN].name if KANBAN in agents else "看板",
                      "card": k["id"], "text": "板子開好了，主持人在等你說開工", "at": k.get("at", "")})
+    now_t = time.localtime()
+    for j in missed_jobs(now_t):   # 今天到點沒跑的班表：橋當時不在。要不要補跑是老闆的決定
+        aid, jname = str(j["agent"]), str(j["name"])
+        todo.append({"id": f"missed:{jname}:{time.strftime('%Y-%m-%d', now_t)}", "kind": "missed", "agent": aid,
+                     "name": agents[aid].name, "job": jname,
+                     "text": f"班表「{jname}」{j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）"})
     recent: list[dict] = []
     for e in audit_recent("", 400):
         if e.get("kind") not in INBOX_KINDS:
@@ -3714,41 +3720,95 @@ def schedule_of(aid: str, jobs: list[dict] | None = None) -> list[dict]:
     return out
 
 
-async def run_due_jobs(now: time.struct_time) -> None:
-    """weekday（0=週一；省略＝每天）＋hour 命中（minute 省略＝整點；有就等到那一分之後）、這一小時還沒跑過 → 派工。
-    job 可帶 engine（cli／cogito）。同一個人兩張班表要錯開：人在忙的那一輪會被跳過，不排隊。
+def report_today(aid: str, job: dict, day: str) -> Path | None:
+    """今天那份報表已經在了嗎（deliver.file 帶 {date}）。沒有 deliver.file 的班表看不出來——回 None、不猜。"""
+    spec = job.get("deliver") if isinstance(job.get("deliver"), dict) else {}
+    pat = str(spec.get("file") or "")
+    base = job_workdir(aid, job) if pat and "{date}" in pat else None
+    if base is None:
+        return None
+    p = base / pat.replace("{date}", day)
+    return p if p.is_file() else None
+
+
+async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是老闆派的") -> dict:
+    """派一張班表任務——到點與老闆手動補跑都走這裡，守門只寫一次：
+    今天那份報表已經在了就不重跑（橋在 9:00 不在、10:00 補跑、隔天 9:00 又到點，都靠這條）。
 
     人在忙就【跳過這一輪】而不是排隊——班表任務是例行巡邏，錯過一輪下次照排；
     排隊反而會在他收工的瞬間搶走老闆正要派的活。跳過有留痕，不是靜默消失。
     """
     global _dirty
+    name, aid = str(job.get("name", "")), str(job.get("agent", ""))
+    sched_last[name] = stamp
+    _dirty = True
+    if (p := report_today(aid, job, stamp[:10])) is not None:
+        log_ev(aid, f"🗓 班表任務「{name}」今天那份已經在了（{p.name}），不重跑")
+        return {"ok": False, "skipped": True, "error": f"今天已有 {p.name}，不重跑"}
+    if aid in busy:
+        log_ev(aid, f"🗓 班表任務「{name}」到點，但人在忙——這輪跳過，下次照排")
+        return {"ok": False, "error": "人在忙，這輪跳過"}
+    # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
+    # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
+    r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo"),
+                               "engine": job.get("engine"), "scheduled": True})
+    if r.get("ok"):
+        # 這一刻新卡還沒開，直接 log_ev 會掛在上一張卡的尾巴（實測：卡 237 尾巴多了一行 239 的開跑）。
+        # 寄放著，等 start 開出任務卡再掛——跟老闆派工那行同一個機制。
+        pending_note[aid] = f"🗓 班表任務「{name}」開跑（{how}）"
+        sched_running[aid] = {"job": job, "started": time.time()}   # 收工時據此交付（見 deliver_job）
+    else:
+        log_ev(aid, f"🗓 班表任務「{name}」派不出去：{r.get('error')}")   # 沒有卡會開，只能掛現在這張
+    return r
+
+
+def _job_ok(job: dict) -> bool:
+    return bool(str(job.get("name", ""))) and str(job.get("agent", "")) in agents \
+        and bool(str(job.get("text", "")).strip()) and isinstance(job.get("hour"), int)
+
+
+async def run_due_jobs(now: time.struct_time) -> None:
+    """weekday（0=週一；省略＝每天）＋hour 命中（minute 省略＝整點；有就等到那一分之後）、這一小時還沒跑過 → 派工。
+    job 可帶 engine（cli／cogito）。同一個人兩張班表要錯開：人在忙的那一輪會被跳過，不排隊。"""
     stamp = time.strftime("%Y-%m-%d %H", now)
     for job in load_schedule():
-        name, aid = str(job.get("name", "")), str(job.get("agent", ""))
-        if not name or aid not in agents or not str(job.get("text", "")).strip():
-            continue
-        if job.get("weekday") not in (None, now.tm_wday) or job.get("hour") != now.tm_hour:
+        if not _job_ok(job) or job.get("weekday") not in (None, now.tm_wday) or job["hour"] != now.tm_hour:
             continue
         if now.tm_min < int(job.get("minute") or 0):   # 同一小時內錯開：09:30 就等到 :30 那一分鐘之後才點（一小時仍只點一次）
             continue
-        if sched_last.get(name) == stamp:
+        if sched_last.get(str(job["name"])) == stamp:
             continue
-        sched_last[name] = stamp
-        _dirty = True
-        if aid in busy:
-            log_ev(aid, f"🗓 班表任務「{name}」到點，但人在忙——這輪跳過，下次照排")
+        await fire_job(job, stamp)
+
+
+def missed_jobs(now: time.struct_time) -> list[dict]:
+    """今天該跑、時間已過、卻沒跑的班表（沒戳記、也沒今天那份報表）——橋在 9:00 沒開著的那個早上。"""
+    day = time.strftime("%Y-%m-%d", now)
+    out = []
+    for job in load_schedule():
+        if not _job_ok(job) or job.get("weekday") not in (None, now.tm_wday):
             continue
-        # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
-        # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
-        r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo"),
-                                   "engine": job.get("engine"), "scheduled": True})
-        if r.get("ok"):
-            # 這一刻新卡還沒開，直接 log_ev 會掛在上一張卡的尾巴（實測：卡 237 尾巴多了一行 239 的開跑）。
-            # 寄放著，等 start 開出任務卡再掛——跟老闆派工那行同一個機制。
-            pending_note[aid] = f"🗓 班表任務「{name}」開跑（由班表觸發，不是老闆派的）"
-            sched_running[aid] = {"job": job, "started": time.time()}   # 收工時據此交付（見 deliver_job）
-        else:
-            log_ev(aid, f"🗓 班表任務「{name}」派不出去：{r.get('error')}")   # 沒有卡會開，只能掛現在這張
+        if now.tm_hour * 60 + now.tm_min < job["hour"] * 60 + int(job.get("minute") or 0):
+            continue
+        name, aid = str(job["name"]), str(job["agent"])
+        if sched_last.get(name, "").startswith(day) or report_today(aid, job, day) is not None:
+            continue
+        out.append(job)
+    return out
+
+
+@app.post("/office/schedule/run")
+async def schedule_run(d: dict):
+    """老闆手動補跑：帶 name 跑那一條，不帶＝今天到點卻沒跑的全部。今天已有報表的不重跑（fire_job 守門）。"""
+    now = time.localtime()
+    if name := str(d.get("name") or ""):
+        jobs = [j for j in load_schedule() if str(j.get("name", "")) == name and _job_ok(j)]
+        if not jobs:
+            return {"ok": False, "error": f"沒有「{name}」這條班表"}
+    else:
+        jobs = missed_jobs(now)
+    results = [{"name": str(j["name"]), **await fire_job(j, time.strftime("%Y-%m-%d %H", now), "老闆手動補跑")} for j in jobs]
+    return {"ok": True, "results": results}
 
 
 async def schedule_loop() -> None:

@@ -454,6 +454,7 @@ def run() -> None:
     schedule_delivery()
     schedule_file_valid()
     schedule_visible()
+    schedule_manual_run()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -2362,6 +2363,69 @@ def schedule_file_valid() -> None:
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
                 assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
+
+
+def schedule_manual_run() -> None:
+    """手動補跑：橋在到點時沒開 → 收件匣列出沒跑的班表 → 老闆按補跑 → 派工；今天那份報表已經在了就不重跑
+    （到點與補跑同一個守門）；不帶 name 就補跑今天全部漏掉的。"""
+    import tempfile
+    cli_sent: list[str] = []
+
+    def fake_cli(aid, text, cwd=None, model="", fresh=False):
+        cli_sent.append(aid)
+        async def _noop(): pass
+        return _noop()
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = Path(tmp) / "schedule.json"
+        # hour 0 → 除了 00:00 那一分鐘之外今天都算「到點已過」
+        sched.write_text(json.dumps([
+            {"name": "每日趨勢", "hour": 0, "engine": "cli", "agent": "p19", "text": "整理趨勢", "deliver": {"file": "trend-{date}.md"}},
+            {"name": "情報", "hour": 0, "engine": "cli", "agent": "p12", "text": "整理情報", "deliver": {"file": "intel-{date}.md"}},
+            {"name": "晚班", "hour": 23, "minute": 59, "engine": "cli", "agent": "p07", "text": "還沒到"}], ensure_ascii=False), encoding="utf-8")
+        old = (main.SCHEDULE_FILE, main.CHANNELS_DIR, main.run_cli_task, main.cli_available, dict(main.sched_last))
+        main.SCHEDULE_FILE, main.CHANNELS_DIR = sched, Path(tmp)
+        main.run_cli_task, main.cli_available = fake_cli, lambda: True
+        main.sched_last.clear(); main.busy.difference_update({"p19", "p12", "p07"})
+        for a in ("p19", "p12", "p07"):
+            main.sched_running.pop(a, None); main.pending_note.pop(a, None)
+        now = time.localtime()
+        try:
+            if now.tm_hour == 0 and now.tm_min == 0:
+                print("  （00:00 整，這條測不準，跳過）"); return
+            names = lambda: sorted(j["name"] for j in main.missed_jobs(now))
+            assert names() == ["情報", "每日趨勢"], f"到點已過又沒跑的才算漏：{names()}"
+            todo = [x for x in main.inbox_items()["todo"] if x["kind"] == "missed"]
+            assert sorted(x["job"] for x in todo) == ["情報", "每日趨勢"] and todo[0]["agent"] in ("p19", "p12"), todo
+            assert "00:00" in todo[0]["text"] and "沒跑" in todo[0]["text"], todo[0]
+            # 補跑一條
+            r = asyncio.run(main.schedule_run({"name": "每日趨勢"}))
+            assert r["ok"] and r["results"][0]["ok"] and cli_sent == ["p19"], (r, cli_sent)
+            assert main.sched_running.get("p19", {}).get("job", {}).get("name") == "每日趨勢", "補跑的也要記著，收工才交付"
+            assert "手動補跑" in main.pending_note.get("p19", ""), main.pending_note.get("p19")
+            assert names() == ["情報"], "補跑過的不再列漏跑"
+            assert asyncio.run(main.schedule_run({"name": "沒這條"}))["ok"] is False
+            # 今天那份已經在了 → 不重跑（不論是到點還是手動）
+            (Path(tmp) / "office_p12").mkdir(); (Path(tmp) / "office_p12" / f"intel-{time.strftime('%Y-%m-%d')}.md").write_text("已有")
+            assert names() == [], "報表在了就不算漏跑，即使沒有戳記"
+            main.sched_last.clear(); main.sched_running.pop("p12", None)
+            r = asyncio.run(main.schedule_run({"name": "情報"}))
+            assert r["results"][0].get("skipped") and "今天已有" in r["results"][0]["error"] and cli_sent == ["p19"], (r, cli_sent)
+            main.sched_last.clear()
+            asyncio.run(main.run_due_jobs(time.struct_time((now.tm_year, now.tm_mon, now.tm_mday, 0, 5, 0, now.tm_wday, now.tm_yday, now.tm_isdst))))
+            assert cli_sent == ["p19", "p19"], f"到點：p19 沒有今天的報表所以再派、p12 有所以不派：{cli_sent}"
+            # 不帶 name：補跑今天全部漏的（p19 剛跑過有戳記、p12 有報表、p07 還沒到 → 什麼都不派）
+            main.sched_last["每日趨勢"] = time.strftime("%Y-%m-%d %H")
+            r = asyncio.run(main.schedule_run({}))
+            assert r["ok"] and r["results"] == [], r
+            main.sched_last.pop("每日趨勢")
+            r = asyncio.run(main.schedule_run({}))
+            assert [x["name"] for x in r["results"]] == ["每日趨勢"] and cli_sent == ["p19", "p19", "p19"], (r, cli_sent)
+        finally:
+            main.SCHEDULE_FILE, main.CHANNELS_DIR, main.run_cli_task, main.cli_available = old[:4]
+            main.sched_last.clear(); main.sched_last.update(old[4])
+            for a in ("p19", "p12", "p07"):
+                main.sched_running.pop(a, None); main.pending_note.pop(a, None)
+    print("  ✓ 手動補跑／漏跑列進收件匣／今天已有報表不重跑")
 
 
 def schedule_visible() -> None:

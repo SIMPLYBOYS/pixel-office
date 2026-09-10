@@ -1387,6 +1387,9 @@ async function profile(id) {
       if (j.deliver) bits.push('交付 ' + j.deliver);
       bits.push(j.last ? '上次 ' + j.last.slice(5) + ' 時' : '還沒跑過');
       t.appendChild(el('span', bits.map(esc).join(' · ')));
+      const go = el('span', ' ▶ 現在跑', 'wdbtn'); go.title = '手動跑這條班表（今天已有報表就不重跑）';
+      go.onclick = (e) => { e.stopPropagation(); runJob(j.name); };
+      t.appendChild(go);
       t.appendChild(document.createElement('br'));
     }
   }
@@ -1416,6 +1419,7 @@ async function inboxcard() {
   box.hidden = !(r.todo.length || r.recent.length);
   if (box.hidden) return;
   box.innerHTML = `<summary>📥 收件匣<small>${r.todo.length ? `待處理 ${r.todo.length}・` : ''}未讀 ${unread}</small>
+    ${r.todo.filter(t => t.kind === 'missed').length > 1 ? `<span class="wdbtn" title="今天到點沒跑的班表全部補跑（今天已有報表的不重跑）" onclick="event.preventDefault(); event.stopPropagation(); runJob('');">▶ 補跑全部</span>` : ''}
     <span class="wdbtn" title="全部標為已讀" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxRead = String(${r.max_seq}); inboxcard();">✓ 全讀</span></summary>`;
   box.open = localStorage.inboxOpen !== '0';   // 預設開：這是主面板
   for (const t of r.todo) {
@@ -1428,6 +1432,11 @@ async function inboxcard() {
       row.innerHTML = `<span class="ileft" data-left="${t.left_s}" data-t0="${Date.now()}"></span>
         <span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">⏳ 審批 <b>${esc(t.tool)}</b> <code>${esc((t.params || '').slice(0, 90))}</code></span>${btns}`;
+    } else if (t.kind === 'missed') {
+      // 橋在到點時沒開著：補不補是老闆的決定。今天那份已經在了橋會拒（fire_job 守門），不會重跑
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwhat">🗓 ${esc(t.text)}</span>
+        <button class="yes" onclick="event.stopPropagation(); runJob(${JSON.stringify(t.job)})">▶ 補跑</button>`;
     } else {
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">🗓 ${esc(t.text)}</span>
@@ -1455,6 +1464,15 @@ function tickInbox() {   // 審批倒數：橋給剩餘秒數，這裡往下數
   }
 }
 setInterval(tickInbox, 1000);
+// 手動跑班表：name 空＝今天到點沒跑的全部。橋回每條的結果（開跑／今天已有／人在忙）
+async function runJob(name) {
+  const r = await (await fetch('/office/schedule/run', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(name ? { name } : {}) })).json();
+  const msg = !r.ok ? `⛔ ${r.error}` : !r.results.length ? '今天沒有漏跑的班表'
+    : r.results.map(x => `${x.name}：${x.ok ? '開跑 ✓' : x.error}`).join('；');
+  $('hint').textContent = msg; $('hint').classList.toggle('err', !r.ok);
+  inboxcard(); roster();
+}
 // 給指定的人下指令（收件匣裡放行別人的審批，不必先切到他）
 async function dispatchFor(agent, text) {
   const r = await (await fetch('/office/dispatch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
