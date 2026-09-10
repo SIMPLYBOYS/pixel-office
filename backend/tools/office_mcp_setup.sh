@@ -27,6 +27,17 @@ d.setdefault("mcpServers", {})["jobspy"] = {"type": "stdio", "command": "node", 
 json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
 print("mcpServers.jobspy 寫進", p)
 PY
+# 104：社群的 mcp-server-104（npx，釘版本）。它靠瀏覽器 TLS 指紋（cycletls）過 104 的 Cloudflare 驗證、走非官方端點——
+# Aaron 2026-09-10 知情後決定用；只在班表那一輪低頻查，不翻頁、不重複打。allow 要加 "mcp__job104"。
+V104="${MCP104_VERSION:-$(npm view mcp-server-104 version)}"
+python3 - "$OFFICE/.claude.json" "$V104" <<'PY'
+import json, sys
+p, v = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+d.setdefault("mcpServers", {})["job104"] = {"type": "stdio", "command": "npx", "args": ["-y", f"mcp-server-104@{v}"]}
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+print("mcpServers.job104 寫進", p, "版本", v)
+PY
 # 自檢：工具 schema 不能是空的（空＝Claude Code 會把工具丟掉）
 (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"setup","version":"0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2) \
