@@ -253,7 +253,7 @@ Threads 班表從 schedule.json 下架（範例檔保留）。實測出來的資
 | Yourator `/api/v4/jobs` | 第三順位（只有「一天內／一週內更新」粒度） |
 | **104（MCP）** | Aaron 問「104 應該有 MCP」——有兩顆社群的：`mcp-server-104`（npx，cycletls）與 `job104-mcp`（uvx，curl_cffi），都靠**瀏覽器 TLS 指紋**過 Cloudflare、走非官方端點、免登入。實測 `mcp-server-104` 一次查回 22 筆含 appearDate 與連結。風險講明：104 ToS 與 IP 封鎖；用法限一天一輪、不翻頁。置頂廣告要 `excludeFeatured` 濾掉（'AI Agent' 前兩筆是主管秘書與視覺設計）。**104 只有 `appearDate`＝更新日，沒有刊登日**（search 與 detail 都只有這個欄位，官網也只顯示更新日期），第一輪 100 筆全是同一天。2026-09-11 起改由小安記 `seen.json` 首見帳：104 的窗口與「新出現／消失」都用首見日算，第一天全是首見、隔天起才準 |
 | Cake／1111／Upwork | 機器人驗證，不試 |
-| **JobFrog**（正確網址 www.job-frog.com，Aaron 補的） | Next.js：首頁與 /today 是 JS 殼，但 **/companies/<slug>（92 家）伺服器端列最新 30 筆含「N 天前」、/jobs/<id> 有「發布：日期」**；sitemap 3684 筆但 WebFetch 讀會截斷。robots：`*` 允許、禁 /api/ /go/，ClaudeBot（訓練爬蟲）禁、Content-Signal use=reference——只讀公司頁與職缺頁，不碰 API 與跳轉連結。列第二順位 |
+| **JobFrog**（正確網址 www.job-frog.com，Aaron 補的） | Next.js：首頁與 /today 是 JS 殼，但 **/companies/<slug>（92 家）伺服器端列最新 30 筆含「N 天前」、/jobs/<id> 有「發布：日期」**；sitemap 3684 筆但 WebFetch 讀會截斷。robots：`*` 允許、禁 /api/ /go/，ClaudeBot（訓練爬蟲）禁、Content-Signal use=reference——只讀公司頁與職缺頁，不碰 API 與跳轉連結。列第二順位。2026-09-11 Aaron 要「關鍵字搜、不鎖公司」：站內搜尋是 JS 走被禁的 /api/，沒有伺服器端搜尋頁（/search、/?q=、/jobs?q= 都 404 或殼），只能 WebSearch 限 job-frog.com 再逐篇核日期——召回受搜尋引擎索引限制（'Web3 blockchain' 只回 1 則相關）。方向清單同時加 Web3／blockchain，104 與 JobSpy 關鍵字跟著加 |
 | Tasker／PRO360 | 搜尋頁路徑 404，未接 |
 
 報告格式改成固定五段、每列必須有連結與刊登日、表外每段最多兩行——「沒連結＝沒資料」寫進人設。
