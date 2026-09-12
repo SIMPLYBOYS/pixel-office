@@ -460,6 +460,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    costs_panel()
     cli_subagents()
     models_cogito_up()
     sub_report_dedup()
@@ -2644,6 +2645,57 @@ def audit_archive() -> None:
         finally:
             main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
     print("  ✓ 帳本封存：舊本保留、新本接得回、畫面清空")
+
+
+def costs_panel() -> None:
+    """花費面板：CLI 的 result 帶 token 用量與換算值（不叫 cost）；帳上的 task.done 帶引擎／用量；
+    /office/costs 從稽核帳（含封存本）彙總每人每引擎、只看最近 N 天；cogito 單次上限讀 .claw/config.json。"""
+    import tempfile
+    # CLI result → done 事件：usage 與 api_equiv；0／缺就不帶
+    ev = main.cli_done_events({"result": "ok", "usage": {"input_tokens": 1200, "output_tokens": 300, "cache_read_input_tokens": 5000}, "total_cost_usd": 0.42})[-1]
+    assert ev["usage"] == {"in": 1200, "out": 300, "cache_read": 5000, "cache_create": 0} and ev["api_equiv"] == 0.42, ev
+    ev = main.cli_done_events({"result": "ok"})[-1]
+    assert "usage" not in ev and "api_equiv" not in ev, "沒有用量就不帶，不畫 0"
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+        main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "ws" / "channels"
+        try:
+            assert main.cogito_cost_cap() is None, "config 不在就 None，不猜預設"
+            (Path(tmp) / "ws" / ".claw").mkdir(parents=True); (Path(tmp) / "ws" / ".claw" / "config.json").write_text('{"max_cost_usd": 3.0}')
+            assert main.cogito_cost_cap() == 3.0
+            with TestClient(main.app) as c:
+                main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})   # lifespan 會重載
+                post(c, agent="p19", kind="start", label="CLI 的活")
+                post(c, agent="p19", kind="done", label="ok", usage={"in": 1200, "out": 300, "cache_read": 5000, "cache_create": 0}, api_equiv=0.42)
+                card = c.get("/office/report/p19").json()
+                assert card["usage"]["in"] == 1200 and card["api_equiv"] == 0.42 and "cost" not in card, "換算值不能變成 cost"
+                post(c, agent="p12", kind="start", label="cogito 的活")
+                post(c, agent="p12", kind="done", label="ok", cost=0.5, model="claude-opus-5")
+                post(c, agent="p12", kind="start", label="cogito 估價的活")
+                post(c, agent="p12", kind="done", label="error", cost=0.25, model="新模型", cost_est=True)
+            done = [e for e in main.audit_recent() if e["kind"] == "task.done"]
+            assert len(done) == 3 and done[-1]["usage"]["in"] == 1200 and done[-1]["api_equiv"] == 0.42 and done[-1]["engine"], done[-1]
+            assert done[0]["cost"] == 0.25 and done[0]["cost_est"] is True and "cost_est" not in done[1], (done[0], done[1])
+            # 封存本也算；太舊的不算（10 天前）
+            today = time.strftime("%Y-%m-%d"); old = time.strftime("%Y-%m-%d", time.localtime(time.time() - 10 * 86400))
+            (main.AUDIT_DIR / "ledger-20260901-000000.jsonl").write_text(
+                json.dumps({"seq": 1, "at": f"{today}T01:00:00+0800", "agent": "p12", "kind": "task.done", "engine": "cogito", "cost": 0.1}) + "\n" +
+                json.dumps({"seq": 2, "at": f"{old}T01:00:00+0800", "agent": "p12", "kind": "task.done", "engine": "cogito", "cost": 9.0}) + "\n", encoding="utf-8")
+            r = main.cost_rows(7)
+            eng = main.last_report["p19"]["engine"]
+            p19 = [x for x in r["rows"] if x["agent"] == "p19"]; p12 = [x for x in r["rows"] if x["agent"] == "p12"]
+            assert p19 and p19[0]["tok_in"] == 1200 and p19[0]["tok_cache"] == 5000 and p19[0]["api_equiv"] == 0.42 and p19[0]["usd"] == 0 and p19[0]["engine"] == eng, p19
+            assert sum(x["usd"] for x in p12) == 0.85 and sum(x["tasks"] for x in p12) == 3 and any(x["est"] for x in p12), p12
+            assert r["total"]["usd"] == 0.85 and r["total"]["api_equiv"] == 0.42 and r["total"]["tasks"] == 4 and r["cap_usd"] == 3.0, r["total"]
+            assert r["since"] <= today and all(x["date"] >= r["since"] for x in r["rows"]), "10 天前那筆 $9 不能混進來"
+            assert main.cost_rows(30)["total"]["usd"] == 9.85, "30 天就要算進去"
+            with TestClient(main.app) as c:
+                main.AUDIT_DIR = Path(tmp) / "audit"
+                assert c.get("/office/costs?days=7").json()["total"]["tasks"] == 4
+        finally:
+            main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None}); main.CHANNELS_DIR = old_ch
+    print("  ✓ 花費面板：CLI 用量與換算分欄、帳上帶引擎、彙總含封存本且只看 N 天")
 
 
 def audit_ledger() -> None:

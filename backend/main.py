@@ -1528,6 +1528,10 @@ async def office_event(ev: dict):
             # 差幾倍都可能——不標的話，估計值長得跟實價一模一樣。
             if card and cost and ev.get("cost_est"):
                 card["cost_est"] = True
+            if card and isinstance(ev.get("usage"), dict):
+                card["usage"] = {k: int(v) for k, v in ev["usage"].items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            if card and isinstance(ev.get("api_equiv"), (int, float)) and not isinstance(ev.get("api_equiv"), bool) and ev["api_equiv"] > 0:
+                card["api_equiv"] = float(ev["api_equiv"])
         clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
         rate_state.pop(aid, None)
         refresh_proposed(aid)   # 這一刻剛跑完 consolidate 的話，提案就是現在多出來的
@@ -1542,7 +1546,10 @@ async def office_event(ev: dict):
             paid = f"（${cost:.4f}）" if cost else ""  # 中斷也標——燒掉的錢不因失敗就不見
             log_ev(aid, ("✔ 任務完成" if label == "ok" else "✗ 任務中斷") + paid)
             a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
-            audit("task.done", aid, card=(card or {}).get("id"), label=label, cost=cost, detail=str(ev.get("detail") or "")[:300])
+            c0 = card or {}
+            audit("task.done", aid, card=c0.get("id"), label=label, cost=cost, detail=str(ev.get("detail") or "")[:300],
+                  engine=c0.get("engine"), model=c0.get("model"), cost_est=True if (cost and c0.get("cost_est")) else None,
+                  usage=c0.get("usage"), api_equiv=c0.get("api_equiv"))
             if run := sched_running.pop(aid, None):   # 班表任務：收工就交付；留痕掛在剛關掉的這張卡上
                 asyncio.create_task(deliver_job(aid, run["job"], label, run["started"]))
     else:
@@ -2664,7 +2671,17 @@ def cli_done_events(d: dict) -> list[dict]:
         counts = "、".join(f"{t}×{denials.count(t)}" for t in dict.fromkeys(denials))
         out.append({"kind": "error", "label": (f"⛔ 交付被權限擋下：{counts}——檔案沒寫出去" if blocked_write
                                                else f"⚠ {len(denials)} 個操作被權限擋下：{counts}")})
-    out.append({"kind": "done", "label": label, "detail": str(d.get("result") or "")[:120]})
+    done: dict = {"kind": "done", "label": label, "detail": str(d.get("result") or "")[:120]}
+    # token 用量是真的（訂閱制扣的是額度，不是錢）；total_cost_usd 是「換算成 API 會是多少」——
+    # 兩個都帶上，但名字就叫 usage／api_equiv，不叫 cost：卡上與帳上都不能長得像實花。
+    u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
+    tok = {k: int(u.get(src) or 0) for k, src in (("in", "input_tokens"), ("out", "output_tokens"),
+                                                  ("cache_read", "cache_read_input_tokens"), ("cache_create", "cache_creation_input_tokens"))}
+    if any(tok.values()):
+        done["usage"] = tok
+    if isinstance(d.get("total_cost_usd"), (int, float)) and not isinstance(d.get("total_cost_usd"), bool) and d["total_cost_usd"] > 0:
+        done["api_equiv"] = round(float(d["total_cost_usd"]), 4)
+    out.append(done)
     return out
 
 
@@ -3093,6 +3110,61 @@ def audit_archive() -> dict:
 @app.post("/office/audit/archive")
 def office_audit_archive():
     return audit_archive()
+
+
+# ── 花費：老闆該看得到「這週辦公室花了多少、誰花的、哪個引擎」──────────────────────────
+# 材料只有稽核帳（含封存本），不另外記一份。cogito 的 cost 是它算好的真實美元；CLI 走訂閱、沒有真實美元，
+# 只有 token 數與 Claude Code 自報的「換算成 API 約多少」——兩者分欄，不相加、不冒充實花。
+def cogito_cost_cap() -> float | None:
+    """cogito 單次任務的成本熔斷（workspace/.claw/config.json 的 max_cost_usd）。讀不到就 None，不猜它的預設值。"""
+    if CHANNELS_DIR is None:
+        return None
+    try:
+        v = json.loads((CHANNELS_DIR.parent / ".claw" / "config.json").read_text(encoding="utf-8")).get("max_cost_usd")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def cost_rows(days: int = 7) -> dict:
+    """最近 N 天（含今天）每人每引擎每日一列：件數、cogito 實花、CLI token（進／出／快取）、CLI 換算。"""
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
+    agg: dict[tuple, dict] = {}
+    num = (int, float)
+    for path in (sorted(AUDIT_DIR.glob("ledger*.jsonl")) if AUDIT_DIR.exists() else []):
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            if e.get("kind") != "task.done" or str(e.get("at", ""))[:10] < cutoff:
+                continue
+            key = (str(e.get("at", ""))[:10], str(e.get("agent", "")), str(e.get("engine") or "?"))
+            r = agg.setdefault(key, {"date": key[0], "agent": key[1], "name": agents[key[1]].name if key[1] in agents else key[1],
+                                     "engine": key[2], "tasks": 0, "usd": 0.0, "est": False,
+                                     "tok_in": 0, "tok_out": 0, "tok_cache": 0, "api_equiv": 0.0})
+            r["tasks"] += 1
+            if isinstance(e.get("cost"), num) and not isinstance(e.get("cost"), bool):
+                r["usd"] += float(e["cost"])
+            if e.get("cost_est"):
+                r["est"] = True
+            u = e.get("usage") if isinstance(e.get("usage"), dict) else {}
+            r["tok_in"] += int(u.get("in") or 0)
+            r["tok_out"] += int(u.get("out") or 0)
+            r["tok_cache"] += int(u.get("cache_read") or 0) + int(u.get("cache_create") or 0)
+            if isinstance(e.get("api_equiv"), num) and not isinstance(e.get("api_equiv"), bool):
+                r["api_equiv"] += float(e["api_equiv"])
+    rows = sorted(agg.values(), key=lambda r: (r["date"], r["agent"], r["engine"]), reverse=True)
+    for r in rows:
+        r["usd"], r["api_equiv"] = round(r["usd"], 4), round(r["api_equiv"], 4)
+    total = {k: (round(sum(r[k] for r in rows), 4) if k in ("usd", "api_equiv") else sum(r[k] for r in rows))
+             for k in ("tasks", "usd", "api_equiv", "tok_in", "tok_out", "tok_cache")}
+    return {"ok": True, "days": days, "since": cutoff, "rows": rows, "total": total, "cap_usd": cogito_cost_cap()}
+
+
+@app.get("/office/costs")
+def office_costs(days: int = 7):
+    return cost_rows(max(1, min(days, 90)))
 
 
 @app.get("/office/audit")

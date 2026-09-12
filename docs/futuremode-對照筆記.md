@@ -266,6 +266,19 @@ Threads 班表從 schedule.json 下架（範例檔保留）。實測出來的資
   記舊本檔名／筆數／最後 hash，兩本接得起來；面板與收件匣只讀新本所以清空。稽核帳從來不刪——「清除」是收進抽屜。
   空本不封存。測試 `audit_archive`，拔掉 last_hash 驗紅（KeyError）。
 
+### 花費面板（2026-09-13，來自老徐押 OmniRoute）
+
+老徐連兩天押 OmniRoute（352 家供應商的 OpenAI 相容 gateway），理由是「每家供應商各接一次、成本散在各處、換供應商要改程式」。
+對照實況：cogito 本來就是單一 provider 抽象（Claude 或任何 OpenAI 相容端點，換供應商改兩個環境變數）、每 session 有 CostTracker 與
+`MaxCostUSD` 熔斷、橋把真實花費攤在卡上。**真正缺的是彙總**：沒有每人／每日／每引擎的加總。
+OmniRoute 不合適的三點：員工 CLI 走訂閱，經 gateway 就變 API 計費（它的「Subscription 層」是把訂閱 OAuth 拿到代理用，踩條款）；
+省 token 靠壓縮提示，對要逐字原文的報告是品質風險且數字沒人驗；「免費 token 池」把請求散到 152 家免費供應商，稽核鏈斷在 gateway 外。
+
+做的是小的：`GET /office/costs?days=N` 從稽核帳（含封存本）彙總 `task.done`，外殼 💰 面板每人每引擎一列。
+CLI 的 result 現在帶 `usage`（token 進／出／快取）與 `api_equiv`（Claude Code 自報的 total_cost_usd，換算值）到卡與帳上，
+**名字刻意不叫 cost**：訂閱不這樣扣，實花與換算分欄、不相加。cogito 單次上限讀 `workspace/.claw/config.json` 的 max_cost_usd，讀不到就不顯示。
+OmniRoute 若要試，只把 `COGITO_REFLECT_MODEL` 指過去看一週。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。

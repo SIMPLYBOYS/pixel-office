@@ -130,6 +130,12 @@
   .audit .akind { white-space: nowrap; }
   .audit .awhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .audit .arow.bad .akind { color: #c0392b; }
+  /* 花費：每人每引擎一列；實花（cogito 美元）與換算（CLI 的 API 等值）分欄，不相加 */
+  .costs table { border-collapse: collapse; font-size: 11px; width: 100%; }
+  .costs th, .costs td { padding: 2px 6px; text-align: right; white-space: nowrap; }
+  .costs th { color: var(--dim); font-weight: normal; }
+  .costs th:first-child, .costs td:first-child, .costs th:nth-child(2), .costs td:nth-child(2) { text-align: left; }
+  .costs td small { color: var(--dim); }
   .trace { margin: 6px 0 2px; border-top: 1px dashed var(--line, #ccc); padding-top: 6px; font-size: 11.5px; }
   .trace .thead { color: var(--dim); margin-bottom: 4px; }
   .trace .st { display: grid; grid-template-columns: 11em 1fr; gap: 6px; margin: 2px 0; }
@@ -465,6 +471,7 @@
     <details class="prof memo" id="memo" hidden></details>
     <details class="prof" id="profile" hidden></details>
     <details class="prof audit" id="audit" hidden></details>
+    <details class="prof costs" id="costs" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
     <div class="composer">
@@ -1529,13 +1536,48 @@ async function auditcard(id) {
   box.addEventListener('toggle', () => { localStorage.auditOpen = box.open ? '1' : '0'; });
 }
 
+// 花費：最近 N 天每人每引擎。cogito 是真實美元；CLI 走訂閱、只有 token 與「換算成 API 約多少」——
+// 兩欄分開、不相加、不冒充實花。材料是稽核帳（含封存本），橋不另外記一份。
+async function costcard() {
+  const box = $('costs');
+  if (!box) return;
+  const days = parseInt(localStorage.costDays || '7', 10);
+  let r;
+  try { r = await (await fetch(`/office/costs?days=${days}`)).json(); } catch { return; }
+  if (!r.ok) return;
+  const sig = JSON.stringify([days, r.total, r.rows.length]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = !r.rows.length;
+  if (box.hidden) return;
+  const by = new Map();   // 面板一眼看「人＋引擎」合計；按日的細節放在列的 title
+  for (const x of r.rows) {
+    const k = x.agent + '|' + x.engine;
+    const a = by.get(k) || { name: x.name, engine: x.engine, tasks: 0, usd: 0, api_equiv: 0, tok_in: 0, tok_out: 0, tok_cache: 0, est: false, days: [] };
+    a.tasks += x.tasks; a.usd += x.usd; a.api_equiv += x.api_equiv; a.tok_in += x.tok_in; a.tok_out += x.tok_out; a.tok_cache += x.tok_cache; a.est = a.est || x.est;
+    a.days.push(`${x.date.slice(5)}：${x.tasks} 件${x.usd > 0 ? `・實花 $${x.usd.toFixed(4)}` : ''}${x.api_equiv > 0 ? `・換算 ~$${x.api_equiv.toFixed(2)}` : ''}`);
+    by.set(k, a);
+  }
+  const money = v => v > 0 ? '$' + v.toFixed(v < 1 ? 4 : 2) : '';
+  const kk = n => !n ? '' : n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'k' : String(n);
+  const rows = [...by.values()].sort((a, b) => (b.usd + b.api_equiv) - (a.usd + a.api_equiv)).map(a =>
+    `<tr title="${esc(a.days.join('\n'))}"><td>${esc(a.name)}</td><td>${esc(a.engine.toUpperCase())}</td><td>${a.tasks}</td>` +
+    `<td>${a.usd > 0 ? (a.est ? '~' : '') + money(a.usd) : ''}</td>` +
+    `<td>${a.tok_in || a.tok_out ? `${kk(a.tok_in)}／${kk(a.tok_out)}${a.tok_cache ? ` <small>快取 ${kk(a.tok_cache)}</small>` : ''}` : ''}</td>` +
+    `<td>${a.api_equiv > 0 ? '~' + money(a.api_equiv) : ''}</td></tr>`).join('');
+  box.innerHTML = `<summary>💰 花費<small>最近 ${days} 天・${r.total.tasks} 件・cogito 實花 ${money(r.total.usd) || '—'}・CLI 換算 ${r.total.api_equiv > 0 ? '~' + money(r.total.api_equiv) : '—'}${r.cap_usd ? `・cogito 單次上限 $${r.cap_usd}` : ''}</small>
+    <span class="wdbtn" title="切換統計天數" onclick="event.preventDefault(); event.stopPropagation(); localStorage.costDays = String(${days === 7 ? 30 : 7}); $('costs').dataset.sig = ''; costcard();">${days === 7 ? '看 30 天' : '看 7 天'}</span></summary>
+    <table><tr><th>員工</th><th>引擎</th><th>件</th><th title="cogito 算好的真實美元；~ 表示該模型沒登記單價、是估的">實花</th><th title="CLI 走訂閱：token 進／出，另列快取">token</th><th title="Claude Code 自報的 total_cost_usd：換算成 API 會是多少，訂閱並不會這樣扣">換算</th></tr>${rows}</table>`;
+  box.open = localStorage.costOpen === '1';
+  box.addEventListener('toggle', () => { localStorage.costOpen = box.open ? '1' : '0'; });
+}
 async function archiveLedger(id) {
   if (!confirm('把整本稽核帳本封存？舊本改名保留在 backend/audit/，畫面與收件匣的「最近」會清空。')) return;
   const r = await (await fetch('/office/audit/archive', { method: 'POST' })).json();
   $('hint').textContent = r.ok ? `已封存 ${r.entries} 筆 → ${r.archived}` : `⛔ ${r.error}`;
   $('hint').classList.toggle('err', !r.ok);
   localStorage.inboxHide = '0'; localStorage.inboxRead = '0';   // 新本序號從 1 起，舊的藏匿水位要歸零
-  auditcard(id); inboxcard();
+  auditcard(id); inboxcard(); $('costs').dataset.sig = ''; costcard();
 }
 
 // 送出前的反悔窗。派工是【不可逆】的——一旦進了 cogito 就開始花錢，也沒有「收回」這回事，
@@ -2568,7 +2610,8 @@ function openStream() {
   es.onmessage = e => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.alert) cue(ev.alert);          // 不管在看哪一位，該響的都要響
-    inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
+  costcard();                           // 花費也是全員視角
+  inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
     if (ev.type === 'roster') roster();
     else if (ev.type === 'agent') {
       if (ev.id === selected) {
