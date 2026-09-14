@@ -2433,27 +2433,28 @@ def schedule_manual_run() -> None:
             main.sched_last.pop("每日趨勢"); main.sched_running.pop("p19", None)   # 正在跑的不算漏，先讓它「跑完」
             r = asyncio.run(main.schedule_run({}))
             assert [x["name"] for x in r["results"]] == ["每日趨勢"] and cli_sent == ["p19", "p19", "p19"], (r, cli_sent)
-            # 老闆中止了跑到一半的班表任務：戳記已蓋、不算漏跑，但沒有產出——收件匣要再給一顆補跑（實際回報：中止後找不到地方重跑）
+            # 今天到過點卻沒跑完的：看帳本——被老闆中止、或收工不是 ok（CLI 被砍、橋重啟）都要再給一顆補跑
+            # （實際回報：中止後找不到地方重跑；老徐重跑到一半橋重啟也一樣）。正在跑的不列。
             assert "p19" in main.sched_running and names() == [], "跑著的時候不列"
-            main.busy.add("p19")
-            asyncio.run(main.force_stop("p19", ""))
-            main.sched_running.pop("p19", None)   # done 事件那端會做的事，這裡手動補
-            assert main.sched_stopped.get("每日趨勢") == time.strftime("%Y-%m-%d")
-            assert names() == ["每日趨勢"] and [x for x in main.missed_jobs(now) if x["name"] == "每日趨勢"][0]["why"] == "stopped"
-            todo = [x for x in main.inbox_items()["todo"] if x["kind"] == "missed" and x["job"] == "每日趨勢"]
-            assert todo and "被中止" in todo[0]["text"], todo
-            r = asyncio.run(main.schedule_run({"name": "每日趨勢"}))   # 補跑得出去（戳記不擋）
-            assert r["results"][0]["ok"] and cli_sent[-1] == "p19", r
-            main.sched_running.pop("p19", None); main.busy.discard("p19")
-            main.sched_stopped.pop("每日趨勢", None)
-            # 後備：橋更新前中止的（sched_stopped 沒記到），帳本裡有今天的 task.stopped 且之後沒再開工 → 一樣列
+            main.sched_running.pop("p19", None)
             old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            day = time.strftime("%Y-%m-%d")
             try:
                 main.sched_last["每日趨勢"] = time.strftime("%Y-%m-%d %H")
                 main.audit("task.start", "p19", card=1); main.audit("task.stopped", "p19")
-                assert main.stopped_today("p19", time.strftime("%Y-%m-%d")) and names() == ["每日趨勢"], "帳本後備沒生效"
-                main.audit("task.start", "p19", card=2)   # 之後又開工了 → 不再算被中止
-                assert names() == [], "開工之後就不該再列"
+                assert main.unfinished_today("p19", day) == "stopped" and names() == ["每日趨勢"], "被中止的要列"
+                todo = [x for x in main.inbox_items()["todo"] if x["kind"] == "missed" and x["job"] == "每日趨勢"]
+                assert todo and "被中止" in todo[0]["text"], todo
+                r = asyncio.run(main.schedule_run({"name": "每日趨勢"}))   # 補跑得出去（戳記不擋）
+                assert r["results"][0]["ok"] and cli_sent[-1] == "p19", r
+                main.sched_running.pop("p19", None)
+                main.audit("task.start", "p19", card=2); main.audit("task.done", "p19", card=2, label="error", detail="橋關閉")
+                assert main.unfinished_today("p19", day) == "error" and names() == ["每日趨勢"], "橋重啟砍掉的也要列"
+                assert "沒跑完" in [x for x in main.inbox_items()["todo"] if x["kind"] == "missed"][0]["text"]
+                main.audit("task.start", "p19", card=3); main.audit("task.done", "p19", card=3, label="ok")
+                assert main.unfinished_today("p19", day) == "" and names() == [], "正常收工就不列"
+                main.audit("task.start", "p19", card=4)   # 又開工了、還沒收 → 不列
+                assert names() == []
             finally:
                 main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
         finally:
@@ -2461,7 +2462,6 @@ def schedule_manual_run() -> None:
             main.sched_last.clear(); main.sched_last.update(old[4])
             for a in ("p19", "p12", "p07"):
                 main.sched_running.pop(a, None); main.pending_note.pop(a, None); main.stopped.discard(a)
-            main.sched_stopped.clear()
     print("  ✓ 手動補跑／漏跑列進收件匣／今天已有報表不重跑／被中止的可再補跑")
 
 

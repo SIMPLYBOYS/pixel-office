@@ -899,8 +899,6 @@ async def force_stop(aid: str, how: str) -> None:
     「有沒有真的叫停」是另一回事，兩者不能混為一談——那正是投影誠實的分界。
     """
     stopped.add(aid)
-    if run := sched_running.get(aid):   # 班表任務被中止：記下來，收件匣才會再給一顆「補跑」（戳記已經蓋了、不算漏跑）
-        sched_stopped[str(run["job"].get("name", ""))] = time.strftime("%Y-%m-%d")
     log_ev(aid, f"🧑‍💼 老闆中止了任務{how}")
     close_card(aid, "stopped")
     clear_approval(aid)
@@ -1553,8 +1551,6 @@ async def office_event(ev: dict):
                   engine=c0.get("engine"), model=c0.get("model"), cost_est=True if (cost and c0.get("cost_est")) else None,
                   usage=c0.get("usage"), api_equiv=c0.get("api_equiv"))
             if run := sched_running.pop(aid, None):   # 班表任務：收工就交付；留痕掛在剛關掉的這張卡上
-                if label == "ok":
-                    sched_stopped.pop(str(run["job"].get("name", "")), None)   # 補跑成功，中止那筆翻篇
                 asyncio.create_task(deliver_job(aid, run["job"], label, run["started"]))
     else:
         # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
@@ -2826,9 +2822,9 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                             "detail": f"CLI 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
-        proc.kill()                      # 老闆按了中止
+        proc.kill()                      # 老闆按了中止——或橋正在關閉、把還在跑的任務一起取消
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
-                            "detail": "老闆中止了這個任務"})
+                            "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，CLI 行程被中斷（不是老闆按的）"})
         done_sent = True
         raise
     finally:
@@ -3211,6 +3207,7 @@ def inbox_items(limit: int = 60) -> dict:
         todo.append({"id": f"missed:{jname}:{time.strftime('%Y-%m-%d', now_t)}", "kind": "missed", "agent": aid,
                      "name": agents[aid].name, "job": jname,
                      "text": (f"班表「{jname}」今天被中止，沒有產出" if j.get("why") == "stopped"
+                              else f"班表「{jname}」今天沒跑完（中斷或出錯），沒有產出" if j.get("why") == "error"
                               else f"班表「{jname}」{j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）")})
     recent: list[dict] = []
     for e in audit_recent("", 400):
@@ -3789,7 +3786,6 @@ async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
 
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
 sched_last: dict[str, str] = {}   # job name -> 上次觸發的 "YYYY-MM-DD HH"（防同一小時重複；隨 state 持久化）
-sched_stopped: dict[str, str] = {}   # job name -> 被老闆中止的那天：戳記已蓋、不算漏跑，但沒有產出，收件匣要再給一顆補跑
 
 
 def load_schedule() -> list[dict]:
@@ -3881,15 +3877,15 @@ async def run_due_jobs(now: time.struct_time) -> None:
         await fire_job(job, stamp)
 
 
-def stopped_today(aid: str, day: str) -> bool:
-    """帳本裡這個人今天有沒有被中止過（task.stopped），而且那之後沒有再開工過。"""
+def unfinished_today(aid: str, day: str) -> str:
+    """帳本裡這個人今天最後一次任務怎麼收的：被老闆中止 → "stopped"；收工但 label 不是 ok（CLI 被砍、橋關閉、出錯）→ "error"；
+    正常收工或還在跑 → ""。班表任務「有沒有跑完」只看帳本，不另外記一份狀態。"""
     last = ""
     for e in reversed(audit_recent(aid, 60)):   # audit_recent 最新在前，反過來就是時間序
-        if str(e.get("at", ""))[:10] != day:
+        if str(e.get("at", ""))[:10] != day or e.get("kind") not in ("task.start", "task.stopped", "task.done"):
             continue
-        if e.get("kind") in ("task.start", "task.stopped"):
-            last = e["kind"]
-    return last == "task.stopped"
+        last = "stopped" if e["kind"] == "task.stopped" else ("" if e["kind"] == "task.start" or e.get("label") == "ok" else "error")
+    return last
 
 
 def missed_jobs(now: time.struct_time) -> list[dict]:
@@ -3905,11 +3901,12 @@ def missed_jobs(now: time.struct_time) -> list[dict]:
         running = sched_running.get(aid, {}).get("job", {}).get("name") == name   # 正在跑的那條不算漏
         if report_today(aid, job, day) is not None or running:
             continue
-        # 今天被老闆中止、沒有產出：戳記蓋過了，但這條事實上沒跑完（實際回報：中止後找不到地方重跑）。
-        # sched_stopped 是精確的（知道是哪條）；帳本那條是後備——橋更新前中止的、或狀態檔沒跟上的，帳本裡的 task.stopped 還在。
-        if sched_stopped.get(name) == day or (sched_last.get(name, "").startswith(day) and stopped_today(aid, day)):
-            out.append({**job, "why": "stopped"})
-        elif not sched_last.get(name, "").startswith(day):
+        # 今天到過點（戳記蓋了）卻沒有產出：看帳本這個人今天最後一次是怎麼收的——被老闆中止、或收工時不是 ok
+        # （CLI 被砍、橋重啟把它斷掉、出錯）都算「沒跑完」，要再給一顆補跑（實際回報：中止後找不到地方重跑；老徐重跑到一半橋重啟也一樣）。
+        if sched_last.get(name, "").startswith(day):
+            if why := unfinished_today(aid, day):
+                out.append({**job, "why": why})
+        else:
             out.append(job)
     return out
 
@@ -4154,7 +4151,6 @@ def save_state() -> None:
             "approval_src": approval_src,
             "approval_meta": approval_meta, "approval_at": approval_at,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
-            "sched_stopped": sched_stopped,
             "model_sent": model_sent,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
@@ -4191,7 +4187,6 @@ def load_state() -> None:
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
     sched_last.update(data.get("sched_last", {}))
-    sched_stopped.update(data.get("sched_stopped", {}))
     model_sent.update(data.get("model_sent", {}))
     engine_sent.update(data.get("engine_sent", {}))
     if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
