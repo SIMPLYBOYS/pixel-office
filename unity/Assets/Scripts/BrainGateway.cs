@@ -30,6 +30,11 @@ public class BrainGateway : MonoBehaviour
         while (Application.isPlaying && this != null)
         {
             ws = new WebSocket(url);
+            // WebGL 的 Connect() 立刻返回（套件實作直接回 Task.CompletedTask），不像其他平台會停到斷線。
+            // 沒有這個等待，這個迴圈每 3 秒就多開一條連線、舊的沒關，後端每次廣播同一畫面就重複執行（codex review 抓到）。
+            // 所以不靠 Connect() 的返回時機，改等 OnClose：兩種平台都成立。
+            var closed = new TaskCompletionSource<bool>();
+            ws.OnClose += _ => closed.TrySetResult(true);
             ws.OnOpen += () =>
             {
                 remote = true;
@@ -48,8 +53,12 @@ public class BrainGateway : MonoBehaviour
             };
             ws.OnMessage += bytes => Dispatch(Encoding.UTF8.GetString(bytes));
 
-            try { await ws.Connect(); } // 連線存續期間都停在這行，關閉/失敗才返回
-            catch { /* 後端沒開，稍後重試 */ }
+            try
+            {
+                await ws.Connect();   // 非 WebGL：停到斷線才返回；WebGL：立刻返回，靠下一行等
+                await closed.Task;    // 兩種平台都在這裡等到這條連線真的關掉，才進入重連
+            }
+            catch { /* 後端沒開（Connect 丟例外），稍後重試 */ }
 
             await Task.Delay(3000);
         }

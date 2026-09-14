@@ -279,6 +279,16 @@ CLI 的 result 現在帶 `usage`（token 進／出／快取）與 `api_equiv`（
 **名字刻意不叫 cost**：訂閱不這樣扣，實花與換算分欄、不相加。cogito 單次上限讀 `workspace/.claw/config.json` 的 max_cost_usd，讀不到就不顯示。
 OmniRoute 若要試，只把 `COGITO_REFLECT_MODEL` 指過去看一週。
 
+### Codex（GPT-6）review 四條（2026-09-14）
+
+全部核實成立，全部修，三條 Python 的各留一個回歸斷言並驗紅：
+1. **WebGL 每 3 秒多開一條 WebSocket**：套件（endel/NativeWebSocket）的 WebGL `Connect()` 直接回 `Task.CompletedTask`，
+   BrainGateway 以為它會停到斷線。改成另等一個在 `OnClose` 完成的 TaskCompletionSource，兩種平台都成立。**尚未起 Unity 實測**，要重建 WebGL 才會生效。
+2. 中文檔名預覽 500：檔名自己塞 header 會 `UnicodeEncodeError`，改交 `FileResponse(filename=…, content_disposition_type="inline")` 做 RFC 5987。
+3. 存檔失敗不重試：`save_state()` 先清 `_dirty` 再寫，改成替換檔案成功後才清。
+4. 失效符號連結讓整個目錄列不出來：`listing()` 逐筆 `stat()` 包 `OSError` 跳過。
+維護性那條（main.py 4,200 行要拆）同意方向，先不動——拆檔是純搬家、沒有行為變更可驗，等下次要大改哪一塊再順手把那塊搬出去。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。

@@ -2022,7 +2022,10 @@ def listing(base: Path, rel: str) -> dict:
         # 只給 mtime 不給 ctime：POSIX 的 st_ctime 是 inode 變更時間（改權限也會動），
         # 不是「建立時間」；真正的建立時間 st_birthtime 只有部分平台有。與其送一個
         # 在 Linux 上會默默變成別的意思的欄位，不如只送一個到處都對的。
-        st = f.stat()
+        try:
+            st = f.stat()
+        except OSError:   # 失效的符號連結、列舉中途被刪掉的檔：跳過這一筆，其他照列（codex review 抓到）
+            continue
         if f.is_dir():
             dirs.append({"name": f.name, "path": r, "dir": True, "mtime": int(st.st_mtime)})
         else:
@@ -2047,13 +2050,13 @@ def serve_file(base: Path, rel: str, render: int):
         return {"ok": False, "error": "不支援預覽這種檔案"}
     if f.stat().st_size > PREVIEW_MAX:
         return {"ok": False, "error": f"檔案超過 {PREVIEW_MAX >> 20} MB，請開資料夾看"}
-    headers = {"X-Content-Type-Options": "nosniff",
-               "Content-Disposition": f'inline; filename="{f.name}"'}
+    headers = {"X-Content-Type-Options": "nosniff"}
     media = PREVIEW_TYPES[ext]
     if render and ext in ("html", "svg"):
         media = "text/html; charset=utf-8" if ext == "html" else media
         headers["Content-Security-Policy"] = "sandbox allow-scripts"
-    return FileResponse(f, media_type=media, headers=headers)
+    # 檔名交給 FileResponse 編碼：自己塞進 header 的話，「趨勢報告.md」這種非 latin-1 檔名會 UnicodeEncodeError（codex review 抓到）
+    return FileResponse(f, media_type=media, headers=headers, filename=f.name, content_disposition_type="inline")
 
 
 @app.delete("/office/history/{aid}")
@@ -4120,8 +4123,9 @@ def _sync_one(dst: Path, want: str, n: dict[str, int]) -> None:
 
 
 def save_state() -> None:
+    """寫成功（暫存檔替換完成）才清 _dirty：先清再寫的話，寫失敗那趟的變更會被存檔器與關機流程一起略過，
+    要等到下一次狀態變更才再試（codex review 重現過）。"""
     global _dirty
-    _dirty = False
     data = {"history": {a: list(cards) for a, cards in history.items()},
             "conv_npc": conv_npc, "pending_approval": pending_approval,
             "approval_src": approval_src,
@@ -4135,6 +4139,7 @@ def save_state() -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
+    _dirty = False
 
 
 def load_state() -> None:

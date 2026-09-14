@@ -460,6 +460,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    state_save_retry()
     costs_panel()
     cli_subagents()
     models_cogito_up()
@@ -666,6 +667,16 @@ def previews() -> None:
             shown = c.get(f"/office/file/p01/{cid}", params={"p": "page.html", "render": 1})
             assert shown.headers["content-type"].startswith("text/html")
             assert shown.headers["content-security-policy"] == "sandbox allow-scripts"
+            # 中文檔名：header 只吃 latin-1，檔名要走 RFC 5987 編碼，不能 500（codex review 抓到）
+            (wd / "趨勢報告.md").write_text("# 趨勢\n", encoding="utf-8")
+            zh = c.get(f"/office/file/p01/{cid}", params={"p": "趨勢報告.md"})
+            assert zh.status_code == 200 and zh.text.startswith("# 趨勢"), (zh.status_code, zh.text[:40])
+            cd = zh.headers["content-disposition"]
+            assert cd.startswith("inline") and "filename*=utf-8''" in cd and "%E8%B6%A8" in cd, cd
+            # 目錄列表：一個失效的符號連結不能讓整個目錄列不出來（codex review 抓到）
+            (wd / "dead.md").symlink_to(wd / "nope.md")
+            ls = main.listing(wd, "")
+            assert ls["ok"] and "a.md" in [e["name"] for e in ls["entries"]] and "dead.md" not in [e["name"] for e in ls["entries"]], ls
             # render=1 不能拿來把別種檔案變成 HTML
             assert c.get(f"/office/file/p01/{cid}", params={"p": "a.md", "render": 1}
                          ).headers["content-type"].startswith("text/plain")
@@ -2696,6 +2707,27 @@ def costs_panel() -> None:
         finally:
             main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None}); main.CHANNELS_DIR = old_ch
     print("  ✓ 花費面板：CLI 用量與換算分欄、帳上帶引擎、彙總含封存本且只看 N 天")
+
+
+def state_save_retry() -> None:
+    """存檔失敗那趟不能把 _dirty 清掉：否則存檔器與關機流程都會略過，等下一次變更才再試（codex review 重現過）。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        old_file = main.STATE_FILE
+        try:
+            main.STATE_FILE = Path(tmp) / "沒有這個目錄" / "state.json"
+            main._dirty = True
+            try:
+                main.save_state(); raise AssertionError("寫進不存在的目錄應該要失敗")
+            except OSError:
+                pass
+            assert main._dirty is True, "寫失敗還是清了旗標，下一輪不會重試"
+            main.STATE_FILE = Path(tmp) / "state.json"
+            main.save_state()
+            assert main._dirty is False and main.STATE_FILE.exists(), "寫成功才清旗標"
+        finally:
+            main.STATE_FILE = old_file
+    print("  ✓ 存檔失敗保留 _dirty，下一輪會重試")
 
 
 def audit_ledger() -> None:
