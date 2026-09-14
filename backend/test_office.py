@@ -2430,15 +2430,29 @@ def schedule_manual_run() -> None:
             main.sched_last["每日趨勢"] = time.strftime("%Y-%m-%d %H")
             r = asyncio.run(main.schedule_run({}))
             assert r["ok"] and r["results"] == [], r
-            main.sched_last.pop("每日趨勢")
+            main.sched_last.pop("每日趨勢"); main.sched_running.pop("p19", None)   # 正在跑的不算漏，先讓它「跑完」
             r = asyncio.run(main.schedule_run({}))
             assert [x["name"] for x in r["results"]] == ["每日趨勢"] and cli_sent == ["p19", "p19", "p19"], (r, cli_sent)
+            # 老闆中止了跑到一半的班表任務：戳記已蓋、不算漏跑，但沒有產出——收件匣要再給一顆補跑（實際回報：中止後找不到地方重跑）
+            assert "p19" in main.sched_running and names() == [], "跑著的時候不列"
+            main.busy.add("p19")
+            asyncio.run(main.force_stop("p19", ""))
+            main.sched_running.pop("p19", None)   # done 事件那端會做的事，這裡手動補
+            assert main.sched_stopped.get("每日趨勢") == time.strftime("%Y-%m-%d")
+            assert names() == ["每日趨勢"] and [x for x in main.missed_jobs(now) if x["name"] == "每日趨勢"][0]["why"] == "stopped"
+            todo = [x for x in main.inbox_items()["todo"] if x["kind"] == "missed" and x["job"] == "每日趨勢"]
+            assert todo and "被中止" in todo[0]["text"], todo
+            r = asyncio.run(main.schedule_run({"name": "每日趨勢"}))   # 補跑得出去（戳記不擋）
+            assert r["results"][0]["ok"] and cli_sent[-1] == "p19", r
+            main.sched_running.pop("p19", None); main.busy.discard("p19")
+            main.sched_stopped.pop("每日趨勢", None)
         finally:
             main.SCHEDULE_FILE, main.CHANNELS_DIR, main.run_cli_task, main.cli_available = old[:4]
             main.sched_last.clear(); main.sched_last.update(old[4])
             for a in ("p19", "p12", "p07"):
-                main.sched_running.pop(a, None); main.pending_note.pop(a, None)
-    print("  ✓ 手動補跑／漏跑列進收件匣／今天已有報表不重跑")
+                main.sched_running.pop(a, None); main.pending_note.pop(a, None); main.stopped.discard(a)
+            main.sched_stopped.clear()
+    print("  ✓ 手動補跑／漏跑列進收件匣／今天已有報表不重跑／被中止的可再補跑")
 
 
 def schedule_visible() -> None:

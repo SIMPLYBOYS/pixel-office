@@ -899,6 +899,8 @@ async def force_stop(aid: str, how: str) -> None:
     「有沒有真的叫停」是另一回事，兩者不能混為一談——那正是投影誠實的分界。
     """
     stopped.add(aid)
+    if run := sched_running.get(aid):   # 班表任務被中止：記下來，收件匣才會再給一顆「補跑」（戳記已經蓋了、不算漏跑）
+        sched_stopped[str(run["job"].get("name", ""))] = time.strftime("%Y-%m-%d")
     log_ev(aid, f"🧑‍💼 老闆中止了任務{how}")
     close_card(aid, "stopped")
     clear_approval(aid)
@@ -1551,6 +1553,8 @@ async def office_event(ev: dict):
                   engine=c0.get("engine"), model=c0.get("model"), cost_est=True if (cost and c0.get("cost_est")) else None,
                   usage=c0.get("usage"), api_equiv=c0.get("api_equiv"))
             if run := sched_running.pop(aid, None):   # 班表任務：收工就交付；留痕掛在剛關掉的這張卡上
+                if label == "ok":
+                    sched_stopped.pop(str(run["job"].get("name", "")), None)   # 補跑成功，中止那筆翻篇
                 asyncio.create_task(deliver_job(aid, run["job"], label, run["started"]))
     else:
         # 一般事件進時間軸（fallback 的 [Subagent:名] 前綴轉小名，跟泡泡一致）
@@ -3206,7 +3210,8 @@ def inbox_items(limit: int = 60) -> dict:
         aid, jname = str(j["agent"]), str(j["name"])
         todo.append({"id": f"missed:{jname}:{time.strftime('%Y-%m-%d', now_t)}", "kind": "missed", "agent": aid,
                      "name": agents[aid].name, "job": jname,
-                     "text": f"班表「{jname}」{j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）"})
+                     "text": (f"班表「{jname}」今天被中止，沒有產出" if j.get("why") == "stopped"
+                              else f"班表「{jname}」{j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）")})
     recent: list[dict] = []
     for e in audit_recent("", 400):
         if e.get("kind") not in INBOX_KINDS:
@@ -3784,6 +3789,7 @@ async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
 
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
 sched_last: dict[str, str] = {}   # job name -> 上次觸發的 "YYYY-MM-DD HH"（防同一小時重複；隨 state 持久化）
+sched_stopped: dict[str, str] = {}   # job name -> 被老闆中止的那天：戳記已蓋、不算漏跑，但沒有產出，收件匣要再給一顆補跑
 
 
 def load_schedule() -> list[dict]:
@@ -3885,9 +3891,13 @@ def missed_jobs(now: time.struct_time) -> list[dict]:
         if now.tm_hour * 60 + now.tm_min < job["hour"] * 60 + int(job.get("minute") or 0):
             continue
         name, aid = str(job["name"]), str(job["agent"])
-        if sched_last.get(name, "").startswith(day) or report_today(aid, job, day) is not None:
+        running = sched_running.get(aid, {}).get("job", {}).get("name") == name   # 正在跑的那條不算漏
+        if report_today(aid, job, day) is not None or running:
             continue
-        out.append(job)
+        if sched_stopped.get(name) == day:   # 今天被老闆中止、沒有產出：戳記蓋過了，但這條事實上沒跑完（實際回報：中止後找不到地方重跑）
+            out.append({**job, "why": "stopped"})
+        elif not sched_last.get(name, "").startswith(day):
+            out.append(job)
     return out
 
 
@@ -4131,6 +4141,7 @@ def save_state() -> None:
             "approval_src": approval_src,
             "approval_meta": approval_meta, "approval_at": approval_at,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
+            "sched_stopped": sched_stopped,
             "model_sent": model_sent,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
@@ -4167,6 +4178,7 @@ def load_state() -> None:
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
     sched_last.update(data.get("sched_last", {}))
+    sched_stopped.update(data.get("sched_stopped", {}))
     model_sent.update(data.get("model_sent", {}))
     engine_sent.update(data.get("engine_sent", {}))
     if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
