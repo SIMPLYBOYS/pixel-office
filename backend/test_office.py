@@ -6,6 +6,7 @@
 import asyncio
 import json
 import subprocess
+import sys
 import os
 import time
 from pathlib import Path
@@ -17,6 +18,12 @@ import tempfile as _tempfile
 main.AUDIT_DIR = Path(_tempfile.mkdtemp(prefix="office-audit-test-")) / "audit"
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test-not-real")   # 讓「不傳給子行程」這條斷言有東西可驗
 main._audit_last.update({"seq": 0, "hash": "", "path": None})
+# 工作紀錄、真 Claude、真 cogito 也要在【import 時】就隔離，不能等 run()：單跑一條（python -c "import test_office as t; t.costs_panel()"）
+# 不會經過 run()，TestClient 開關時就讀寫真的 office_state.json——踩過：9/13 單跑 costs_panel 兩次，
+# 老徐與小葵的真工作紀錄多了 6 張「CLI 的活／cogito 估價的活」假卡；意圖判斷還拿假金鑰去打了真 API（BadRequestError）。
+main.STATE_FILE = Path(main.__file__).parent / "office_state_test.json"
+main.client = None
+main.COGITO_HTTP = ""
 from fastapi.testclient import TestClient
 
 
@@ -460,6 +467,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    isolation_at_import()
     stay_put()
     state_save_retry()
     costs_panel()
@@ -2790,6 +2798,16 @@ def stay_put() -> None:
     finally:
         main.send_cmd = old_send; main.pending_approval.pop("p10", None); main.occupied.pop("p01", None)
     print("  ✓ 固定崗位：走位換姿勢、只給畫面上的人開迴圈")
+
+
+def isolation_at_import() -> None:
+    """只 import 測試模組（不經過 run()）就要跟真環境隔開：工作紀錄、稽核帳、Claude、cogito。"""
+    code = ("import test_office, main; "
+            "print(main.STATE_FILE.name, main.AUDIT_DIR.parent.name.startswith('office-audit-test-'), main.client is None, main.COGITO_HTTP == '')")
+    r = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).parent, capture_output=True, text=True, timeout=120)
+    last = (r.stdout.strip().splitlines() or [""])[-1]
+    assert last == "office_state_test.json True True True", f"單跑測試會碰到真環境：{last!r}\n{r.stderr[-400:]}"
+    print("  ✓ 只 import 測試模組就隔離（工作紀錄／帳本／Claude／cogito）")
 
 
 def audit_ledger() -> None:
