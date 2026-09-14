@@ -1450,9 +1450,14 @@ async function inboxcard() {
     } else if (t.kind === 'missed') {
       // 橋在到點時沒開著：補不補是老闆的決定。今天那份已經在了橋會拒（fire_job 守門），不會重跑
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
-        <span class="iwhat">🗓 ${esc(t.text)}</span>
-        <button class="yes" onclick="event.stopPropagation(); runJob(${JSON.stringify(t.job)})">▶ 補跑</button>
-        <button class="no" title="今天不補了，別再列" onclick="event.stopPropagation(); localStorage.inboxDismiss = (localStorage.inboxDismiss || '') + ',' + ${JSON.stringify(t.id)}; inboxcard();">✕</button>`;
+        <span class="iwhat">🗓 ${esc(t.text)}</span>`;
+      // 班表名稱帶中文、id 帶日期與引號：不能塞進 onclick="…" 字串——JSON 的雙引號會把屬性截斷，
+      // 整顆鈕變成語法錯誤、按了沒反應（實際回報）。用事件綁定，值不經過 HTML。
+      const go = document.createElement('button'); go.className = 'yes'; go.textContent = '▶ 補跑';
+      go.onclick = e => { e.stopPropagation(); runJob(t.job); };
+      const no = document.createElement('button'); no.className = 'no'; no.title = '今天不補了，別再列'; no.textContent = '✕';
+      no.onclick = e => { e.stopPropagation(); localStorage.inboxDismiss = (localStorage.inboxDismiss || '') + ',' + t.id; inboxcard(); };
+      row.append(go, no);
     } else {
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">🗓 ${esc(t.text)}</span>
