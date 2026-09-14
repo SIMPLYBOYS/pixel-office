@@ -3881,6 +3881,17 @@ async def run_due_jobs(now: time.struct_time) -> None:
         await fire_job(job, stamp)
 
 
+def stopped_today(aid: str, day: str) -> bool:
+    """帳本裡這個人今天有沒有被中止過（task.stopped），而且那之後沒有再開工過。"""
+    last = ""
+    for e in reversed(audit_recent(aid, 60)):   # audit_recent 最新在前，反過來就是時間序
+        if str(e.get("at", ""))[:10] != day:
+            continue
+        if e.get("kind") in ("task.start", "task.stopped"):
+            last = e["kind"]
+    return last == "task.stopped"
+
+
 def missed_jobs(now: time.struct_time) -> list[dict]:
     """今天該跑、時間已過、卻沒跑的班表（沒戳記、也沒今天那份報表）——橋在 9:00 沒開著的那個早上。"""
     day = time.strftime("%Y-%m-%d", now)
@@ -3894,7 +3905,9 @@ def missed_jobs(now: time.struct_time) -> list[dict]:
         running = sched_running.get(aid, {}).get("job", {}).get("name") == name   # 正在跑的那條不算漏
         if report_today(aid, job, day) is not None or running:
             continue
-        if sched_stopped.get(name) == day:   # 今天被老闆中止、沒有產出：戳記蓋過了，但這條事實上沒跑完（實際回報：中止後找不到地方重跑）
+        # 今天被老闆中止、沒有產出：戳記蓋過了，但這條事實上沒跑完（實際回報：中止後找不到地方重跑）。
+        # sched_stopped 是精確的（知道是哪條）；帳本那條是後備——橋更新前中止的、或狀態檔沒跟上的，帳本裡的 task.stopped 還在。
+        if sched_stopped.get(name) == day or (sched_last.get(name, "").startswith(day) and stopped_today(aid, day)):
             out.append({**job, "why": "stopped"})
         elif not sched_last.get(name, "").startswith(day):
             out.append(job)

@@ -2446,6 +2446,16 @@ def schedule_manual_run() -> None:
             assert r["results"][0]["ok"] and cli_sent[-1] == "p19", r
             main.sched_running.pop("p19", None); main.busy.discard("p19")
             main.sched_stopped.pop("每日趨勢", None)
+            # 後備：橋更新前中止的（sched_stopped 沒記到），帳本裡有今天的 task.stopped 且之後沒再開工 → 一樣列
+            old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            try:
+                main.sched_last["每日趨勢"] = time.strftime("%Y-%m-%d %H")
+                main.audit("task.start", "p19", card=1); main.audit("task.stopped", "p19")
+                assert main.stopped_today("p19", time.strftime("%Y-%m-%d")) and names() == ["每日趨勢"], "帳本後備沒生效"
+                main.audit("task.start", "p19", card=2)   # 之後又開工了 → 不再算被中止
+                assert names() == [], "開工之後就不該再列"
+            finally:
+                main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
         finally:
             main.SCHEDULE_FILE, main.CHANNELS_DIR, main.run_cli_task, main.cli_available = old[:4]
             main.sched_last.clear(); main.sched_last.update(old[4])
