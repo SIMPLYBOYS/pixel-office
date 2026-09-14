@@ -298,6 +298,20 @@ Aaron 回報：早上 09:30 補跑四條，中途按中止兩條（老徐、小�
 所以改成**只看帳本、不另記狀態**：戳記今天蓋過、沒有產出、而且這個人今天最後一次任務收法不是 ok（被中止＝stopped、被砍／出錯＝error）→ 列進收件匣，文字分「今天被中止」與「今天沒跑完（中斷或出錯）」；正常收工或正在跑就不列。順手修一句謊話：橋關閉時砍掉的 CLI 任務先前寫成「老闆中止了這個任務」，現在只有 `stopped` 集合裡真的按過中止的才這樣寫。測試 schedule_manual_run 涵蓋三種收法，拔掉判定驗紅。
 外殼那顆「▶ 補跑」按了沒反應（實際回報）：班表名稱用 `JSON.stringify` 塞進 `onclick="…"`，JSON 的雙引號把屬性截斷、整顆鈕變語法錯誤。改成 DOM 事件綁定，值不經過 HTML；全份內嵌腳本過 `node --check`。教訓：帶使用者資料的 handler 一律綁事件，不拼進屬性字串。
 
+### 小安有了身體（2026-09-14）
+
+Aaron 要總機小安像其他人一樣有行為與動作，但活動範圍在座位附近、大部分時間在座位辦公。
+看了櫃檯叢集 obj_03 的美術：她站的那格被書架（北）、檯面（西南）、螢幕桌（東）四面圍住，碰撞圖也是家具格，
+**沒有走得出去的口**——要走就得穿過櫃檯，或重畫櫃檯開一個口。決定：她**不走位**，其他全部照員工來。
+- Unity：`BuildReception` 改走 `BuildOne(physical: false)`——Kinematic Rigidbody、不掛碰撞／FakeBrain／NPCSeparation，
+  其餘（NPCSprite 全套姿勢、徽章、泡泡、對話框、NPCAgent）與員工相同；`tools/make_character.py 10` 補齊 hurt／pick_up／lift／throw 幀。
+- 橋：人設 `post: fixed` → `stays_put()`；`goto()` 對她不送 move_to、改擺回工作姿勢（`SIT_AT["p10"]="face_down"`）；
+  `goto_then_pose()` 當場擺（等審批＝在櫃檯掏手機）；生活迴圈不抽 waypoint，3:1 在辦公／接電話；久沒事就在櫃檯趴睡；
+  出錯 `hurt_down`、遞交 `gift_down`。
+- 順手修：`start_agents` 先前對名冊上每個人都開生活迴圈，畫面上沒有的小安每輪 move_to 都等 30 秒逾時、
+  還把 `canvas_stale` 打成 True（之前看到的 stale 旗標無故閃就是它）。現在只給 Unity 回報的人開迴圈。
+- 測試 `stay_put`，拔掉守門驗紅。若哪天要她真的走出來：改 West 碰撞圖開一格＋重畫櫃檯那格的口，橋端把 `post: fixed` 拿掉就行。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。

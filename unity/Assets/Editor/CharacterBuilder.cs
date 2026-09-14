@@ -29,9 +29,16 @@ public static class CharacterBuilder
         ("p19", new Vector3(RoomBuilder.OfficeX + 13.5f, -14.5f, 0)),  // boss_seat
     };
 
+    const string ScenePath = "Assets/Scenes/SampleScene.unity";   // WebGLBuilder 建的就是這一個
+
     [MenuItem("Tools/Build Characters")]
     public static void Build()
     {
+        // 批次模式（-batchmode -executeMethod）開的是一個空的未命名場景，不是 SampleScene：在那裡 Find 不到任何
+        // NPC、生出來的實例也存不進任何檔案——員工靠 prefab 覆寫僥倖沒事，總機從普通物件換成 prefab 實例就露餡了
+        // （建了兩次場景檔一個位元組都沒變）。所以先把真正的場景打開，最後再存回去。
+        if (Application.isBatchMode)
+            UnityEditor.SceneManagement.EditorSceneManager.OpenScene(ScenePath);
         // 同 RoomBuilder：Refresh 讓資料庫先看到 Unity 外面寫進來的新檔，ImportAsset 才掃得到。
         AssetDatabase.Refresh();
         AssetDatabase.ImportAsset(CharRoot,
@@ -48,46 +55,23 @@ public static class CharacterBuilder
             new GameObject("BrainGateway").AddComponent<BrainGateway>();
         UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(
             UnityEngine.SceneManagement.SceneManager.GetActiveScene());
-        Debug.Log($"CharacterBuilder: {Personas.Length} 個 NPC 完成");
+        // 批次模式沒有人會按存檔：員工是 prefab 實例、場景不存也吃得到新 prefab，但總機從「場景裡的普通物件」
+        // 換成 prefab 實例是【場景本身】的變更——不存的話 WebGL 建置（從磁碟讀場景）拿到的還是舊的那個。
+        if (Application.isBatchMode)
+            UnityEditor.SceneManagement.EditorSceneManager.SaveOpenScenes();
+        Debug.Log($"CharacterBuilder: {Personas.Length + 1} 個 NPC 完成（含總機）");
     }
 
-    // 總機小姐：櫃檯後的常駐角色，【不在】Personas 名單裡——她不投影任何 agent 狀態，
-    // 所以不掛 NPCAgent/FakeBrain/碰撞那一套（掛了就會被生活迴圈派去亂晃，總機離崗）。
-    // 出生點刻意不過 Walkable 驗證：她的崗位本來就在櫃檯的家具格（'T'）裡，不用走路。
-    //
-    // 她跟被清掉的「畫死西裝男」（compose_room 的 D1_PATCHES）差在哪：她是活的物件，
-    // 有待機動畫，透過櫃檯 sprite 上挖的洞（D1_HOLES）露出來——桌面遮腰、書架遮兩側。
-    // 位置對準那個洞：世界 px x52-68、腳底 y49 → (60/16, -49/16)。
-    const string ReceptionPrefix = "p10";   // 盤髮白衫的那位（01/05/07/12/17/19 已是員工）
+    // 總機小姐（小安，p10）：崗位在櫃檯後那一格——櫃檯叢集 obj_03 的書架、檯面、螢幕桌把那格四面圍住，
+    // 美術上沒有走得出去的口，碰撞圖也是家具格（'T'）。所以她【不走位】：不掛 FakeBrain／NPCSeparation、
+    // 不掛實體碰撞（在牆的 collider 裡會被物理推出去），Rigidbody 設 Kinematic 只為了 NPCMover 能用。
+    // 其他都跟員工一樣：NPCSprite 的全套姿勢（接電話、看書、趴睡、遞交、受傷）、徽章、泡泡、對話框、NPCAgent。
+    // 橋端用人設的 post: fixed 知道她不走位，走位一律換成姿勢（backend stays_put）。
+    // 出生點刻意不過 Walkable 驗證：位置對準櫃檯 sprite 上挖的洞（D1_HOLES）：世界 px x52-68、腳底 y49 → (60/16, -49/16)。
+    const string ReceptionPrefix = "p10";
     static readonly Vector3 ReceptionPost = new(3.75f, -3.0625f, 0);
 
-    static void BuildReception()
-    {
-        var old = GameObject.Find("NPC_reception");
-        if (old != null) Object.DestroyImmediate(old);
-
-        string folder = $"{CharRoot}/{ReceptionPrefix}";
-        var all = AssetDatabase.FindAssets("t:Sprite", new[] { folder })
-            .Select(g => AssetDatabase.LoadAssetAtPath<Sprite>(AssetDatabase.GUIDToAssetPath(g)))
-            .Where(s => s != null).ToArray();
-        Sprite[] Frames(string key) => all.Where(s => s.name.Contains(key))
-                                          .OrderBy(FrameNo).ToArray();
-        var idle = Frames("_idle_down_");
-        if (idle.Length == 0)
-        {
-            Debug.LogError($"CharacterBuilder: {folder} 沒有幀——先跑 tools/make_character.py 10，" +
-                           "再把 limezu/_extracted/characters/p10 複製到 " + CharRoot);
-            return;
-        }
-
-        var go = new GameObject("NPC_reception");
-        var sr = go.AddComponent<SpriteRenderer>();
-        sr.spriteSortPoint = SpriteSortPoint.Pivot;   // pivot=腳底 → 櫃檯(-5)畫在她(-3.06)前面
-        var loop = go.AddComponent<SpriteLoop>();
-        loop.frames = idle;
-        loop.extra = Frames("_phone_");   // 偶爾接電話（純隨機的裝飾，見 SpriteLoop 註解）
-        go.transform.position = ReceptionPost;
-    }
+    static void BuildReception() => BuildOne(ReceptionPrefix, ReceptionPost, physical: false, name: "NPC_reception");
 
     // 徽章素材【全員共用】（不像角色幀是每人一套），掃一次快取起來。
     // 檔名格式 <name>_<幀號>.png，見 tools/make_emotes.py。
@@ -119,7 +103,8 @@ public static class CharacterBuilder
         return emoteCache = sets.ToArray();
     }
 
-    static void BuildOne(string prefix, Vector3 spawn)
+    // physical=false：固定崗位的人（總機）——沒有碰撞、不被推、不亂晃；其餘一律相同
+    static void BuildOne(string prefix, Vector3 spawn, bool physical = true, string name = null)
     {
         string folder = $"{CharRoot}/{prefix}";
         var all = AssetDatabase.FindAssets("t:Sprite", new[] { folder })
@@ -135,7 +120,7 @@ public static class CharacterBuilder
             return;
         }
 
-        string npcName = $"NPC_{prefix}";
+        string npcName = name ?? $"NPC_{prefix}";
         var old = GameObject.Find(npcName);
         if (old != null) Object.DestroyImmediate(old);
 
@@ -149,16 +134,21 @@ public static class CharacterBuilder
         rb.freezeRotation = true;
         rb.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
         rb.interpolation = RigidbodyInterpolation2D.Interpolate;
+        if (!physical) rb.bodyType = RigidbodyType2D.Kinematic;   // 站在家具格裡：不能有物理，否則被推出來
 
-        var body = go.AddComponent<CircleCollider2D>();
-        body.radius = 0.18f; // 格心到牆間隙 0.25，留餘裕不磨牆
-        body.offset = new Vector2(0, 0.15f);
-        body.sharedMaterial = GetSlipperyMaterial();
+        CircleCollider2D body = null;
+        if (physical)
+        {
+            body = go.AddComponent<CircleCollider2D>();
+            body.radius = 0.18f; // 格心到牆間隙 0.25，留餘裕不磨牆
+            body.offset = new Vector2(0, 0.15f);
+            body.sharedMaterial = GetSlipperyMaterial();
 
-        var sensor = go.AddComponent<CircleCollider2D>(); // 相遇偵測圈（< 1 tile）
-        sensor.isTrigger = true;
-        sensor.radius = 0.9f;
-        sensor.offset = new Vector2(0, 0.15f);
+            var sensor = go.AddComponent<CircleCollider2D>(); // 相遇偵測圈（< 1 tile）
+            sensor.isTrigger = true;
+            sensor.radius = 0.9f;
+            sensor.offset = new Vector2(0, 0.15f);
+        }
 
         go.AddComponent<NPCMover>();
         var anim = go.AddComponent<NPCSprite>();
@@ -245,9 +235,12 @@ public static class CharacterBuilder
         agent.agentId = prefix;
         var meeting = go.AddComponent<NPCMeeting>();
         meeting.bubble = bubbleSr;
-        meeting.body = body;
-        go.AddComponent<FakeBrain>();
-        go.AddComponent<NPCSeparation>();
+        meeting.body = body;   // 固定崗位的人是 null（NPCMeeting.Start 有守衛）
+        if (physical)
+        {
+            go.AddComponent<FakeBrain>();
+            go.AddComponent<NPCSeparation>();
+        }
 
         if (!AssetDatabase.IsValidFolder("Assets/Prefabs"))
             AssetDatabase.CreateFolder("Assets", "Prefabs");

@@ -460,6 +460,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    stay_put()
     state_save_retry()
     costs_panel()
     cli_subagents()
@@ -2752,6 +2753,43 @@ def state_save_retry() -> None:
         finally:
             main.STATE_FILE = old_file
     print("  ✓ 存檔失敗保留 _dirty，下一輪會重試")
+
+
+def stay_put() -> None:
+    """崗位固定的人（總機小安，人設 post: fixed）：走位一律換成姿勢——回工位＝面向櫃檯、等審批＝在櫃檯掏手機、
+    idle 不抽 waypoint；出錯往前閃紅、遞交往前遞；只給 Unity 回報的人開生活迴圈。"""
+    cmds: list[dict] = []
+
+    async def spy(cmd):
+        cmds.append(cmd); return True
+    old_send = main.send_cmd; main.send_cmd = spy
+    main.arrived.setdefault("p10", asyncio.Event()); main.arrived.setdefault("p01", asyncio.Event())
+    try:
+        assert main.stays_put("p10") and not main.stays_put("p01") and not main.stays_put("kanban")
+        assert main.hurt_of("p10") == "hurt_down" and main.GIFT_TOWARD["p10"] == "gift_down"
+        asyncio.run(main.goto("p10", main.BOSS_DOOR))
+        assert cmds == [{"agent_id": "p10", "action": "use", "target": "face_down"}], f"固定崗位不該送 move_to：{cmds}"
+        cmds.clear(); main.pending_approval["p10"] = "x"
+        asyncio.run(main.goto_then_pose("p10", main.BOSS_DOOR, "phone"))
+        assert cmds == [{"agent_id": "p10", "action": "use", "target": "phone"}], f"等審批＝當場掏手機：{cmds}"
+        cmds.clear(); main.pending_approval.pop("p10", None)
+        asyncio.run(main.goto_then_pose("p10", main.BOSS_DOOR, "phone"))
+        assert cmds == [], "審批已經結束就不掏手機"
+        # 一般員工照舊會走
+        cmds.clear(); asyncio.run(main.goto("p01", main.BOSS_DOOR))
+        assert cmds and cmds[0]["action"] == "move_to", cmds
+        # 生活迴圈只給畫面回報的人開；小安在畫面上時也有迴圈（她的 idle 是換姿勢不是走動）
+        async def drive():
+            main.start_agents(["p01", "p10"], ["chair_1", "boss_1"])
+            n = len(main.loops); main.stop_agents()
+            main.start_agents(["p01"], ["chair_1", "boss_1"])
+            m = len(main.loops); main.stop_agents()
+            return n, m
+        n, m = asyncio.run(drive())
+        assert (n, m) == (2, 1), f"只給畫面上有的人開迴圈：{(n, m)}"
+    finally:
+        main.send_cmd = old_send; main.pending_approval.pop("p10", None); main.occupied.pop("p01", None)
+    print("  ✓ 固定崗位：走位換姿勢、只給畫面上的人開迴圈")
 
 
 def audit_ledger() -> None:

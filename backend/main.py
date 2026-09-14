@@ -155,7 +155,10 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         return
     stop_agents()
     waypoint_list = waypoints
+    present = set(agent_ids) or set(npcs())   # 舊版畫面沒回報名單就當全員都在
     for aid, a in npcs().items():   # 看板沒有身體，不進生活迴圈也不算同事
+        if aid not in present:   # 名冊有、畫面沒有的人：不開迴圈——他的每個 move_to 都會等到逾時、還把畫面誤判成凍結
+            continue
         colleagues = [o.name for oid, o in npcs().items() if oid != aid]
         tools = build_tools(waypoints, colleagues)
         loops.append(asyncio.create_task(agent_loop(a, tools)))
@@ -279,6 +282,8 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
                     if desk else [{"action": "use", "target": "sleep"}]
                 sleeping.add(a.id)
+            elif stays_put(a.id):   # 崗位固定：不走位，偶爾接個電話點綴，其餘時間就是在櫃檯辦公
+                actions = [{"action": "use", "target": random.choice([SIT_AT.get(a.id, "face_down")] * 3 + ["phone"])}]
             else:  # 零成本 idle：不打 API，偶爾走動點綴
                 actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
         except Exception as e:
@@ -370,11 +375,11 @@ DESK_SIDE = {"p17": "side_1", "p01": "side_2", "p07": "side_3",
 # 閱讀投影：連續讀檔/查資料 → 低頭看書。cogito 的工具名開頭就分得出讀寫，不必列舉全名。
 READ_RE = re.compile(r"^(read|grep|glob|list|search|cat|head|tail|find|fetch|browse|web|get_)", re.I)
 reading: set[str] = set()   # 正在「看書」的人——同狀態不重發指令（工具事件很密）
-SIT_AT = {"p19": "sit_left"}   # 放下書要坐回去的姿勢；其餘工位都是 sit_up（背對鏡頭入座）
+SIT_AT = {"p19": "sit_left", "p10": "face_down"}   # 放下書要坐回去的姿勢；其餘工位都是 sit_up（背對鏡頭入座）；總機面向櫃檯前
 # 遞交投影：委派收件成功時，支援者【當場】面向站在自己桌邊的主 agent 把成果遞出去
 # （委派起手式就是主 agent 走到支援者桌邊的 DESK_SIDE，人本來就站在那）。方向＝
 # 從支援者工位看向那個站位：chair_1-3 的站位在東、chair_4/5 在西、老闆房門在西。
-GIFT_TOWARD = {"p05": "gift_left", "p12": "gift_left", "p19": "gift_left"}   # 其餘 gift_right
+GIFT_TOWARD = {"p05": "gift_left", "p12": "gift_left", "p19": "gift_left", "p10": "gift_down"}   # 其餘 gift_right；總機隔著櫃檯往前遞
 GIFT_HOLD = 1.3   # 遞交停留秒數（10 幀 8fps 一輪 1.25s，演一輪整）；測試設 0
 # 受傷投影：出錯的那一下整身閃紅（LimeZu hurt 列，3 幀）。Unity 端當一次性動作疊在目前姿勢上、
 # 自己退掉——橋只負責「哪一下」，不管時間、不還原。方向跟坐姿走：背對鏡頭坐的人就從背後閃紅。
@@ -383,8 +388,8 @@ SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事�
 
 
 def hurt_of(aid: str) -> str:
-    """出錯時的受傷方向＝他坐著面向的方向（sit_up → hurt_up、sit_left → hurt_left）。"""
-    return "hurt_" + SIT_AT.get(aid, "sit_up").removeprefix("sit_")
+    """出錯時的受傷方向＝他坐著（或站著）面向的方向（sit_up → hurt_up、sit_left → hurt_left、face_down → hurt_down）。"""
+    return "hurt_" + SIT_AT.get(aid, "sit_up").removeprefix("sit_").removeprefix("face_")
 
 
 def say(aid: str, text: str) -> dict:
@@ -570,6 +575,10 @@ async def goto_then_pose(aid: str, target: str, action: str) -> None:
     走不到就不擺姿勢——那會讓動作出現在半路上，比沒有更怪。"""
     if aid == KANBAN or aid not in arrived:
         return
+    if stays_put(aid):   # 不用走：當場擺（等審批就在櫃檯掏手機）
+        if aid in pending_approval or action != "phone":
+            await pose(aid, action)
+        return
     arrived[aid].clear()
     if not await goto(aid, target):
         print(f"⚠ {aid} 走位指令沒送出（沒有畫面在線）——{target}／{action} 這段投影跳過")
@@ -596,6 +605,10 @@ async def goto(aid: str, target: str) -> bool:
     global projection_offline
     if aid == KANBAN:   # 沒有身體的東西不會走路
         return False
+    if stays_put(aid):   # 崗位固定：「回工位／去門口／去飲水機」都等於「在崗位上換回工作姿勢」
+        reading.discard(aid)
+        await pose(aid, SIT_AT.get(aid, "face_down"))
+        return True
     reading.discard(aid)   # 走位＝放下書（Unity 端 move_to 也會清姿勢，兩邊狀態要一致）
     occupied[aid] = target
     ok = await send_cmd({"agent_id": aid, "action": "move_to", "target": target})
@@ -807,6 +820,14 @@ BG_DONE_RE = re.compile(r"^背景子 agent \S+ \[([^\]]*)\]：([✅⚪🟢])", r
 # 收工時 FIFO 取一個：同名的兄弟對橋來說本來就分不出誰是誰，報告掛到哪一個是任意的，
 # 但「每個都會被釋放」這件事是確定的——那才是重點。
 sub_active: dict[tuple[str, str], list[str]] = {}
+
+
+def stays_put(aid: str) -> bool:
+    """崗位固定的人（總機小安）：不走位，走位一律換成姿勢。理由在 Unity 端：她站的那格被櫃檯叢集四面圍住，
+    美術上沒有走得出去的口——與其讓她穿過櫃檯，不如讓每個狀態都在崗位上演（接電話、看書、趴睡、遞交、受傷）。
+    來源是人設的 post: fixed，不是寫死的名單。"""
+    a = agents.get(aid)
+    return bool(a) and a.persona.get("post") == "fixed"
 
 
 def in_pool(aid: str) -> bool:
