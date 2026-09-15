@@ -4,6 +4,7 @@ decide() 用 strict tools + tool_choice=any → 每次必回一個合法動作 J
 Unity 直接執行不用防錯。無 API key 或呼叫失敗時由呼叫端退回隨機走動。
 decide_reply() 是對話迴圈專用的輕量決策：回一句（reply）或離開（leave）。
 """
+import os
 from collections import deque
 from pathlib import Path
 
@@ -120,13 +121,13 @@ class Agent:
 
     @property
     def model(self) -> str:
-        """這位員工跑哪個模型（persona 的 `model:`）。空＝用 cogito 的啟動預設。
+        """這位員工跑哪個模型：persona 的 `model:`，沒寫就用辦公室預設 OFFICE_DEFAULT_MODEL（預設 claude-opus-5[1m]）。
 
-        模型是【員工的屬性】而不是每次派工的參數：老徐做架構判斷、小樺做資料彙整，
-        本來就該是不同等級的模型，而且那是他們的長期特性。放 persona 才會跟著人走
-        （改一行 yaml，不動程式），也才在重啟後還在。
-        """
-        return str(self.persona.get("model") or "").strip()
+        2026-09-15 Aaron 定：每個人預設都跑 Opus（1M 上下文），只有派子 agent 時才依任務難度降級——
+        降級是主 agent 每次派工的判斷（見 personas/office.md），不是寫死在人設裡的長期屬性。
+        人設的 `model:` 仍保留當例外（某人確定要長期跑別的）；設 OFFICE_DEFAULT_MODEL= 空字串＝不給預設、交回引擎自己的預設。
+        `[1m]` 是 Claude Code 的寫法；送 cogito 時橋會拿掉（API 的 claude-opus-5 本身就是 1M）。"""
+        return str(self.persona.get("model") or os.environ.get("OFFICE_DEFAULT_MODEL", "claude-opus-5[1m]")).strip()
 
     @property
     def persona_prompt(self) -> str:

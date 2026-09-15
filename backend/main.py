@@ -2492,8 +2492,8 @@ def cli_agents_json() -> str:
                (f"\n說話風格：{p['style']}" if p.get("style") else "")
         d = {"description": "；".join(x for x in (p.get("role", ""), p.get("personality", "")) if x),
              "prompt": f"{head}\n\n{body.strip()}\n\n你是辦公室裡的子 agent：回答限 300 字內，只給結論與理由，有疑慮直說；讀檔給路徑就自己讀，不要求主持人貼內容。"}
-        if a.model:
-            d["model"] = a.model
+        # 不寫 model：子 agent 預設繼承主 agent（預設 Opus），主 agent 每次派工依難度帶 model 參數覆蓋
+        # （2026-09-15 實測：Agent 工具的 model 參數會蓋過定義裡的 model）。寫死在這裡的話，難度判斷就被人設綁架了。
         out[slug] = d
     return json.dumps(out, ensure_ascii=False)
 
@@ -2536,6 +2536,9 @@ def cli_events(d: dict, tool_names: dict[str, str], subs: dict | None = None) ->
         return out
     if parent and str(parent) in subs:   # 子 agent 自己的事件：掛到扮演它的人身上
         name = subs[str(parent)]["name"]
+        if (mu := str((d.get("message") or {}).get("model") or "")) and "model" not in subs[str(parent)]:
+            subs[str(parent)]["model"] = mu   # 實際跑的，不是主 agent 要求的——兩者不一致時信這個
+            out.append({"kind": "msg", "label": f"[Subagent:{name}] 🧠 模型：{mu}", "sub_model": mu, "sub_name": name})
         for c in (d.get("message") or {}).get("content") or []:
             if not isinstance(c, dict):
                 continue
@@ -2825,6 +2828,9 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                         proc.stdin.close()       # 關 stdin，行程才會結束
                     continue
                 for ev in cli_events(d, tool_names, subs):
+                    if ev.get("sub_model"):   # 子 agent 用了哪個模型：主 agent 依難度選的，要留得下證據
+                        audit("subagent.model", aid, sub=ev.get("sub_name"), model=ev["sub_model"], engine=ENGINE_CLI)
+                        ev = {k: v for k, v in ev.items() if k not in ("sub_model", "sub_name")}
                     # 額度提醒每次 API 呼叫都會來一筆，同一句話講一次就夠
                     if ev["kind"] == "msg" and ev["label"].startswith(("⏳", "⚠")):
                         # 頭上掛額度警示。這是目前【唯一】完全沒有身體投影的狀態：
@@ -3421,6 +3427,11 @@ def engine_of(aid: str, override: str = "") -> str:
 model_sent: dict[str, str] = {}   # aid -> 橋最後一次告訴 cogito 的模型（隨 state 持久化）
 
 
+def cogito_model(m: str) -> str:
+    """`claude-opus-5[1m]` 是 Claude Code 的寫法（選 1M 上下文）；API 沒有這個 id，而 API 的 claude-opus-5 本來就是 1M。"""
+    return m.removesuffix("[1m]")
+
+
 def known_models() -> list[dict]:
     """後備清單：OFFICE_MODELS 有設就用它，否則就是人設裡實際指派過的那些。
     只有在【問不到 cogito】時才會走到——真正的清單來自官方（見 office_models）。"""
@@ -3648,7 +3659,7 @@ async def office_dispatch(d: dict):
             # 優先序：外殼這次選的 > 人設。都沒有就【不送這個鍵】——送空字串會把
             # 使用者在聊天端用 `model` 指令選的無聲清掉（要收回覆蓋請明選「還原預設」）。
             if m := (str(d.get("model") or "").strip() or agents[aid].model):
-                payload["model"] = m
+                payload["model"] = cogito_model(m)
                 model_sent[aid] = "" if m == MODEL_RESET else m
                 _dirty = True
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,

@@ -312,6 +312,18 @@ Aaron 要總機小安像其他人一樣有行為與動作，但活動範圍在�
   還把 `canvas_stale` 打成 True（之前看到的 stale 旗標無故閃就是它）。現在只給 Unity 回報的人開迴圈。
 - 測試 `stay_put`，拔掉守門驗紅。若哪天要她真的走出來：改 West 碰撞圖開一格＋重畫櫃檯那格的口，橋端把 `post: fixed` 拿掉就行。
 
+### 預設 Opus、子 agent 依難度選模型（2026-09-15）
+
+Aaron 定：每個員工預設跑 `claude-opus-5[1m]`；只有派子 agent 時，才由主 agent 依那件事的難度選模型。不做開關。
+- **主 agent**：`Agent.model` 人設沒寫就用 `OFFICE_DEFAULT_MODEL`（預設 `claude-opus-5[1m]`）；拿掉小樺、小安（Haiku）與老徐的模型釘；
+  清掉外殼保存的選擇（小美、阿海、小樺被釘在 Haiku）。送 cogito 時拿掉 `[1m]`（API 沒這個 id，claude-opus-5 本身就是 1M）。
+  取捨：先前「人設沒寫就不送 model、別蓋掉聊天端 `model` 指令選的」這條原則被這個決定取代——現在每次派工都會送預設。
+- **CLI 子 agent**：實測（haiku 主 agent 派同一個定義成 Sonnet 的子 agent）呼叫時帶 `model: haiku` 就跑 Haiku、不帶就照定義——
+  per-call 參數蓋過定義。所以 `--agents` 的人設定義不再寫模型（預設繼承主 agent 的 Opus），判斷表寫進 `personas/office.md`。
+  子 agent 第一則訊息帶實際模型：子卡掛一行「🧠 模型：…」、稽核帳落 `subagent.model`。
+- **cogito 子 agent**：`spawn_subagent` 先前沒有 model 參數（只吃具名 agent 檔寫死的值）。cogito `38b1dd3` 補上 `model`（只收 haiku／sonnet／opus），
+  蓋過定義；引擎端解成 Claude id，主引擎不是 Claude 就忽略沿用。cogito 的子卡目前**不顯示**子 agent 模型（只在 cogito log）。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。

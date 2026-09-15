@@ -1220,8 +1220,8 @@ for o in out:
                 finally:
                     main.COGITO_HTTP, main._caps_cache = old_http, None
 
-                # 沒指定模型＝不帶 --model，交回 CLI 自己的設定
-                assert main.cli_model.get("p05") == "cli-自己的預設", main.cli_model
+                # 沒指定模型＝帶辦公室預設（OFFICE_DEFAULT_MODEL，預設 Opus 1M）
+                assert main.cli_model.get("p05") == os.environ.get("OFFICE_DEFAULT_MODEL", "claude-opus-5[1m]"), (main.cli_model, argv_log.read_text(encoding="utf-8")[-600:])
 
                 # 【CLI 也能指定模型】--model 要真的傳下去（先前完全沒接，是實際回報的缺口）
                 main.busy.discard("p05")
@@ -1778,21 +1778,32 @@ def model_per_agent() -> None:
     main.COGITO_HTTP = "http://fake"
     old_client = main.httpx.AsyncClient
     main.httpx.AsyncClient = lambda **kw: _Rec()
+    old_default = os.environ.get("OFFICE_DEFAULT_MODEL")
+    os.environ["OFFICE_DEFAULT_MODEL"] = "claude-opus-5[1m]"   # 不讓 .env 的設定影響斷言
+    main.model_sent.pop("p19", None); main.model_sent.pop("p01", None)
     try:
         with TestClient(main.app) as c:
-            # 名冊要揭露設定值（外殼才畫得出「這位員工跑什麼」）
+            main.model_sent.pop("p19", None); main.model_sent.pop("p01", None)   # lifespan 會重載
+            # 名冊要揭露設定值（外殼才畫得出「這位員工跑什麼」）：人設沒寫＝辦公室預設 Opus 1M（2026-09-15 Aaron 定）
             roster = c.get("/agents").json()
-            assert roster["p19"]["model"] == "claude-opus-5", roster["p19"]
-            assert roster["p01"]["model"] == "", roster["p01"]
+            assert roster["p19"]["model"] == "claude-opus-5[1m]" and roster["p01"]["model"] == "claude-opus-5[1m]", (roster["p19"], roster["p01"])
 
+            # 送 cogito 要拿掉 [1m]：那是 Claude Code 的寫法，API 沒有這個 id（API 的 claude-opus-5 本來就是 1M）
             main.busy.discard("p19")
             c.post("/office/dispatch", json={"agent": "p19", "text": "做架構決策"})
             assert sent[-1].get("model") == "claude-opus-5", sent[-1]
 
-            # 沒設 model 的員工：payload 裡【不該有】這個鍵——帶空字串會把對面設定清掉
+            # 人設沒寫模型的員工也送預設（每個人都跑 Opus）
             main.busy.discard("p01")
             c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
+            assert sent[-1].get("model") == "claude-opus-5", sent[-1]
+
+            # 預設設成空＝不給預設：payload 裡【不該有】這個鍵——帶空字串會把 cogito 那邊的設定清掉
+            os.environ["OFFICE_DEFAULT_MODEL"] = ""
+            main.model_sent.pop("p01", None); main.busy.discard("p01")
+            c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
             assert "model" not in sent[-1], sent[-1]
+            os.environ["OFFICE_DEFAULT_MODEL"] = "claude-opus-5[1m]"
 
             # 外殼的臨時覆蓋：優先於人設
             main.busy.discard("p19")
@@ -1812,14 +1823,14 @@ def model_per_agent() -> None:
             c.post("/office/dispatch", json={"agent": "p19", "text": "還原",
                                               "model": main.MODEL_RESET})
             assert sent[-1]["model"] == main.MODEL_RESET, sent[-1]
-            assert c.get("/office/models").json()["effective"]["p19"] == "claude-opus-5", "還原後回到人設"
+            assert c.get("/office/models").json()["effective"]["p19"] == "claude-opus-5[1m]", "還原後回到預設"
 
             # 清單優先問 cogito（→ 官方 /v1/models）。這裡的假 cogito 沒有 /models，
             # 所以走【降級】：用後備清單（人設裡指派過的），而且 source 要講出來——
             # 降級不能是無聲的，否則使用者以為自己在看官方清單。
             m = c.get("/office/models").json()
             assert m["source"] == "local", m["source"]
-            assert [x["id"] for x in m["models"]] == ["claude-haiku-4-5", "claude-opus-5"], m["models"]
+            assert [x["id"] for x in m["models"]] == ["claude-opus-5[1m]"], m["models"]
 
             # 【橋自己問官方】cogito 沒開時不該掉到只剩人設那兩個——CLI 模式根本不經過
             # cogito，清單卻綁著它開不開，那是實際回報的問題。
@@ -1888,6 +1899,10 @@ def model_per_agent() -> None:
         main.COGITO_HTTP = ""
         main.busy.discard("p19")
         main.model_sent.clear()
+        if old_default is None:
+            os.environ.pop("OFFICE_DEFAULT_MODEL", None)
+        else:
+            os.environ["OFFICE_DEFAULT_MODEL"] = old_default
 
 
 def steer_dispatch() -> None:
@@ -2883,7 +2898,8 @@ def cli_subagents() -> None:
     # 1) --agents：七個 slug、有 model 的帶 model、prompt 是人設不帶同步標記
     j = json.loads(main.cli_agents_json())
     assert set(j) >= {"xiaomei", "laoxu", "xiaohua", "azhe", "xiaokui", "laowang", "ahai"}, sorted(j)
-    assert j["xiaohua"].get("model") == "claude-haiku-4-5" and "office-persona" not in j["xiaomei"]["prompt"] and "小美" in j["xiaomei"]["prompt"]
+    assert all("model" not in v for v in j.values()), "子 agent 定義不寫死模型：預設繼承主 agent，由主 agent 每次派工依難度指定"
+    assert "office-persona" not in j["xiaomei"]["prompt"] and "小美" in j["xiaomei"]["prompt"]
     assert main.slug_to_name("xiaomei") == "小美" and main.slug_to_name("general-purpose") == "general-purpose"
     # 2) cli_events：實測的事件形狀 → cogito 詞彙
     tn, subs = {}, {}
@@ -2893,12 +2909,14 @@ def cli_subagents() -> None:
     out = ev({"type": "system", "subtype": "task_started", "tool_use_id": "T1", "subagent_type": "xiaomei", "description": "小美的意見", "is_backgrounded": True})
     assert out == [{"kind": "tool", "label": "spawn_subagent:小美", "detail": "小美的意見"}], out
     assert ev({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "T1", "content": [{"type": "text", "text": "Async agent launched successfully. agentId: abc"}]}]}}) == [], "背景啟動回執不是交件"
-    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"content": [{"type": "tool_use", "id": "S1", "name": "Read", "input": {"file_path": "a.md"}}]}})
-    assert out == [{"kind": "tool", "label": "[Subagent:小美] Read", "detail": '{"file_path": "a.md"}'}], out
+    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"model": "claude-haiku-4-5-20251001", "content": [{"type": "tool_use", "id": "S1", "name": "Read", "input": {"file_path": "a.md"}}]}})
+    assert out == [{"kind": "msg", "label": "[Subagent:小美] 🧠 模型：claude-haiku-4-5-20251001", "sub_model": "claude-haiku-4-5-20251001", "sub_name": "小美"},
+                   {"kind": "tool", "label": "[Subagent:小美] Read", "detail": '{"file_path": "a.md"}'}], out
+    assert subs["T1"]["model"] == "claude-haiku-4-5-20251001"
     out = ev({"type": "user", "parent_tool_use_id": "T1", "message": {"content": [{"type": "tool_result", "tool_use_id": "S1", "content": "內容", "is_error": False}]}})
     assert out == [{"kind": "result", "label": "[Subagent:小美] Read", "detail": "內容"}], out
-    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"content": [{"type": "text", "text": "不建議立即擴增。"}]}})
-    assert out == [{"kind": "msg", "label": "[Subagent:小美] 不建議立即擴增。"}] and subs["T1"]["text"] == "不建議立即擴增。"
+    out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"model": "claude-haiku-4-5-20251001", "content": [{"type": "text", "text": "不建議立即擴增。"}]}})
+    assert out == [{"kind": "msg", "label": "[Subagent:小美] 不建議立即擴增。"}] and subs["T1"]["text"] == "不建議立即擴增。", "模型那行只講一次"
     out = ev({"type": "system", "subtype": "task_notification", "tool_use_id": "T1", "task_id": "ab61", "status": "completed"})
     assert out == [{"kind": "result", "label": "subagent_await", "detail": "背景子 agent ab61 [小美]：✅ 已完成\n不建議立即擴增。"}], out
     assert main.BG_DONE_RE.search(out[0]["detail"]).group(1) == "小美", "收件格式要對得上橋的 BG_DONE_RE"
