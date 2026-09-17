@@ -880,7 +880,10 @@ async function status() {
     const sp = speed();
     const gauge = `<span class="mute" title="訊息打字速度：${sp === 0 ? '即時（不打字，整則直接出）' : sp + '×'}（點我切換 1× → 2× → 即時）"
       onclick="cycleSpeed()">${sp === 0 ? '⏩' : sp === 2 ? '⚡' : '🐢'}</span>`;
-    $('status').innerHTML = `${bell}${eye}${gauge}${canvas}<br>${disp}`;
+    // ⌨️ 打字聲自己一顆：有人要審批／完成的提示音、但嫌打字聲吵（實際回報）。🔕 仍是全部關掉
+    const keys = `<span class="mute" title="${keysMuted() ? '打字聲已關（點我開啟；審批／完成的提示音不受影響）' : '打字聲開著（點我關掉；審批／完成的提示音照響）'}"
+      onclick="toggleKeys()">${keysMuted() ? '🤫' : '⌨️'}</span>`;
+    $('status').innerHTML = `${bell}${keys}${eye}${gauge}${canvas}<br>${disp}`;
   } catch { $('status').textContent = ''; markBackendFail(); }  // 輪詢失敗 = 觸發斷線分級(L0自動重試→L3)
 }
 
@@ -889,6 +892,9 @@ const follow = () => localStorage.follow !== '0';   // 預設開：這是在修�
 const speed = () => { const v = parseInt(localStorage.speed ?? '1', 10); return [0, 1, 2].includes(v) ? v : 1; };
 function cycleSpeed() { localStorage.speed = { 1: '2', 2: '0', 0: '1' }[speed()]; status(); }
 function toggleFollow() { localStorage.follow = follow() ? '0' : '1'; status(); }
+// 打字聲另外一個開關：跟 🔕（全部提示音）分開，關掉它不會漏掉審批。存 localStorage，跟靜音同一級的個人偏好。
+const keysMuted = () => localStorage.keysMuted === '1';
+function toggleKeys() { localStorage.keysMuted = keysMuted() ? '0' : '1'; status(); }
 
 // 把正在打字的那一行弄成看得見：摺起來的祖先卡（含子卡）展開、捲到它在 feed 視窗內。
 // 只在【看不見】時動手——看得見就什麼都不做，才不會跟使用者自己的捲動打架。
@@ -1852,7 +1858,7 @@ const muted = () => localStorage.muted === '1';
 //    提示音是要你抬頭的，打字聲不是——兩者混在一起就都失效了。
 let lastKey = 0, noiseBuf = null;
 function keyClick() {
-  if (muted() || !audio || audio.state !== 'running') return;   // 沒解鎖就別做白工
+  if (muted() || keysMuted() || !audio || audio.state !== 'running') return;   // 全部靜音或只關打字聲都不響；沒解鎖就別做白工
   const now = audio.currentTime;
   if (now - lastKey < 0.055) return;
   lastKey = now;
