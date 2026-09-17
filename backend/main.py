@@ -3093,13 +3093,17 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
     - Codex 讀 CODEX_HOME/AGENTS.md（共通守則，sync_office_guide 寫的）＋ 從 git 根往下到 cwd 的 AGENTS.md。
       project_root_markers=[] 讓它只讀 cwd 那一份——不管工作區是不是 git repo，結果都一樣。
     - 綁 repo 時 cwd 是 worktree：人設在上一層讀不到（Claude Code 會往上找 CLAUDE.md，Codex 不會），用 developer_instructions 帶。
+    - 工具對照（personas/codex.md）也走 developer_instructions、每次都帶：AGENTS.md 在 Codex 裡是 user 訊息，
+      排在任務文前面；實測任務文的「不要用 curl」蓋過了寫在 AGENTS.md 的對照。developer 訊息的優先序高於 user。
     - MCP：照抄員工 profile 的 mcpServers。網頁：開內建網頁搜尋（Claude Code 的 WebFetch／WebSearch 對應它，見 personas/codex.md）。
-      shell 仍然沒有網路（workspace-write 沙箱），跟任務文寫的「Bash 在這裡沒有網路」一致。
+    - shell 可連網（2026-09-18 Aaron 選的 B 案）：實測內建網頁搜尋開不了 RSS（不支援 rss+xml）、GitHub API（not safe to open）、
+      LinkedIn 訪客 API（restricted URL），而班表任務全靠這些。WebFetch 在 Codex 上對應 curl（見 personas/codex.md）。
+      ⚠ 等同安全稽核 #2 的 Claude Code 員工現況：沒有網域白名單，第二批一起收。
     - MCP 核准：exec 模式的審批政策是 never，沒設就一律擋（實測：「MCP tool call requires approval」）。
       跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的照樣被擋。
     - 你本人的 ~/.agents/skills 關掉：Claude Code 員工看不到它們；實測 firecrawl 技能寫著「MUST replace WebFetch and WebSearch」，
       直接跟辦公室的工具對照打架。Codex 自己內建的技能（CODEX_HOME 底下）不動。"""
-    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"']
+    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"', "-c", "sandbox_workspace_write.network_access=true"]
     toml = lambda v: json.dumps(str(v), ensure_ascii=False)   # JSON 字串就是合法的 TOML 字串；ensure_ascii=False 避免 emoji 變成 TOML 不收的代理對
     allowed = office_mcp_allowed()
     for name, srv in office_mcp_servers().items():
@@ -3123,8 +3127,11 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
         in_worktree = home is not None and base.resolve() != home.resolve()
     except OSError:
         in_worktree = True
-    if in_worktree and aid in agents and src.exists():
-        out += ["-c", "developer_instructions=" + toml(persona_text(aid, src.read_text(encoding="utf-8")))]
+    dev = [persona_text(aid, src.read_text(encoding="utf-8"))] if in_worktree and aid in agents and src.exists() else []
+    if CODEX_GUIDE_SRC.exists():
+        dev.append(CODEX_GUIDE_SRC.read_text(encoding="utf-8"))
+    if dev:
+        out += ["-c", "developer_instructions=" + toml("\n\n".join(x.strip() for x in dev) + "\n")]
     return out
 
 
@@ -4727,7 +4734,7 @@ def sync_souls() -> dict[str, int]:
 
 
 GUIDE_SRC = Path(__file__).parent / "personas" / "office.md"   # 全辦公室共用守則的唯一來源
-CODEX_GUIDE_SRC = Path(__file__).parent / "personas" / "codex.md"   # 只給 Codex 的附錄：任務照 Claude Code 工具名寫，這份講怎麼對應
+CODEX_GUIDE_SRC = Path(__file__).parent / "personas" / "codex.md"   # 只給 Codex 的工具對照（走 developer_instructions，見 codex_parity_args）
 
 
 def guide_doc(body: str) -> str:
@@ -4756,14 +4763,9 @@ def sync_office_guide() -> dict[str, int]:
     n = {"wrote": 0, "same": 0, "skipped": 0}
     if not GUIDE_SRC.exists():
         return n
-    body = GUIDE_SRC.read_text(encoding="utf-8")
-    want = guide_doc(body)
-    codex_seat = codex_home() / "AGENTS.md"
+    want = guide_doc(GUIDE_SRC.read_text(encoding="utf-8"))
     for dst in guide_targets():
-        if dst == codex_seat and CODEX_GUIDE_SRC.exists():
-            _sync_one(dst, guide_doc(body.rstrip() + "\n\n" + CODEX_GUIDE_SRC.read_text(encoding="utf-8")), n)
-        else:
-            _sync_one(dst, want, n)
+        _sync_one(dst, want, n)
     if any(n.values()):
         print(f"共通守則同步（{len(guide_targets())} 個座位）：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
     return n

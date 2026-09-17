@@ -2361,7 +2361,7 @@ def caps_per_agent() -> None:
 
 def office_guide() -> None:
     """共通守則同步到三個座位：cogito 共享根的 AGENTS.md、員工 CLI profile 的 CLAUDE.md、Codex 員工 home 的 AGENTS.md
-    （多一段工具對照）；手寫保護同一套；Codex home 指到你本人的 ~/.codex 時不寫。"""
+    （三份一模一樣；Codex 的工具對照走 developer_instructions）；手寫保護同一套；Codex home 指到你本人的 ~/.codex 時不寫。"""
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "workspace" / "channels"
@@ -2378,7 +2378,7 @@ def office_guide() -> None:
             a, b, x = (f.read_text(encoding="utf-8") for f in (root_md, prof_md, codex_md))
             assert a == b and a.startswith(main.SOUL_MARK) and "辦公室共通守則" in a and "誠實" in a and "回報格式" in a
             assert "Go" not in a, "共通守則不該再有 6 月 demo 指南那套 Go 專案慣例"
-            assert x.startswith(a.rstrip("\n")) and "工具對照" in x and "工具對照" not in a, "Codex 那份＝同一份守則＋工具對照"
+            assert x == a, "三個引擎拿到同一份守則"
             assert main.sync_office_guide()["same"] == 3
             root_md.write_text("# 我自己維護的\n", encoding="utf-8")   # 沒有標記＝人寫的
             n = main.sync_office_guide()
@@ -3097,7 +3097,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 a = rec["argv"]
                 # 跟 Claude Code 員工對齊（同一個人設不因換廠商換做法）：只讀 cwd 的 AGENTS.md、開網頁搜尋、MCP 照抄員工 profile
                 cs = [a[i + 1] for i, x in enumerate(a) if x == "-c"]
-                assert "project_root_markers=[]" in cs and 'web_search="live"' in cs, a
+                assert "project_root_markers=[]" in cs and 'web_search="live"' in cs and "sandbox_workspace_write.network_access=true" in cs, a
                 # 核准跟 Claude Code 員工同一條線：整台放行的設 approve（exec 模式沒設就一律擋）；只放行單一工具的不整台放行
                 assert 'mcp_servers.jobspy={command="node", args=["/mcp/jobspy/index.js"], env={"DOCKER_CMD"="docker"}, default_tools_approval_mode="approve"}' in cs \
                     and 'mcp_servers.job104={command="npx", args=["-y", "mcp-server-104@0.2.0"]}' in cs \
@@ -3106,12 +3106,16 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 assert f'skills.config=[{{path="{sk}/firecrawl/SKILL.md", enabled=false}}, {{path="{sk}/humanizer/SKILL.md", enabled=false}}]' in cs, \
                     "你本人的 ~/.agents/skills 不給 Codex 員工（Claude Code 員工也看不到）"
                 assert not any(x.startswith(("mcp_servers.withkey", "mcp_servers.bad")) for x in cs), "帶 headers 的（金鑰）與名稱不合法的不抄"
-                assert not any(x.startswith("developer_instructions=") for x in cs), "在工作區根：人設已經在 cwd 的 AGENTS.md，不重複帶"
+                root_dev = json.loads(next(x for x in cs if x.startswith("developer_instructions=")).split("=", 1)[1])
+                # 工具對照每次都帶、走 developer（實測：寫在 AGENTS.md＝user 訊息時，任務文的「不要用 curl」蓋過它）
+                assert "工具對照" in root_dev and "你的 WebFetch 就是 curl" in root_dev, root_dev[:120]
+                assert "# 你是" not in root_dev, "在工作區根：人設已經在 cwd 的 AGENTS.md，不重複帶"
                 assert c.get("/office/models").json()["codex_mcp"] == ["jobspy", "job104", "remote"]
                 # 綁 repo 的 worktree：Codex 不往上讀人設，要用 developer_instructions 帶（實測 0.154）
                 wt_cs = main.codex_parity_args("p05", base / "some-repo")
                 dev = next(x for x in wt_cs if x.startswith("developer_instructions="))
-                assert json.loads(dev.split("=", 1)[1]).startswith(f"# 你是{main.agents['p05'].name}"), dev[:80]
+                wt_dev = json.loads(dev.split("=", 1)[1])
+                assert wt_dev.startswith(f"# 你是{main.agents['p05'].name}") and "工具對照" in wt_dev, wt_dev[:80]
                 assert a[:2] == ["exec", "--json"] and "--skip-git-repo-check" in a and a[a.index("-s") + 1] == "workspace-write" \
                     and a[a.index("-C") + 1] == str(base) and a[-1] == "-" and "resume" not in a and "-m" not in a, a
                 assert rec["prompt"] == "看一下 a.py", "提示走 stdin"

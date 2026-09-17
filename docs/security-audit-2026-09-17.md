@@ -44,6 +44,7 @@
   - Read 的 deny 規則只約束 Claude 的檔案工具，Bash 的 `cat` 不受限；規則本身也只蓋到工作目錄的 `.env` 與 `~/.ssh`，沒有 cogito 與橋的 `.env`、`~/.codex/auth.json`、`~/.claude-office/.claude.json`。
   - 沒有網路白名單：2026-09-10 小美的一段真實 transcript 裡，Bash 執行 `curl https://techcrunch.com/feed/` 成功拿到內容。
 - **攻擊路徑**：提示注入 → 一行 Bash 讀金鑰並 curl 到外部，全程沒有審批卡。
+- **2026-09-18 更新**：Codex 員工的 shell 也打開網路（Aaron 選 B 案：Codex 內建網頁搜尋開不了 RSS、GitHub API、LinkedIn 訪客 API，班表任務改用 curl），同樣沒有網域白名單；workspace-write 沙箱可讀整台機器，所以 Codex 員工現在也在這條攻擊路徑上。第二批的網域白名單兩個引擎一起收。
 - **修法**：設 `sandbox.network.allowedDomains`（只放任務需要的站）；`permissions.blockReadsOutsideWorkingDirectories: true`；沙箱檔案層 `denyRead` 涵蓋 `~/.codex`、`~/.claude*`、`~/.aws`、`~/.ssh`、各 repo `.env`；無人值守的員工把 `autoAllowBashIfSandboxed` 關掉，讓 Bash 走審批 hook。
 
 ---
