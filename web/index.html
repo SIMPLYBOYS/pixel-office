@@ -1033,20 +1033,6 @@ function paintEngineRow(a, workingNow) {
     ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
       + (cogitoDown ? '　⚠ cogito 沒開，先走 CLI' : '')
     : (modelInfo.cogito_up === false ? '⚠ cogito 沒開——現在派給它會失敗，開了再派或改選 CLI' : '');
-  // CLI 自己決定模型，這裡選了不生效。但【藏起來】會讓人以為功能不見了（實際回報）——
-  // 改成停用＋講清楚原因，並把 CLI 上次實際跑的那個講出來（揭露 > 隱藏）。
-  const mr = $('modelRow');
-  mr.hidden = !(modelInfo.models || []).length;
-  if (!mr.hidden && cli) {
-    // CLI 也吃 --model，所以照樣可選。附上「上次實際跑的那個」——指定值與事實
-    // 不一定相同（別名、CLI 自己的覆蓋），兩個都給才看得出有沒有生效。
-    const used = modelInfo.cli_models?.[selected];
-    const pick = $('modelSel').value;
-    $('modelNote').textContent =
-      (pick === (modelInfo.reset || 'reset') ? '這次不指定模型，交回 CLI 自己的設定'
-       : pick ? `這次用 ${shortModel(pick)} 跑` : '沒指定＝用 CLI 自己的設定')
-      + (used ? `　（上次實際跑的是 ${shortModel(used)}）` : '');
-  }
 }
 
 // Codex 的模型選單：清單來自 Codex 自己的 models_cache（依帳號方案過濾過）。選了會記住（跟 Claude 那份分開），「還原」收回。
@@ -1082,42 +1068,47 @@ function paintCodexModelRow(workingNow) {
 
 function paintModelRow(a, workingNow) {
   const row = $('modelRow'), sel = $('modelSel');
-  // 這個人現在的引擎是 Codex：選單由 paintCodexModelRow 畫（它在引擎那排之後跑）。這裡不先畫 Claude 那份——
-  // 兩邊輪流重建會把使用者正在選的值洗掉（每次重畫都回到預選值）。換人時引擎選單還沒跟上，所以用跟 paintEngineRow 同一套判斷。
+  // 這個人現在的引擎是 Codex：選單由 paintCodexModelRow 畫（它在引擎那排之後跑）。兩邊輪流重建會把使用者正在選的值洗掉。
+  // 換人時引擎選單還沒跟上，所以用跟 paintEngineRow 同一套判斷。
   const es = $('engineSel');
-  const eng = es.dataset.for === selected ? es.value : (modelInfo.engines?.[selected] || 'cogito');
+  let eng = es.dataset.for === selected ? es.value : (modelInfo.engines?.[selected] || 'cogito');
+  if (eng === 'cogito' && modelInfo.cogito_up === false && modelInfo.cli && es.dataset.for !== selected) eng = 'cli';
   if (eng === 'codex' && modelInfo.codex) return;
-  row.hidden = !(modelInfo.models || []).length;   // 沒有任何人設定過模型＝不畫這排
+  // 三個引擎的型號互不相通，清單、記住的選擇、預設各自一份（2026-09-17 以前共用：cogito 改走 OpenAI 後，Claude Code 的選單裡是 GPT）
+  const cli = eng === 'cli' && modelInfo.cli;
+  const list = (cli ? modelInfo.cli_list : modelInfo.models) || [];
+  row.hidden = !list.length;
   if (row.hidden) return;
-  const eff = modelInfo.effective?.[selected] || '', persona = a.model || '';
-  // 選項每次換人都重建：「跟人設」那行要寫出【這位員工】的人設模型，不同人不一樣
-  // 清單來自 cogito → 官方 /v1/models，所以有正式顯示名（「Claude Opus 5」）可用，
-  // 比縮寫的 id 好認。降級成本地清單時 name 就等於 id，照樣顯示得出來。
-  const want = [['', persona ? `跟人設（${shortModel(persona)}）` : '跟人設（cogito 預設）']]
-    .concat((modelInfo.models || []).map(m => [m.id, m.name || shortModel(m.id)]));
-  if (persona || eff) want.push([modelInfo.reset || 'reset', '↺ 還原 cogito 預設']);
-  const sig = selected + '|' + want.map(x => x[0]).join(',');
+  const reset = modelInfo.reset || 'reset';
+  const picked = (modelInfo.picks?.[cli ? 'cli' : 'cogito'] || {})[selected] || '';
+  const eff = (cli ? modelInfo.cli_effective : modelInfo.effective)?.[selected] || '';
+  const persona = a.model || '';
+  const personaOk = persona && (!cli || /^(claude|opus|sonnet|haiku)/i.test(persona));
+  const dflt = cli ? (modelInfo.cli_default || '') : (modelInfo.cogito_default || '');
+  const base = personaOk ? `跟人設（${shortModel(persona)}）`
+    : cli ? `Claude Code 預設${dflt ? `（${shortModel(dflt)}）` : ''}`
+    : `cogito 預設${dflt ? `（${dflt}）` : '（依 cogito 的設定）'}`;
+  const want = [['', base]].concat(list.map(m => [m.id, m.name || shortModel(m.id)]));
+  if (picked && !list.some(m => m.id === picked)) want.push([picked, picked]);   // 記住的、但清單已經沒有的也要看得到
+  if (picked) want.push([reset, '↺ 還原預設']);
+  const sig = (cli ? 'cli|' : 'cogito|') + selected + '|' + want.map(x => x[0]).join(',');
   if (sel.dataset.sig !== sig) {
     sel.innerHTML = want.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
     sel.dataset.sig = sig;
-    // 預選【目前實際會用的】而不是一律空白：覆蓋在 cogito 那邊是 session 級持久的，
-    // 畫面不反映它就成了隱形狀態——選一次 opus 之後永遠是 opus，而你看不出來。
-    sel.value = (eff && eff !== persona && want.some(x => x[0] === eff)) ? eff : '';
+    sel.value = picked;   // 預選記住的那個（沒有就空白＝預設）——選過之後畫面要看得出來
   }
   sel.disabled = workingNow;
   sel.onchange = () => updateComposer();
   const pick = sel.value;
+  const used = (cli ? modelInfo.cli_models : modelInfo.cogito_models)?.[selected];
   $('modelNote').textContent =
-    pick === (modelInfo.reset || 'reset') ? '這次派工會把覆蓋收回，還原成 cogito 啟動時的模型'
-    : pick ? `這次派工改用 ${shortModel(pick)}——覆蓋會留著，之後可選「還原」收回`
-    : eff ? `目前會用 ${shortModel(eff)}` : '';
-  // 降級要看得見：清單不是官方那份時講出來，否則使用者不知道自己在看一份可能過期的表
-  // 只有真的退到本地後備才要解釋——橋自己問到官方（source=api）那份是完整的，
-  // 沒必要因為 cogito 沒開就說清單有問題。
-  if (modelInfo.source === 'local') {
-    $('modelNote').textContent +=
-      (($('modelNote').textContent && '　') || '') + '（問不到官方清單，這是本地後備）';
-  }
+    (pick === reset ? `這次派工收回選過的模型，改用${personaOk ? '人設的' : '預設'}`
+     : pick && pick !== picked ? `這次派工改用 ${shortModel(pick)}——會記住，之後可選「還原」收回`
+     : eff ? `目前會用 ${shortModel(eff)}`
+     : '目前用 cogito 自己的預設模型')
+    + (used ? `　上次實際跑的是 ${shortModel(used)}` : '');
+  // 降級要看得見：Claude Code 的清單不是官方那份時講出來
+  if (cli && modelInfo.cli_source === 'local') $('modelNote').textContent += '　（問不到官方清單，這是本地後備）';
 }
 
 // 本機 repo 清單（橋掃 OFFICE_REPOS_DIR）。每次換人都重抓：bound 是【那位員工】有沒有

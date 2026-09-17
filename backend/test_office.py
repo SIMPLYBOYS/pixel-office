@@ -1237,8 +1237,8 @@ for o in out:
                         break
                 assert main.cli_model.get("p05") == "claude-haiku-4-5", \
                     f"--model 沒傳到 CLI：{main.cli_model.get('p05')!r}"
-                # 選了會記住（與 cogito 那條共用 model_sent，語意一致）
-                assert main.model_sent.get("p05") == "claude-haiku-4-5", main.model_sent
+                # 選了會記住（Claude Code 自己一份，跟 cogito、Codex 分開）
+                assert main.cli_pick.get("p05") == "claude-haiku-4-5" and "p05" not in main.cogito_pick, (main.cli_pick, main.cogito_pick)
 
                 # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
                 # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
@@ -1281,7 +1281,7 @@ for o in out:
             # 下一個測試的 TestClient 啟動時 load_state 又把它讀回來（踩過：
             # 後面的 repo_binding 因此走了 CLI 分支，repo 根本沒綁）。
             main.engine_sent.clear()
-            main.model_sent.pop("p05", None)
+            main.model_sent.pop("p05", None); main.cli_pick.pop("p05", None); main.cogito_pick.pop("p05", None)
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
@@ -1779,59 +1779,101 @@ def model_per_agent() -> None:
     main.COGITO_HTTP = "http://fake"
     old_client = main.httpx.AsyncClient
     main.httpx.AsyncClient = lambda **kw: _Rec()
-    old_default = os.environ.get("OFFICE_DEFAULT_MODEL")
+    old_default, old_cog = os.environ.get("OFFICE_DEFAULT_MODEL"), os.environ.get("OFFICE_COGITO_MODEL")
     os.environ["OFFICE_DEFAULT_MODEL"] = "claude-opus-5[1m]"   # 不讓 .env 的設定影響斷言
-    main.model_sent.pop("p19", None); main.model_sent.pop("p01", None)
+    os.environ.pop("OFFICE_COGITO_MODEL", None)
+
+    def clean() -> None:
+        for dct in (main.model_sent, main.cogito_pick, main.cli_pick):
+            for x in ("p19", "p01"):
+                dct.pop(x, None)
+    clean()
     try:
         with TestClient(main.app) as c:
-            main.model_sent.pop("p19", None); main.model_sent.pop("p01", None)   # lifespan 會重載
-            # 名冊要揭露設定值（外殼才畫得出「這位員工跑什麼」）：人設沒寫＝辦公室預設 Opus 1M（2026-09-15 Aaron 定）
+            clean()   # lifespan 會重載
+            # 名冊揭露人設【明寫】的；各引擎沒指定時用什麼另外算（2026-09-17：cogito 改走 OpenAI，不能再共用一個 Claude 預設）
             roster = c.get("/agents").json()
-            assert roster["p19"]["model"] == "claude-opus-5[1m]" and roster["p01"]["model"] == "claude-opus-5[1m]", (roster["p19"], roster["p01"])
+            assert roster["p19"]["model"] == "" and roster["p01"]["model"] == "", (roster["p19"], roster["p01"])
 
-            # 送 cogito 要拿掉 [1m]：那是 Claude Code 的寫法，API 沒有這個 id（API 的 claude-opus-5 本來就是 1M）
-            main.busy.discard("p19")
-            c.post("/office/dispatch", json={"agent": "p19", "text": "做架構決策"})
-            assert sent[-1].get("model") == "claude-opus-5", sent[-1]
-
-            # 人設沒寫模型的員工也送預設（每個人都跑 Opus）
+            # cogito 沒有任何指定：不塞 Claude 預設（實際踩到：cogito 走 OpenAI、沒有 Anthropic 金鑰，claude 被靜默忽略、畫面卻顯示 Opus）。
+            # 那個頻道現在設成什麼不知道（先前橋每次都送 claude-opus-5）→ 送一次 reset 收回；之後就不再送
             main.busy.discard("p01")
             c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
-            assert sent[-1].get("model") == "claude-opus-5", sent[-1]
+            assert sent[-1].get("model") == main.MODEL_RESET, sent[-1]
+            main.busy.discard("p01")
+            c.post("/office/dispatch", json={"agent": "p01", "text": "再寫一個"})
+            assert "model" not in sent[-1], f"已經是 cogito 預設就不再送：{sent[-1]}"
+            m = c.get("/office/models").json()
+            assert m["effective"]["p01"] == "" and m["cli_effective"]["p01"] == "claude-opus-5[1m]", (m["effective"]["p01"], m["cli_effective"]["p01"])
+            # OFFICE_COGITO_MODEL 有設就送它
+            os.environ["OFFICE_COGITO_MODEL"] = "gpt-5.6-sol"
+            main.busy.discard("p01")
+            c.post("/office/dispatch", json={"agent": "p01", "text": "指定 cogito 預設"})
+            assert sent[-1].get("model") == "gpt-5.6-sol", sent[-1]
+            os.environ.pop("OFFICE_COGITO_MODEL", None)
+            # 人設明寫：送人設（送 cogito 拿掉 [1m]——那是 Claude Code 的寫法）
+            old_p = main.agents["p19"].persona.get("model")
+            main.agents["p19"].persona["model"] = "claude-opus-5[1m]"
+            try:
+                main.busy.discard("p19")
+                c.post("/office/dispatch", json={"agent": "p19", "text": "做架構決策"})
+                assert sent[-1].get("model") == "claude-opus-5", sent[-1]
+            finally:
+                if old_p is None:
+                    main.agents["p19"].persona.pop("model", None)
+                else:
+                    main.agents["p19"].persona["model"] = old_p
 
-            # 預設設成空＝不給預設：payload 裡【不該有】這個鍵——帶空字串會把 cogito 那邊的設定清掉
-            os.environ["OFFICE_DEFAULT_MODEL"] = ""
-            main.model_sent.pop("p01", None); main.busy.discard("p01")
-            c.post("/office/dispatch", json={"agent": "p01", "text": "寫個需求"})
-            assert "model" not in sent[-1], sent[-1]
-            os.environ["OFFICE_DEFAULT_MODEL"] = "claude-opus-5[1m]"
-
-            # 外殼的臨時覆蓋：優先於人設
+            # 外殼選的：記住、蓋過人設；cogito 那份不會漏到 Claude Code
             main.busy.discard("p19")
-            c.post("/office/dispatch", json={"agent": "p19", "text": "這次用便宜的",
-                                              "model": "claude-haiku-4-5"})
-            assert sent[-1]["model"] == "claude-haiku-4-5", sent[-1]
-            # 覆蓋【不是隱形狀態】：cogito 那邊是 session 級持久的，所以橋要記著並揭露，
-            # 否則選一次 opus 就永遠是 opus 而畫面上看不出來。
-            eff = c.get("/office/models").json()["effective"]
-            assert eff["p19"] == "claude-haiku-4-5", eff
-            # 沒選就沿用人設，但【目前實際會用的】仍是上次那個覆蓋（誠實反映 cogito 的狀態）
+            c.post("/office/dispatch", json={"agent": "p19", "text": "這次用中階的", "model": "gpt-5.6-terra"})
+            assert sent[-1]["model"] == "gpt-5.6-terra" and main.cogito_pick["p19"] == "gpt-5.6-terra" and "p19" not in main.cli_pick, sent[-1]
+            m = c.get("/office/models").json()
+            assert m["effective"]["p19"] == "gpt-5.6-terra" and m["picks"]["cogito"]["p19"] == "gpt-5.6-terra", m["effective"]["p19"]
+            assert m["cli_effective"]["p19"] == "claude-opus-5[1m]", "cogito 選的 GPT 不能變成 Claude Code 的模型"
             main.busy.discard("p19")
             c.post("/office/dispatch", json={"agent": "p19", "text": "沒選模型"})
-            assert sent[-1]["model"] == "claude-opus-5", sent[-1]
-            # 還原：把覆蓋收回啟動預設（與聊天端 `model reset` 同一個字）
+            assert sent[-1]["model"] == "gpt-5.6-terra", f"選過的要記住：{sent[-1]}"
+            # 還原：收回選過的；沒有人設也沒有 OFFICE_COGITO_MODEL → 回 cogito 預設（頻道上還是 terra，所以送 reset）
             main.busy.discard("p19")
-            c.post("/office/dispatch", json={"agent": "p19", "text": "還原",
-                                              "model": main.MODEL_RESET})
-            assert sent[-1]["model"] == main.MODEL_RESET, sent[-1]
-            assert c.get("/office/models").json()["effective"]["p19"] == "claude-opus-5[1m]", "還原後回到預設"
+            c.post("/office/dispatch", json={"agent": "p19", "text": "還原", "model": main.MODEL_RESET})
+            assert sent[-1]["model"] == main.MODEL_RESET and "p19" not in main.cogito_pick, sent[-1]
+            assert c.get("/office/models").json()["effective"]["p19"] == "", "還原後回到 cogito 預設"
+            # Claude Code 那份：人設或誤選的 GPT 都不帶給 Claude Code
+            main.cogito_pick["p01"] = "gpt-5.6-sol"
+            old_p = main.agents["p01"].persona.get("model")
+            main.agents["p01"].persona["model"] = "gpt-5.6-luna"
+            try:
+                assert main.cli_model_for("p01") == "claude-opus-5[1m]", main.cli_model_for("p01")
+                main.cli_pick["p01"] = "haiku"
+                assert main.cli_model_for("p01") == "haiku", "Claude Code 的別名要收"
+            finally:
+                main.cogito_pick.pop("p01", None); main.cli_pick.pop("p01", None)
+                if old_p is None:
+                    main.agents["p01"].persona.pop("model", None)
+                else:
+                    main.agents["p01"].persona["model"] = old_p
+            # 舊狀態檔（共用 model_sent）遷移：Claude 型號搬給 Claude Code，cogito 那邊當作不知道
+            import tempfile as _tf
+            with _tf.TemporaryDirectory() as tmp2:
+                old_sf, main.STATE_FILE = main.STATE_FILE, Path(tmp2) / "old.json"
+                main.STATE_FILE.write_text(json.dumps({"model_sent": {"p01": "claude-haiku-4-5", "p05": "gpt-5.6-sol"}}), encoding="utf-8")
+                saved = (dict(main.model_sent), dict(main.cli_pick), dict(main.cogito_pick))
+                main.model_sent.clear(); main.cli_pick.clear(); main.cogito_pick.clear()
+                try:
+                    main.load_state()
+                    assert main.cli_pick == {"p01": "claude-haiku-4-5"} and main.model_sent == {} and main.cogito_pick == {}, (main.cli_pick, main.model_sent)
+                finally:
+                    main.STATE_FILE = old_sf
+                    main.model_sent.clear(); main.cli_pick.clear(); main.cogito_pick.clear()
+                    main.model_sent.update(saved[0]); main.cli_pick.update(saved[1]); main.cogito_pick.update(saved[2])
 
             # 清單優先問 cogito（→ 官方 /v1/models）。這裡的假 cogito 沒有 /models，
             # 所以走【降級】：用後備清單（人設裡指派過的），而且 source 要講出來——
             # 降級不能是無聲的，否則使用者以為自己在看官方清單。
             m = c.get("/office/models").json()
-            assert m["source"] == "local", m["source"]
-            assert [x["id"] for x in m["models"]] == ["claude-opus-5[1m]"], m["models"]
+            assert m["source"] == "down" and m["models"] == [], (m["source"], m["models"])   # cogito 的清單只有 cogito 講得出來
+            assert m["cli_source"] == "local" and [x["id"] for x in m["cli_list"]] == ["claude-opus-5[1m]"], (m["cli_source"], m["cli_list"])
 
             # 【橋自己問官方】cogito 沒開時不該掉到只剩人設那兩個——CLI 模式根本不經過
             # cogito，清單卻綁著它開不開，那是實際回報的問題。
@@ -1854,8 +1896,8 @@ def model_per_agent() -> None:
             main._api_models = ([], 0.0)
             try:
                 m = c.get("/office/models").json()
-                assert m["source"] == "api", m["source"]
-                assert len(m["models"]) == 3 and m["models"][0]["name"] == "Claude Opus 5", m
+                assert m["cli_source"] == "api", m["cli_source"]
+                assert len(m["cli_list"]) == 3 and m["cli_list"][0]["name"] == "Claude Opus 5", m["cli_list"]
             finally:
                 main.client = old_client2
                 main._api_models = ([], 0.0)
@@ -1865,15 +1907,17 @@ def model_per_agent() -> None:
             class _WithModels(_Rec):
                 async def get(self, url, **kw):
                     assert url.endswith("/models"), url
-                    return _FakeResp({"models": [{"id": "claude-fable-5-1", "name": "Claude Fable 5.1"},
-                                                 {"id": "claude-opus-5", "name": "Claude Opus 5"}],
+                    return _FakeResp({"models": [{"id": "gpt-5.6-luna", "name": "GPT-5.6-Luna"},
+                                                 {"id": "gpt-5.6-sol", "name": "GPT-5.6-Sol"}],
                                       "source": "live"})
 
             main.httpx.AsyncClient = lambda **kw: _WithModels()
             m = c.get("/office/models").json()
             assert m["source"] == "live", m
-            assert [x["id"] for x in m["models"]] == ["claude-fable-5-1", "claude-opus-5"], m
-            assert m["models"][0]["name"] == "Claude Fable 5.1", "顯示名要帶過來（比 id 好認）"
+            assert [x["id"] for x in m["models"]] == ["gpt-5.6-luna", "gpt-5.6-sol"], m
+            assert m["models"][0]["name"] == "GPT-5.6-Luna", "顯示名要帶過來（比 id 好認）"
+            # cogito 走 OpenAI 時，Claude Code 的清單不能跟著變成 GPT
+            assert all(x["id"].startswith("claude") for x in m["cli_list"]), m["cli_list"]
             main.httpx.AsyncClient = lambda **kw: _Rec()
 
             # 揭露：done 帶的是實際跑的模型，進卡片
@@ -1899,11 +1943,12 @@ def model_per_agent() -> None:
         main.httpx.AsyncClient = old_client
         main.COGITO_HTTP = ""
         main.busy.discard("p19")
-        main.model_sent.clear()
-        if old_default is None:
-            os.environ.pop("OFFICE_DEFAULT_MODEL", None)
-        else:
-            os.environ["OFFICE_DEFAULT_MODEL"] = old_default
+        main.model_sent.clear(); main.cogito_pick.clear(); main.cli_pick.clear()
+        for k, v in (("OFFICE_DEFAULT_MODEL", old_default), ("OFFICE_COGITO_MODEL", old_cog)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def steer_dispatch() -> None:

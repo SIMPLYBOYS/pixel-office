@@ -3688,7 +3688,35 @@ def engine_of(aid: str, override: str = "") -> str:
     if want == ENGINE_CODEX and codex_available():
         return ENGINE_CODEX
     return ENGINE_COGITO
-model_sent: dict[str, str] = {}   # aid -> 橋最後一次告訴 cogito 的模型（隨 state 持久化）
+model_sent: dict[str, str] = {}   # aid -> cogito 那邊 office 頻道現在的模型設定（橋最後一次告訴它的；""＝cogito 預設；沒有這個鍵＝不知道）
+cogito_pick: dict[str, str] = {}  # aid -> 外殼替 cogito 選過的模型（記住，直到「還原」）
+cli_pick: dict[str, str] = {}     # aid -> 外殼替 Claude Code 選過的模型（只收 Claude 型號；跟 cogito、Codex 的分開）
+# 三個引擎的型號互不相通（Claude Code 只跑 Claude、Codex 只跑 OpenAI、cogito 看它自己的 provider），
+# 所以清單、記住的選擇、預設都各自一份。2026-09-17 以前共用一份：cogito 改走 OpenAI 後，Claude Code 的選單裡列的是 GPT。
+
+
+def is_claude_model(m: str) -> bool:
+    """Claude Code 吃得下的型號：claude-* 或它的別名（opus／sonnet／haiku，可帶 [1m]）。"""
+    m = m.strip().lower()
+    return m.startswith("claude") or m.split("[")[0] in ("opus", "sonnet", "haiku")
+
+
+def cli_default_model() -> str:
+    """Claude Code 沒指定時用的模型：OFFICE_DEFAULT_MODEL（預設 claude-opus-5[1m]）；設成空字串＝不帶 --model，交回 Claude Code 自己。"""
+    return os.environ.get("OFFICE_DEFAULT_MODEL", "claude-opus-5[1m]").strip()
+
+
+def cli_model_for(aid: str) -> str:
+    """Claude Code 這次用哪個：選過的 > 人設（Claude 型號才算）> 預設。"""
+    persona = agents[aid].model if aid in agents else ""
+    return cli_pick.get(aid) or (persona if is_claude_model(persona) else "") or cli_default_model()
+
+
+def cogito_model_for(aid: str) -> str:
+    """cogito 這次該設成哪個：選過的 > 人設 > OFFICE_COGITO_MODEL > 空（＝cogito 自己的預設，它依 COGITO_PROVIDER／OPENAI_MODEL／CLAUDE_MODEL 決定）。
+    不塞 Claude 預設：cogito 走 OpenAI 又沒有 Anthropic 金鑰時，claude 會被靜默忽略、畫面卻顯示 Opus（實際踩到）。"""
+    return (cogito_pick.get(aid) or (agents[aid].model if aid in agents else "")
+            or os.environ.get("OFFICE_COGITO_MODEL", "").strip())
 
 
 def cogito_model(m: str) -> str:
@@ -3702,8 +3730,8 @@ def known_models() -> list[dict]:
     if env := os.environ.get("OFFICE_MODELS", "").strip():
         ids = [m.strip() for m in env.split(",") if m.strip()]
     else:
-        ids = sorted({a.model for a in agents.values() if a.model})
-    return [{"id": i, "name": i} for i in ids]
+        ids = sorted({a.model for a in agents.values() if is_claude_model(a.model)} | ({cli_default_model()} - {""}))
+    return [{"id": i, "name": i} for i in ids if is_claude_model(i)]
 
 
 _api_models: tuple[list[dict], float] = ([], 0.0)   # (清單, 抓到的時間)；6 小時內沿用
@@ -3768,16 +3796,25 @@ async def office_models():
     # 三段來源，由準到粗：cogito（它知道自己的 provider 支援什麼）→ 橋自己問官方
     # → 本地後備。source 一路講出來，降級不能是無聲的。
     got = await cogito_models()
-    if got:
-        models, source = got
-    elif mine := await api_models():
-        models, source = mine, "api"
+    models, source = got if got else ([], "down")   # cogito 的清單只有 cogito 講得出來（它的 provider 可能是 OpenAI）
+    if mine := await api_models():                  # Claude Code 的清單：橋自己問 Anthropic，問不到用本地後備
+        cli_list, cli_source = [m for m in mine if is_claude_model(str(m.get("id") or ""))], "api"
     else:
-        models, source = known_models(), "local"
+        cli_list, cli_source = known_models(), "local"
+    cogito_used: dict[str, str] = {}   # 每人最近一張 cogito 卡上【實際跑的】模型（done 事件回報的，不是設定值）
+    for aid_, cards in history.items():
+        for c in reversed(cards):
+            if c.get("engine") == ENGINE_COGITO and c.get("model"):
+                cogito_used[aid_] = str(c["model"])
+                break
     # cogito_up：外殼據此決定預設引擎與提示。cogito 沒開時預設指向它，派工只會被拒——而那條拒絕先前只是
     # 一行灰字（實際回報：看板送出「沒有反應」）。這是事實的揭露，不是幫使用者做決定：選單仍可手動切。
     return {"ok": True, "models": models, "source": source, "reset": MODEL_RESET, "cogito_up": bool(got),
-            "effective": {aid: model_sent.get(aid) or a.model for aid, a in agents.items()},
+            "effective": {aid: cogito_model_for(aid) for aid in agents},            # cogito：""＝cogito 自己的預設
+            "cogito_default": os.environ.get("OFFICE_COGITO_MODEL", "").strip(), "cogito_models": cogito_used,
+            "cli_list": cli_list, "cli_source": cli_source, "cli_default": cli_default_model(),
+            "cli_effective": {aid: cli_model_for(aid) for aid in agents},
+            "picks": {"cogito": dict(cogito_pick), "cli": dict(cli_pick)},
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
             "cli": cli_available(), "cli_cmd": CLI_CMD,
             "codex": codex_available(), "codex_cmd": CODEX_CMD, "codex_models": dict(codex_model),
@@ -3882,8 +3919,7 @@ async def office_dispatch(d: dict):
             text = (f"{text}\n\n【工作 repo】你現在就在 {repo['path']} 的 git worktree 裡"
                     f"（分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
                     "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
-        # 模型：與 cogito 同一套優先序（外殼選的 > 人設）。「還原預設」＝不帶 --model，
-        # 交回 CLI 自己的設定。選了就記下來（跟 cogito 那條共用 model_sent，兩邊語意一致）。
+        # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
@@ -3899,10 +3935,15 @@ async def office_dispatch(d: dict):
             codex_want = codex_model_sent.get(aid, "")
             asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled"))))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want}
-        if pick:
-            model_sent[aid] = "" if pick == MODEL_RESET else pick
+        if pick == MODEL_RESET:
+            cli_pick.pop(aid, None)
             _dirty = True
-        cli_want = "" if pick == MODEL_RESET else (pick or model_sent.get(aid) or agents[aid].model)
+        elif pick and is_claude_model(pick):
+            cli_pick[aid] = pick
+            _dirty = True
+        elif pick:
+            log_ev(aid, f"ℹ Claude Code 跑不了 {pick}，這次沿用 {cli_model_for(aid) or 'Claude Code 預設'}")
+        cli_want = cli_model_for(aid)
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled"))))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
     if cli_mode:
@@ -3945,9 +3986,21 @@ async def office_dispatch(d: dict):
             payload = {"agent": aid, "text": text}
             # 優先序：外殼這次選的 > 人設。都沒有就【不送這個鍵】——送空字串會把
             # 使用者在聊天端用 `model` 指令選的無聲清掉（要收回覆蓋請明選「還原預設」）。
-            if m := (str(d.get("model") or "").strip() or agents[aid].model):
+            pick = str(d.get("model") or "").strip()
+            if pick == MODEL_RESET:
+                cogito_pick.pop(aid, None)
+                _dirty = True
+            elif pick:
+                cogito_pick[aid] = pick
+                _dirty = True
+            if m := cogito_model_for(aid):
                 payload["model"] = cogito_model(m)
-                model_sent[aid] = "" if m == MODEL_RESET else m
+                model_sent[aid] = m
+                _dirty = True
+            elif model_sent.get(aid) != "":
+                # 沒有任何指定、但那個頻道可能還留著舊設定（例：先前橋每次都送 claude-opus-5）或狀態未知：送一次 reset 收回，之後就不再送
+                payload["model"] = MODEL_RESET
+                model_sent[aid] = ""
                 _dirty = True
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
                               headers=cogito_headers(text))
@@ -4470,7 +4523,7 @@ def save_state() -> None:
             "approval_src": approval_src,
             "approval_meta": approval_meta, "approval_at": approval_at,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
-            "model_sent": model_sent,
+            "model_sent": model_sent, "cogito_pick": cogito_pick, "cli_pick": cli_pick,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
@@ -4507,7 +4560,14 @@ def load_state() -> None:
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
     sched_last.update(data.get("sched_last", {}))
-    model_sent.update(data.get("model_sent", {}))
+    if "cli_pick" in data:
+        model_sent.update(data.get("model_sent", {}))
+        cogito_pick.update(data.get("cogito_pick", {}))
+        cli_pick.update(data.get("cli_pick", {}))
+    else:
+        # 舊格式（2026-09-17 前）：model_sent 同時當 Claude Code 與 cogito 的選擇。Claude 型號搬給 Claude Code；
+        # cogito 那邊當作「不知道現在設成什麼」，第一次派工送一次 reset 收回（見 office_dispatch）。
+        cli_pick.update({k: v for k, v in data.get("model_sent", {}).items() if v and is_claude_model(v)})
     engine_sent.update(data.get("engine_sent", {}))
     if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
         cli_caps.update(saved)

@@ -121,13 +121,10 @@ class Agent:
 
     @property
     def model(self) -> str:
-        """這位員工跑哪個模型：persona 的 `model:`，沒寫就用辦公室預設 OFFICE_DEFAULT_MODEL（預設 claude-opus-5[1m]）。
-
-        2026-09-15 Aaron 定：每個人預設都跑 Opus（1M 上下文），只有派子 agent 時才依任務難度降級——
-        降級是主 agent 每次派工的判斷（見 personas/office.md），不是寫死在人設裡的長期屬性。
-        人設的 `model:` 仍保留當例外（某人確定要長期跑別的）；設 OFFICE_DEFAULT_MODEL= 空字串＝不給預設、交回引擎自己的預設。
-        `[1m]` 是 Claude Code 的寫法；送 cogito 時橋會拿掉（API 的 claude-opus-5 本身就是 1M）。"""
-        return str(self.persona.get("model") or os.environ.get("OFFICE_DEFAULT_MODEL", "claude-opus-5[1m]")).strip()
+        """人設明寫的模型（`model:`）；沒寫就是空。各引擎沒指定時用什麼，由 main.py 依引擎決定——
+        Claude Code 用 OFFICE_DEFAULT_MODEL（預設 claude-opus-5[1m]）、cogito 交給它自己的設定（或 OFFICE_COGITO_MODEL）、Codex 用它自己的預設。
+        2026-09-17 改：先前這裡回一個全辦公室共用的 Claude 預設，cogito 改走 OpenAI 之後，每次派工都送 claude 過去、被靜默忽略。"""
+        return str(self.persona.get("model") or "").strip()
 
     @property
     def persona_prompt(self) -> str:

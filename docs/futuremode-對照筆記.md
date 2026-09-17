@@ -340,6 +340,21 @@ Aaron 有了 Codex Pro 與 API key。先接 **Codex Pro（ChatGPT 訂閱）**，
 - 還沒做：API key 那半（cogito 目前一個行程只有一個 provider，要讓某些員工走 OpenAI 得改 cogito）、Codex hooks 接審批、Codex 子 agent 投影。
 測試 `codex_engine`（假 codex 照實測事件形狀），拔掉 API key 過濾、resume 模型沿用各自驗紅。
 
+### cogito 支援 GPT 之後的整合修正（2026-09-17）
+
+cogito 新增依模型 id 路由 provider、OpenAI ModelLister、GPT 等級別名（luna／terra／sol）、依實際模型計價；本機 cogito 已設
+`COGITO_PROVIDER=openai`、`OPENAI_MODEL=gpt-5.6-sol`、沒有 Anthropic 金鑰。橋這邊三個問題，已修：
+1. **每次派給 cogito 都送 claude-opus-5**（9/15「全員 Opus」的預設共用給兩個引擎）→ cogito 的 OpenAI Configure 沒有 Anthropic 金鑰就忽略、跑 gpt-5.6-sol，
+   畫面與 cogito 的 `model` 指令卻顯示 claude。改：預設各引擎一份——Claude Code `OFFICE_DEFAULT_MODEL`、cogito 不指定（或 `OFFICE_COGITO_MODEL`）、Codex 自己的。
+   `Agent.model` 回到「人設明寫的」。cogito 頻道狀態未知或還留著舊設定時，送一次 `reset` 收回，之後不再送。
+2. **Claude Code 與 cogito 共用模型清單與記住的選擇** → cogito 開著時 Claude Code 的選單是 GPT，選下去 `--model gpt-…` 直接失敗；
+   在 cogito 選的 GPT 也會漏到 Claude Code。改：`cli_pick`／`cogito_pick` 分開（Codex 本來就是 `codex_model_sent`），
+   `/office/models` 回 `cli_list`（橋自己問 Anthropic，只列 Claude）與 `models`（cogito 的，cogito 沒開就空、source=down），
+   Claude Code 只收 Claude 型號與別名。舊狀態檔的 `model_sent` 遷移：Claude 型號搬給 Claude Code，cogito 當作不知道。外殼模型選單依引擎換清單、預設與「上次實際跑的」。
+3. **守則寫死 Opus** → office.md、kanban.md 改成「沿用你自己的主模型」（cogito 在 GPT 上會把三個等級對應成小／中／旗艦）。
+測試 `model_per_agent` 重寫（cogito 預設、reset 一次、OFFICE_COGITO_MODEL、記住與還原、Claude Code 不收 GPT、舊狀態遷移），
+把 Claude 預設塞回 cogito、拿掉 Claude Code 的型號檢查各自驗紅。建議另外處理（cogito 設定）：`COGITO_REFLECT_MODEL` 已不在 .env，背景反思跑旗艦 sol。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。
