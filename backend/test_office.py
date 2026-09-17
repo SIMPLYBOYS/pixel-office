@@ -467,6 +467,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    codex_engine()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -2823,6 +2824,140 @@ def isolation_at_import() -> None:
     last = (r.stdout.strip().splitlines() or [""])[-1]
     assert last == "office_state_test.json True True True", f"單跑測試會碰到真環境：{last!r}\n{r.stderr[-400:]}"
     print("  ✓ 只 import 測試模組就隔離（工作紀錄／帳本／Claude／cogito）")
+
+
+def codex_engine() -> None:
+    """Codex 引擎（實測 0.154.0 的事件形狀）：派工 → codex exec --json，提示走 stdin；不帶 OPENAI_API_KEY（走訂閱）；
+    事件翻成工具／結果／訊息；收工帶用量與 rollout 裡實際跑的模型；老闆派的活接同一條 thread（resume ＋ 那條的模型），
+    班表開新的；回溯讀 rollout；不支援的插話、看板明講；失敗（turn.failed）標中斷。"""
+    import tempfile
+    fake = r"""#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+prompt = sys.stdin.read()
+home = os.environ.get("CODEX_HOME", "")
+with open(os.environ["FAKE_CODEX_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": argv, "prompt": prompt, "has_openai_key": "OPENAI_API_KEY" in os.environ, "home": home}, ensure_ascii=False) + "\n")
+tid = argv[argv.index("resume") + 1] if "resume" in argv else "01a0-new-%d" % len(open(os.environ["FAKE_CODEX_LOG"]).read().splitlines())
+day = os.path.join(home, "sessions", "2026", "09", "17"); os.makedirs(day, exist_ok=True)
+import datetime
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+with open(os.path.join(day, "rollout-2026-09-17T10-00-00-%s.jsonl" % tid), "a", encoding="utf-8") as f:
+    for rec in ({"timestamp": "2026-09-17T02:00:00Z", "type": "turn_context", "payload": {"model": "gpt-test-model"}},
+                {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<系統注入>"}]}},
+                {"timestamp": now, "type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": "cat a.py"}},
+                {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "看完了"}]}}):
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+out = [{"type": "thread.started", "thread_id": tid}, {"type": "turn.started"}]
+if os.environ.get("FAKE_CODEX_FAIL"):
+    out.append({"type": "turn.failed", "error": {"message": "模型不支援"}})
+else:
+    out += [
+      {"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "我先讀檔"}},
+      {"type": "item.started", "item": {"id": "i1", "type": "command_execution", "command": "cat a.py", "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
+      {"type": "item.completed", "item": {"id": "i1", "type": "command_execution", "command": "cat a.py", "aggregated_output": "print(1)", "exit_code": 0, "status": "completed"}},
+      {"type": "item.started", "item": {"id": "i2", "type": "command_execution", "command": "curl x", "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
+      {"type": "item.completed", "item": {"id": "i2", "type": "command_execution", "command": "curl x", "aggregated_output": "network blocked", "exit_code": 6, "status": "failed"}},
+      {"type": "item.completed", "item": {"id": "i3", "type": "error", "message": "resume 換了模型"}},
+      {"type": "item.completed", "item": {"id": "i4", "type": "agent_message", "text": "看完了"}},
+      {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 60, "cache_write_input_tokens": 0, "output_tokens": 20}},
+    ]
+for o in out:
+    print(json.dumps(o, ensure_ascii=False), flush=True)
+sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakecodex"; bin_.write_text(fake, encoding="utf-8"); bin_.chmod(0o755)
+        log = Path(tmp) / "codex.log"
+        old = (main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR)
+        main.CODEX_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
+        main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL")}
+        os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real"})
+        os.environ.pop("FAKE_CODEX_FAIL", None); os.environ.pop("OFFICE_CODEX_MODEL", None)
+        main.engine_sent.pop("p05", None); main.codex_threads.clear(); main.codex_model.clear()
+
+        def run(body: dict) -> dict:
+            main.busy.discard("p05")
+            before = (main.last_report.get("p05") or {}).get("id")
+            r = c.post("/office/dispatch", json={"agent": "p05", **body}).json()
+            assert r["ok"] and r.get("engine") == "codex", r
+            for _ in range(200):
+                time.sleep(0.05)
+                cur = main.last_report.get("p05")
+                if cur and cur.get("id") != before and cur["status"] != "working":
+                    return cur
+            raise AssertionError(f"Codex 任務沒收工：{main.last_report.get('p05')}")
+
+        try:
+            with TestClient(main.app) as c:
+                main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+                main.engine_sent.pop("p05", None); main.codex_threads.clear()
+                assert main.engine_of("p05", "codex") == main.ENGINE_CODEX
+                card = run({"text": "看一下 a.py", "engine": "codex"})
+                rec = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+                base = main.CHANNELS_DIR / "office_p05"
+                a = rec["argv"]
+                assert a[:2] == ["exec", "--json"] and "--skip-git-repo-check" in a and a[a.index("-s") + 1] == "workspace-write" \
+                    and a[a.index("-C") + 1] == str(base) and a[-1] == "-" and "resume" not in a and "-m" not in a, a
+                assert rec["prompt"] == "看一下 a.py", "提示走 stdin"
+                assert rec["has_openai_key"] is False, "子行程拿到 OPENAI_API_KEY——Codex 會改走 API 計費而不是訂閱"
+                assert rec["home"] == str(Path(tmp) / "codexhome"), "OFFICE_CODEX_HOME 要傳成 CODEX_HOME"
+                assert card["status"] == "ok" and card["engine"] == "codex" and card["session"].startswith("01a0-new-"), card
+                assert card["model"] == "gpt-test-model" and card["usage"]["in"] == 100 and card["usage"]["cache_read"] == 60, card
+                evs = [e["text"] for e in card["events"]]
+                assert any("▸ shell" in x for x in evs) and any("✓ shell" in x for x in evs) and any("✗ shell" in x for x in evs), evs
+                assert any("我先讀檔" in x for x in evs) and any("resume 換了模型" in x for x in evs), evs
+                assert main.codex_model["p05"] == "gpt-test-model"
+                done = [e for e in main.audit_recent("p05") if e["kind"] == "task.done"][0]
+                assert done["engine"] == "codex" and done["model"] == "gpt-test-model", done
+                tr = c.get(f"/office/trace/p05/{card['id']}").json()
+                assert tr["ok"] and tr["engine"] == "codex" and [s["kind"] for s in tr["steps"]] == ["tool_use", "assistant"], tr
+                tid = card["session"]
+                # 老闆再派一件：接同一條 thread，帶回那條的模型（不帶的話 resume 會被換成 Codex 目前的預設）
+                card2 = run({"text": "繼續"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[-3:] == ["resume", tid, "-"] and a[a.index("-m") + 1] == "gpt-test-model", a
+                assert card2["session"] == tid, card2
+                # 班表任務開新的，也不蓋掉老闆那條
+                main.busy.discard("p05")
+                before = (main.last_report.get("p05") or {}).get("id")
+                assert c.post("/office/dispatch", json={"agent": "p05", "text": "例行", "engine": "codex", "scheduled": True}).json()["ok"]
+                for _ in range(200):
+                    time.sleep(0.05)
+                    cur = main.last_report.get("p05")
+                    if cur and cur.get("id") != before and cur["status"] != "working":
+                        break
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert "resume" not in a, a
+                assert list(main.codex_threads.values()) == [tid], main.codex_threads
+                # 不支援的明講：插話、看板
+                main.busy.add("p05")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 補一句"}).json()
+                assert r["ok"] is False and "不支援插話" in r["error"], r
+                main.busy.discard("p05")
+                main.busy.discard(main.KANBAN)
+                r = c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "開會", "engine": "codex"}).json()
+                assert r["ok"] is False and "看板暫不支援 Codex" in r["error"], r
+                main.engine_sent.pop(main.KANBAN, None)
+                # 失敗：turn.failed → 中斷、帶原因
+                os.environ["FAKE_CODEX_FAIL"] = "1"
+                card3 = run({"text": "會失敗的", "engine": "codex"})
+                assert card3["status"] == "error" and "模型不支援" in (card3.get("report") or ""), card3
+                # 找不到 Codex 就不給這個引擎
+                main.CODEX_CMD = str(Path(tmp) / "沒有這個執行檔")
+                assert main.engine_of("p05", "codex") == main.ENGINE_COGITO
+        finally:
+            main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR = old
+            main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            main.engine_sent.pop("p05", None); main.engine_sent.pop(main.KANBAN, None)
+            main.codex_threads.clear(); main.codex_model.clear(); main.busy.discard("p05")
+    print("  ✓ Codex 引擎：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
 
 
 def audit_ledger() -> None:

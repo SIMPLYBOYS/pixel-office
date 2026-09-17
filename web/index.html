@@ -488,6 +488,7 @@
         <select id="engineSel">
           <option value="cogito">cogito（API 計費）</option>
           <option value="cli">Claude Code（訂閱額度）</option>
+          <option value="codex">Codex（ChatGPT 訂閱）</option>
         </select>
         <span class="note" id="engineNote"></span>
       </div>
@@ -1000,8 +1001,12 @@ loadModels();
 
 function paintEngineRow(a, workingNow) {
   const row = $('engineRow'), sel = $('engineSel');
-  row.hidden = !modelInfo.cli;   // CLI 找不到就一個像素都不多（入口資料驅動）
+  row.hidden = !(modelInfo.cli || modelInfo.codex);   // 兩個 CLI 都找不到就一個像素都不多（入口資料驅動）
   if (row.hidden) return;
+  for (const o of sel.options) {   // 找不到的引擎不給選（Claude Code 與 Codex 各自判斷）
+    if (o.value === 'cli') o.hidden = !modelInfo.cli;
+    if (o.value === 'codex') o.hidden = !modelInfo.codex;
+  }
   if (!sel.dataset.bound) {
     sel.onchange = () => updateComposer();
     sel.dataset.bound = '1';
@@ -1017,6 +1022,14 @@ function paintEngineRow(a, workingNow) {
   }
   sel.disabled = workingNow;
   const cli = sel.value === 'cli';
+  if (sel.value === 'codex') {
+    // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
+    const used = modelInfo.codex_models?.[selected];
+    $('engineNote').textContent = `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`
+      + (used ? `　上次實際跑的是 ${used}` : '') + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
+    $('modelRow').hidden = true;   // Codex 的型號跟 Claude 那份清單不同：這版用它自己的預設（或 OFFICE_CODEX_MODEL）
+    return;
+  }
   $('engineNote').textContent = cli
     ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
       + (cogitoDown ? '　⚠ cogito 沒開，先走 CLI' : '')

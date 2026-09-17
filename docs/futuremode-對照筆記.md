@@ -324,6 +324,21 @@ Aaron 定：每個員工預設跑 `claude-opus-5[1m]`；只有派子 agent 時�
 - **cogito 子 agent**：`spawn_subagent` 先前沒有 model 參數（只吃具名 agent 檔寫死的值）。cogito `38b1dd3` 補上 `model`（只收 haiku／sonnet／opus），
   蓋過定義；引擎端解成 Claude id，主引擎不是 Claude 就忽略沿用。cogito 的子卡目前**不顯示**子 agent 模型（只在 cogito log）。
 
+### Codex 成為第三個引擎（2026-09-17）
+
+Aaron 有了 Codex Pro 與 API key。先接 **Codex Pro（ChatGPT 訂閱）**，做法照 Claude Code 那條：`codex exec --json` 非互動。實測 codex-cli 0.154.0：
+- 事件：`thread.started{thread_id}`、`item.started/item.completed{item.type}`（見過 agent_message、command_execution、error＝警告）、
+  `turn.completed{usage}`、`error`、`turn.failed{error.message}`。事件**不報模型**，模型只在 rollout（`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`）的 turn_context。
+- 人設：Codex 讀工作區 `AGENTS.md`，橋本來就同步了（實測「小測報到」）。
+- 接續：`codex exec --json --skip-git-repo-check … resume <thread> -`（旗標要放在 resume 前面，否則「不在信任目錄」）。
+  **resume 不帶 -m 會被換成 Codex 目前的預設**（gpt-5.6-sol → gpt-6-astra 並警告），所以帶回那條 thread 記錄的模型。
+- exec 的 approval_policy 是 never、workspace-write 沙箱預設沒有網路；沙箱外操作直接失敗讓模型改道。
+- 橋：`ENGINE_CODEX`、`run_codex_task`（事件→office 事件、用量與實際模型、老闆派的活接同一條 thread、班表開新的、/stop 砍行程）、
+  `trace_codex`（讀 rollout）、外殼引擎選單多 Codex；子行程濾掉 OPENAI_API_KEY／CODEX_API_KEY（同 Claude Code 的計費坑）。
+- 明講不支援：插話（exec 沒有第二則訊息入口）、審批（never）、看板（主持人要派子 agent，Codex 的 multi_agent 事件還沒接）、Codex 型號選單。
+- 還沒做：API key 那半（cogito 目前一個行程只有一個 provider，要讓某些員工走 OpenAI 得改 cogito）、Codex hooks 接審批、Codex 子 agent 投影。
+測試 `codex_engine`（假 codex 照實測事件形狀），拔掉 API key 過濾、resume 模型沿用各自驗紅。
+
 ## 四、一句話總結
 
 排程器早就在，缺的是「每天」這個粒度與誠實的資料源；別為了數字員工去用 cogito 的內建 cron——那條辦公室看不見。
