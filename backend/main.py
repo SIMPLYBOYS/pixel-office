@@ -3134,6 +3134,10 @@ def trace_codex(session: str, t0: float, t1: float) -> tuple[list[dict], str]:
 # 橋開審批卡、等老闆決定；--input-format stream-json 讓 stdin 保持開著，/steer 就是再送一則使用者訊息。
 # 投影不用改：審批卡、倒數、走到老闆房門口，全部沿用 cogito 那條。
 HOOK_SCRIPT = Path(__file__).parent / "tools" / "office_permission_hook.py"
+# 工具守門（PreToolUse）：員工呼叫高風險 MCP 工具前用白名單檢查參數。matcher 是 Claude Code 的工具名樣式。
+# 2026-09-17 安全稽核 Critical #1：jobspy MCP 把參數拼進 shell 字串執行——根本修法（改參數陣列）之前先擋在這裡。
+GUARD_SCRIPT = Path(__file__).parent / "tools" / "office_tool_guard.py"
+GUARD_MATCHER = "mcp__jobspy__.*"
 CLI_APPROVAL_S = float(os.environ.get("OFFICE_CLI_APPROVAL_S", "300"))   # 無人回應就自動拒絕（與 cogito 同款 5 分鐘）
 cli_permission: dict[str, asyncio.Future] = {}   # aid -> 等老闆決定的 future（allow?, why）
 cli_turns: dict[str, int] = {}                    # aid -> 還要等幾個 result 才算收工（1 ＋ 插話數）
@@ -3142,8 +3146,10 @@ CWD_AGENT_RE = re.compile(r"/office_(kanban|p\d+)(?:/|$)")
 
 
 def sync_office_hook() -> str:
-    """把審批 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
-    掛在 profile 而不是各工作區：權限線是辦公室的制度，不該每個員工各一份、漏一個就變成無聲拒絕。"""
+    """把辦公室的兩個 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
+    - PermissionRequest：審批 hook（權限請求交給辦公室審批）
+    - PreToolUse：工具守門（jobspy MCP 的參數白名單；2026-09-17 安全稽核 Critical #1）
+    掛在 profile 而不是各工作區：權限線是辦公室的制度，不該每個員工各一份、漏一個就變成無聲拒絕或無聲放行。"""
     cfg = os.environ.get("CLAUDE_CONFIG_DIR")
     if not cfg:
         return "skip"
@@ -3151,22 +3157,34 @@ def sync_office_hook() -> str:
     try:
         d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     except ValueError:
-        print(f"⚠ {p} 不是合法 JSON，審批 hook 沒掛上——CLI 員工的權限請求會一律被拒")
+        print(f"⚠ {p} 不是合法 JSON，審批 hook 與工具守門都沒掛上——CLI 員工的權限請求會一律被拒、jobspy 參數沒人檢查")
         return "skip"
-    want = {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}
-    entries = d.setdefault("hooks", {}).setdefault("PermissionRequest", [])
-    for entry in entries:
-        for h in entry.get("hooks", []):
-            if h.get("command") == want["command"]:
-                if h.get("timeout") == want["timeout"]:
-                    return "same"
+    changed = False
+    for event, matcher, want in (
+            ("PermissionRequest", "", {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}),
+            ("PreToolUse", GUARD_MATCHER, {"type": "command", "command": str(GUARD_SCRIPT), "timeout": 10})):
+        entries = d.setdefault("hooks", {}).setdefault(event, [])
+        found = None
+        for entry in entries:
+            for h in entry.get("hooks", []):
+                if h.get("command") == want["command"]:
+                    found = (entry, h)
+        if found is None:
+            entries.append({"matcher": matcher, "hooks": [want]})
+            changed = True
+        else:
+            entry, h = found
+            if h.get("timeout") != want["timeout"]:
                 h["timeout"] = want["timeout"]
-                p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                return "wrote"
-    entries.append({"matcher": "", "hooks": [want]})
+                changed = True
+            if entry.get("matcher", "") != matcher:   # 守門的對象被改掉＝等於沒守，改回來
+                entry["matcher"] = matcher
+                changed = True
+    if not changed:
+        return "same"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"審批 hook 已掛進 {p}")
+    print(f"審批 hook／工具守門已同步進 {p}")
     return "wrote"
 
 
