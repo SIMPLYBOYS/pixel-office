@@ -3072,6 +3072,21 @@ def office_mcp_servers() -> dict[str, dict]:
             and (v.get("command") or (v.get("url") and not v.get("headers")))}
 
 
+def office_mcp_allowed() -> set[str]:
+    """員工 Claude Code profile 整台放行的 MCP 伺服器（settings.json 的 permissions.allow 裡的 mcp__<名稱> 或 mcp__<名稱>__*）。"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return set()
+    try:
+        allow = json.loads((Path(cfg).expanduser() / "settings.json").read_text(encoding="utf-8"))["permissions"]["allow"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    return {m.group(1) for x in allow if isinstance(x, str) and (m := re.fullmatch(r"mcp__([A-Za-z0-9_-]+?)(?:__\*)?", x))}
+
+
+USER_AGENT_SKILLS = Path.home() / ".agents" / "skills"   # 你本人的跨工具技能目錄：Codex 不管 CODEX_HOME 都會讀
+
+
 def codex_parity_args(aid: str, base: Path) -> list[str]:
     """讓 Codex 員工拿到跟 Claude Code 員工一樣的指令與工具（2026-09-17：同一個人設不該因為換廠商就換一種做事方式）。
     實測 0.154（codex debug prompt-input）：
@@ -3079,9 +3094,14 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
       project_root_markers=[] 讓它只讀 cwd 那一份——不管工作區是不是 git repo，結果都一樣。
     - 綁 repo 時 cwd 是 worktree：人設在上一層讀不到（Claude Code 會往上找 CLAUDE.md，Codex 不會），用 developer_instructions 帶。
     - MCP：照抄員工 profile 的 mcpServers。網頁：開內建網頁搜尋（Claude Code 的 WebFetch／WebSearch 對應它，見 personas/codex.md）。
-      shell 仍然沒有網路（workspace-write 沙箱），跟任務文寫的「Bash 在這裡沒有網路」一致。"""
+      shell 仍然沒有網路（workspace-write 沙箱），跟任務文寫的「Bash 在這裡沒有網路」一致。
+    - MCP 核准：exec 模式的審批政策是 never，沒設就一律擋（實測：「MCP tool call requires approval」）。
+      跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的照樣被擋。
+    - 你本人的 ~/.agents/skills 關掉：Claude Code 員工看不到它們；實測 firecrawl 技能寫著「MUST replace WebFetch and WebSearch」，
+      直接跟辦公室的工具對照打架。Codex 自己內建的技能（CODEX_HOME 底下）不動。"""
     out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"']
     toml = lambda v: json.dumps(str(v), ensure_ascii=False)   # JSON 字串就是合法的 TOML 字串；ensure_ascii=False 避免 emoji 變成 TOML 不收的代理對
+    allowed = office_mcp_allowed()
     for name, srv in office_mcp_servers().items():
         if srv.get("command"):
             parts = [f"command={toml(srv['command'])}"]
@@ -3092,7 +3112,11 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
                 parts.append("env={" + ", ".join(f"{toml(k)}={toml(v)}" for k, v in srv["env"].items()) + "}")
         else:
             parts = [f"url={toml(srv['url'])}"]
+        if name in allowed:
+            parts.append('default_tools_approval_mode="approve"')
         out += ["-c", f"mcp_servers.{name}={{{', '.join(parts)}}}"]
+    if skills := sorted(USER_AGENT_SKILLS.glob("*/SKILL.md")):
+        out += ["-c", "skills.config=[" + ", ".join(f"{{path={toml(p)}, enabled=false}}" for p in skills) + "]"]
     home = CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None
     src = Path(__file__).parent / "personas" / f"{aid}.md"
     try:

@@ -3061,7 +3061,11 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
             "remote": {"type": "http", "url": "https://mcp.example.com/"},
             "withkey": {"type": "http", "url": "https://mcp.example.com/", "headers": {"Authorization": "Bearer x"}},
             "bad.name": {"command": "sh"}}}), encoding="utf-8")
+        (prof / "settings.json").write_text(json.dumps({"permissions": {"allow": ["mcp__jobspy", "mcp__remote__*", "mcp__job104__one_tool"]}}), encoding="utf-8")
         os.environ["CLAUDE_CONFIG_DIR"] = str(prof)
+        old_skills, main.USER_AGENT_SKILLS = main.USER_AGENT_SKILLS, Path(tmp) / "agents-skills"
+        for sk in ("firecrawl", "humanizer"):
+            (main.USER_AGENT_SKILLS / sk).mkdir(parents=True); (main.USER_AGENT_SKILLS / sk / "SKILL.md").write_text("x", encoding="utf-8")
         gate = Path(tmp) / "approve"
         os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real",
                            "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL,FAKE_CODEX_APPROVE", "FAKE_CODEX_APPROVE": str(gate)})
@@ -3094,9 +3098,13 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 # 跟 Claude Code 員工對齊（同一個人設不因換廠商換做法）：只讀 cwd 的 AGENTS.md、開網頁搜尋、MCP 照抄員工 profile
                 cs = [a[i + 1] for i, x in enumerate(a) if x == "-c"]
                 assert "project_root_markers=[]" in cs and 'web_search="live"' in cs, a
-                assert 'mcp_servers.jobspy={command="node", args=["/mcp/jobspy/index.js"], env={"DOCKER_CMD"="docker"}}' in cs \
+                # 核准跟 Claude Code 員工同一條線：整台放行的設 approve（exec 模式沒設就一律擋）；只放行單一工具的不整台放行
+                assert 'mcp_servers.jobspy={command="node", args=["/mcp/jobspy/index.js"], env={"DOCKER_CMD"="docker"}, default_tools_approval_mode="approve"}' in cs \
                     and 'mcp_servers.job104={command="npx", args=["-y", "mcp-server-104@0.2.0"]}' in cs \
-                    and 'mcp_servers.remote={url="https://mcp.example.com/"}' in cs, cs
+                    and 'mcp_servers.remote={url="https://mcp.example.com/", default_tools_approval_mode="approve"}' in cs, cs
+                sk = str(main.USER_AGENT_SKILLS)
+                assert f'skills.config=[{{path="{sk}/firecrawl/SKILL.md", enabled=false}}, {{path="{sk}/humanizer/SKILL.md", enabled=false}}]' in cs, \
+                    "你本人的 ~/.agents/skills 不給 Codex 員工（Claude Code 員工也看不到）"
                 assert not any(x.startswith(("mcp_servers.withkey", "mcp_servers.bad")) for x in cs), "帶 headers 的（金鑰）與名稱不合法的不抄"
                 assert not any(x.startswith("developer_instructions=") for x in cs), "在工作區根：人設已經在 cwd 的 AGENTS.md，不重複帶"
                 assert c.get("/office/models").json()["codex_mcp"] == ["jobspy", "job104", "remote"]
@@ -3239,6 +3247,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
         finally:
             main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR = old
             main.CODEX_HOME_DEFAULT = old_default
+            main.USER_AGENT_SKILLS = old_skills
             main.codex_login_state.clear(); main.codex_login_state["status"] = "idle"
             main._audit_last.update({"seq": 0, "hash": "", "path": None})
             for k, v in saved_env.items():
