@@ -2886,6 +2886,7 @@ CODEX_SANDBOX = os.environ.get("OFFICE_CODEX_SANDBOX", "workspace-write")   # re
 ENGINE_CODEX = "codex"
 codex_model: dict[str, str] = {}     # aid -> Codex 上次實際跑的模型（從 rollout 的 turn_context 讀，供介面揭露）
 codex_threads: dict[str, str] = {}   # "<aid>|<工作目錄>" -> thread id：老闆派的活接著同一條（隨 state 持久化）
+codex_model_sent: dict[str, str] = {}   # aid -> 外殼替 Codex 選的模型（跟 Claude 那份 model_sent 分開：型號互不相通）
 
 
 def codex_available() -> bool:
@@ -2895,6 +2896,20 @@ def codex_available() -> bool:
 def codex_home() -> Path:
     """員工用的 CODEX_HOME：OFFICE_CODEX_HOME 有設就用它（建議跟你本人的 ~/.codex 分開，理由同 ~/.claude-office），否則沿用 CODEX_HOME／~/.codex。"""
     return Path(os.environ.get("OFFICE_CODEX_HOME") or os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+
+
+def codex_model_list() -> list[dict]:
+    """Codex 可選的模型：讀 Codex 自己的 models_cache.json（它向 OpenAI 拿、依帳號方案過濾過的清單），
+    只列 visibility=list 的、照 priority 排。員工的 CODEX_HOME 還沒跑過就退回你本人的 ~/.codex 那份；都沒有就空（選單只剩「Codex 預設」）。"""
+    for home in (codex_home(), Path.home() / ".codex"):
+        try:
+            data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ms = [m for m in (data.get("models") or []) if isinstance(m, dict) and m.get("slug") and m.get("visibility", "list") == "list"]
+        ms.sort(key=lambda m: (m.get("priority") if isinstance(m.get("priority"), int) else 999, str(m["slug"])))
+        return [{"id": str(m["slug"]), "name": str(m.get("display_name") or m["slug"]), "description": str(m.get("description") or "")} for m in ms]
+    return []
 
 
 def codex_rollout(tid: str) -> Path | None:
@@ -3766,6 +3781,8 @@ async def office_models():
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
             "cli": cli_available(), "cli_cmd": CLI_CMD,
             "codex": codex_available(), "codex_cmd": CODEX_CMD, "codex_models": dict(codex_model),
+            "codex_list": codex_model_list() if codex_available() else [],
+            "codex_effective": dict(codex_model_sent), "codex_default": os.environ.get("OFFICE_CODEX_MODEL", "").strip(),
             "engines": {aid: engine_of(aid) for aid in agents},
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
@@ -3871,9 +3888,15 @@ async def office_dispatch(d: dict):
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         if codex_mode:
-            # 模型：只認這次明選的非 Claude 型號；其餘交給 run_codex_task（接續那條 thread 的模型 > OFFICE_CODEX_MODEL > Codex 預設）。
-            # 辦公室預設是 Claude 的 claude-opus-5[1m]，不能送給 Codex。
-            codex_want = pick if pick and pick != MODEL_RESET and not pick.startswith("claude") else ""
+            # 模型：外殼這次選的 > 上次替 Codex 選過的（記住）> 交給 run_codex_task（接續那條 thread 的模型 > OFFICE_CODEX_MODEL > Codex 預設）。
+            # 辦公室預設是 Claude 的 claude-opus-5[1m]，Claude 型號一律不送給 Codex。「還原」＝收回選過的。
+            if pick == MODEL_RESET:
+                codex_model_sent.pop(aid, None)
+                _dirty = True
+            elif pick and not pick.startswith("claude"):
+                codex_model_sent[aid] = pick
+                _dirty = True
+            codex_want = codex_model_sent.get(aid, "")
             asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled"))))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want}
         if pick:
@@ -4452,7 +4475,7 @@ def save_state() -> None:
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
             "cli_caps": cli_caps, "cli_model": cli_model,
-            "codex_model": codex_model, "codex_threads": codex_threads}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
+            "codex_model": codex_model, "codex_threads": codex_threads, "codex_model_sent": codex_model_sent}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -4491,6 +4514,7 @@ def load_state() -> None:
     cli_model.update(data.get("cli_model", {}))
     codex_model.update(data.get("codex_model", {}))
     codex_threads.update(data.get("codex_threads", {}))
+    codex_model_sent.update(data.get("codex_model_sent", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。

@@ -1024,10 +1024,9 @@ function paintEngineRow(a, workingNow) {
   const cli = sel.value === 'cli';
   if (sel.value === 'codex') {
     // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
-    const used = modelInfo.codex_models?.[selected];
     $('engineNote').textContent = `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`
-      + (used ? `　上次實際跑的是 ${used}` : '') + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
-    $('modelRow').hidden = true;   // Codex 的型號跟 Claude 那份清單不同：這版用它自己的預設（或 OFFICE_CODEX_MODEL）
+      + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
+    paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;
   }
   $('engineNote').textContent = cli
@@ -1050,8 +1049,44 @@ function paintEngineRow(a, workingNow) {
   }
 }
 
+// Codex 的模型選單：清單來自 Codex 自己的 models_cache（依帳號方案過濾過）。選了會記住（跟 Claude 那份分開），「還原」收回。
+// 沒選時實際跑哪個由橋決定：接續中的那條對話當初的模型 > OFFICE_CODEX_MODEL > Codex 預設——所以把「上次實際跑的」也講出來。
+function paintCodexModelRow(workingNow) {
+  const row = $('modelRow'), sel = $('modelSel');
+  const list = modelInfo.codex_list || [];
+  row.hidden = false;
+  const eff = modelInfo.codex_effective?.[selected] || '', dflt = modelInfo.codex_default || '';
+  const want = [['', dflt ? `Codex 預設（${dflt}）` : 'Codex 預設']]
+    .concat(list.map(m => [m.id, m.name || m.id]));
+  if (eff && !list.some(m => m.id === eff)) want.push([eff, eff]);   // 選過、但清單已經沒有的型號也要看得到
+  if (eff) want.push([modelInfo.reset || 'reset', '↺ 還原 Codex 預設']);
+  const sig = 'codex|' + selected + '|' + want.map(x => x[0]).join(',');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = want.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    sel.dataset.sig = sig;
+    sel.value = eff;   // 預選目前記住的那個，不是一律空白（否則選過之後畫面看不出來）
+  }
+  sel.disabled = workingNow;
+  sel.onchange = () => updateComposer();
+  const pick = sel.value, used = modelInfo.codex_models?.[selected];
+  const desc = list.find(m => m.id === pick)?.description;
+  $('modelNote').textContent =
+    (pick === (modelInfo.reset || 'reset') ? '這次派工收回選過的模型，改用 Codex 預設'
+     : pick && pick !== eff ? `這次派工改用 ${pick}——會記住，之後可選「還原」收回`
+     : pick ? `目前會用 ${pick}`
+     : '沒指定：接續中的對話沿用當初的模型，新對話用 Codex 預設')
+    + (desc ? `（${desc}）` : '')
+    + (used ? `　上次實際跑的是 ${used}` : '')
+    + (list.length ? '' : '　（還沒拿到 Codex 的模型清單：先用 Codex 跑一次就會有）');
+}
+
 function paintModelRow(a, workingNow) {
   const row = $('modelRow'), sel = $('modelSel');
+  // 這個人現在的引擎是 Codex：選單由 paintCodexModelRow 畫（它在引擎那排之後跑）。這裡不先畫 Claude 那份——
+  // 兩邊輪流重建會把使用者正在選的值洗掉（每次重畫都回到預選值）。換人時引擎選單還沒跟上，所以用跟 paintEngineRow 同一套判斷。
+  const es = $('engineSel');
+  const eng = es.dataset.for === selected ? es.value : (modelInfo.engines?.[selected] || 'cogito');
+  if (eng === 'codex' && modelInfo.codex) return;
   row.hidden = !(modelInfo.models || []).length;   // 沒有任何人設定過模型＝不畫這排
   if (row.hidden) return;
   const eff = modelInfo.effective?.[selected] || '', persona = a.model || '';

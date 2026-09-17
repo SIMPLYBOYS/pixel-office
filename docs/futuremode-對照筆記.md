@@ -335,7 +335,8 @@ Aaron 有了 Codex Pro 與 API key。先接 **Codex Pro（ChatGPT 訂閱）**，
 - exec 的 approval_policy 是 never、workspace-write 沙箱預設沒有網路；沙箱外操作直接失敗讓模型改道。
 - 橋：`ENGINE_CODEX`、`run_codex_task`（事件→office 事件、用量與實際模型、老闆派的活接同一條 thread、班表開新的、/stop 砍行程）、
   `trace_codex`（讀 rollout）、外殼引擎選單多 Codex；子行程濾掉 OPENAI_API_KEY／CODEX_API_KEY（同 Claude Code 的計費坑）。
-- 明講不支援：插話（exec 沒有第二則訊息入口）、審批（never）、看板（主持人要派子 agent，Codex 的 multi_agent 事件還沒接）、Codex 型號選單。
+- 明講不支援：插話（exec 沒有第二則訊息入口）、審批（never）、看板（主持人要派子 agent，Codex 的 multi_agent 事件還沒接）。
+- 模型選單（同日補，Aaron 回報選了 Codex 沒有模型可選）：清單讀 Codex 自己的 `$CODEX_HOME/models_cache.json`（它依帳號方案過濾過；只列 visibility=list、照 priority 排，員工的 home 還沒跑過就退回 ~/.codex 那份）。選擇記在 `codex_model_sent`，**跟 Claude 的 model_sent 分開**；優先序：這次選的 > 記住的 > 接續那條 thread 的模型 > OFFICE_CODEX_MODEL > Codex 預設；Claude 型號一律不送；「還原」收回。外殼兩份選單輪流重建會洗掉正在選的值，所以引擎是 Codex 時 Claude 那份不畫。
 - 還沒做：API key 那半（cogito 目前一個行程只有一個 provider，要讓某些員工走 OpenAI 得改 cogito）、Codex hooks 接審批、Codex 子 agent 投影。
 測試 `codex_engine`（假 codex 照實測事件形狀），拔掉 API key 過濾、resume 模型沿用各自驗紅。
 

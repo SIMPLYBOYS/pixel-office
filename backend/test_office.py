@@ -2931,6 +2931,28 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
                 assert "resume" not in a, a
                 assert list(main.codex_threads.values()) == [tid], main.codex_threads
+                # 模型清單：讀 Codex 自己的 models_cache，只列 visibility=list、照 priority 排
+                (Path(tmp) / "codexhome" / "models_cache.json").write_text(json.dumps({"models": [
+                    {"slug": "gpt-luna", "display_name": "Luna", "visibility": "list", "priority": 8},
+                    {"slug": "gpt-hidden", "display_name": "Hidden", "visibility": "hide", "priority": 1},
+                    {"slug": "gpt-astra", "display_name": "Astra", "visibility": "list", "priority": 1}]}), encoding="utf-8")
+                m = c.get("/office/models").json()
+                assert [x["id"] for x in m["codex_list"]] == ["gpt-astra", "gpt-luna"] and m["codex_effective"] == {}, m["codex_list"]
+                # 選了就用、會記住，而且蓋過接續那條 thread 的模型；Claude 型號不送；還原收回
+                card4 = run({"text": "用 luna", "engine": "codex", "model": "gpt-luna"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[a.index("-m") + 1] == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", a
+                assert "p05" not in main.model_sent or main.model_sent["p05"] != "gpt-luna", "Codex 的選擇不能寫進 Claude 那份"
+                run({"text": "沒選模型"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[a.index("-m") + 1] == "gpt-luna", f"選過的要記住：{a}"
+                assert c.get("/office/models").json()["codex_effective"]["p05"] == "gpt-luna"
+                run({"text": "給了 Claude 型號", "model": "claude-opus-5[1m]"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[a.index("-m") + 1] == "gpt-luna", f"Claude 型號不該送給 Codex：{a}"
+                run({"text": "還原", "model": main.MODEL_RESET})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[a.index("-m") + 1] == "gpt-test-model" and "p05" not in main.codex_model_sent, f"還原後回到接續那條的模型：{a}"
                 # 不支援的明講：插話、看板
                 main.busy.add("p05")
                 r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 補一句"}).json()
@@ -2956,8 +2978,8 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 else:
                     os.environ[k] = v
             main.engine_sent.pop("p05", None); main.engine_sent.pop(main.KANBAN, None)
-            main.codex_threads.clear(); main.codex_model.clear(); main.busy.discard("p05")
-    print("  ✓ Codex 引擎：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
+            main.codex_threads.clear(); main.codex_model.clear(); main.codex_model_sent.clear(); main.busy.discard("p05")
+    print("  ✓ Codex 引擎（含模型清單與選擇）：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
 
 
 def audit_ledger() -> None:
