@@ -391,6 +391,11 @@
   /* 說明自己佔一行：跟選單擠同一列的話，窄欄下兩邊都會折行 */
   .crew .note { color: #6b7280; flex-basis: 100%; font-size: 11px; }
   .crew .note:empty { display: none; }
+  .crew .codexlogin { flex-basis: 100%; font-size: 12px; line-height: 1.7; }
+  .codexlogin button { font: inherit; font-size: 11px; cursor: pointer; border: 1px solid #6d5a2a;
+                       background: #2b2417; color: var(--accent); border-radius: 6px; padding: 2px 10px; margin-right: 6px; }
+  .codexlogin code { font-size: 15px; letter-spacing: 1px; color: var(--accent); user-select: all; }
+  .codexlogin a { color: var(--accent); }
   .composer textarea:not(:disabled) { color: var(--text); }
   /* 底部對齊而不是 stretch：輸入框可以被拉高，送出鈕不該跟著長成一大塊黃色。
      貼齊輸入框下緣，跟大多數聊天介面的手感一致。 */
@@ -491,6 +496,7 @@
           <option value="codex">Codex（ChatGPT 訂閱）</option>
         </select>
         <span class="note" id="engineNote"></span>
+        <span class="codexlogin" id="codexLogin" hidden><button type="button" id="codexLoginBtn">登入 Codex</button><span id="codexLoginInfo"></span></span>
       </div>
       <div class="crew" id="modelRow" hidden>
         <label for="modelSel">模型</label>
@@ -1001,21 +1007,26 @@ function updateComposer() {
 let modelInfo = { models: [], reset: 'reset', effective: {} };
 async function loadModels() {
   try { modelInfo = await (await fetch('/office/models')).json(); } catch { /* 拿不到就不畫 */ }
+  if (modelInfo.codex_login_needed && codexLogin.status === 'idle') {   // 重新整理頁面時登入可能還在等：接回去
+    try { codexLogin = await (await fetch('/office/codex/login')).json(); } catch { /* 拿不到就當沒在登入 */ }
+    pollCodexLogin();
+  }
   if (selected) updateComposer();
 }
 loadModels();
 
 function paintEngineRow(a, workingNow) {
   const row = $('engineRow'), sel = $('engineSel');
-  row.hidden = !(modelInfo.cli || modelInfo.codex);   // 兩個 CLI 都找不到就一個像素都不多（入口資料驅動）
+  row.hidden = !(modelInfo.cli || modelInfo.codex || modelInfo.codex_login_needed);   // 兩個 CLI 都找不到就一個像素都不多（入口資料驅動）
   if (row.hidden) return;
   for (const o of sel.options) {   // 找不到的引擎不給選（Claude Code 與 Codex 各自判斷）
     if (o.value === 'cli') o.hidden = !modelInfo.cli;
     if (o.value === 'codex') {
-      // 裝了 Codex 但安全條件不符（沒有獨立 CODEX_HOME、沙箱被關）：選項留著但停用，把原因講出來，不讓人以為功能不見了
+      // 只差登入：照樣可選，選了旁邊出現「登入 Codex」。安全條件不符（沙箱被關、指到你本人的 ~/.codex）：
+      // 選項留著但停用，把原因講出來，不讓人以為功能不見了
       o.hidden = !modelInfo.codex && !modelInfo.codex_blocked;
-      o.disabled = !modelInfo.codex;
-      o.textContent = modelInfo.codex ? 'Codex（ChatGPT 訂閱）' : 'Codex（未啟用）';
+      o.disabled = !modelInfo.codex && !modelInfo.codex_login_needed;
+      o.textContent = modelInfo.codex ? 'Codex（ChatGPT 訂閱）' : modelInfo.codex_login_needed ? 'Codex（需登入）' : 'Codex（未啟用）';
       o.title = modelInfo.codex_blocked || '';
     }
   }
@@ -1034,9 +1045,12 @@ function paintEngineRow(a, workingNow) {
   }
   sel.disabled = workingNow;
   const cli = sel.value === 'cli';
+  paintCodexLogin(sel.value === 'codex' && !!modelInfo.codex_login_needed);
   if (sel.value === 'codex') {
     // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
-    $('engineNote').textContent = `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`
+    $('engineNote').textContent = (modelInfo.codex_login_needed
+      ? '還沒登入 Codex：按下面的按鈕，用瀏覽器登入你的 ChatGPT 帳號（員工用自己的一份登入，不碰你本人的 ~/.codex）'
+      : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`)
       + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;
@@ -1045,7 +1059,60 @@ function paintEngineRow(a, workingNow) {
     ? `用 ${modelInfo.cli_cmd || 'claude'} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
       + (cogitoDown ? '　⚠ cogito 沒開，先走 CLI' : '')
     : (modelInfo.cogito_up === false ? '⚠ cogito 沒開——現在派給它會失敗，開了再派或改選 CLI' : ''))
-    + (modelInfo.codex_blocked ? `　（Codex 未啟用：${modelInfo.codex_blocked}）` : '');
+    + (modelInfo.codex_blocked && !modelInfo.codex_login_needed ? `　（Codex 未啟用：${modelInfo.codex_blocked}）` : '');
+}
+
+// Codex 登入（device code）：橋在員工的 CODEX_HOME 起 `codex login --device-auth`，這裡只顯示網址與一次性驗證碼、
+// 輪詢到結束；憑證寫在橋那邊，不經過瀏覽器。登入成功就重拿 /office/models，引擎與模型選單自己變成可用。
+let codexLogin = { status: 'idle' }, codexLoginTimer = 0;
+function paintCodexLogin(show) {
+  const box = $('codexLogin'), btn = $('codexLoginBtn'), info = $('codexLoginInfo');
+  box.hidden = !show;
+  if (!show) return;
+  if (!btn.dataset.bound) {
+    btn.onclick = codexLoginClick;
+    btn.dataset.bound = '1';
+  }
+  const st = codexLogin, pending = st.status === 'pending';
+  btn.textContent = pending ? '取消登入' : st.status === 'idle' ? '登入 Codex' : '重新登入';
+  info.replaceChildren();
+  if (pending && st.code) {
+    const a = el('a', st.url || 'https://auth.openai.com/codex/device');
+    a.href = a.textContent; a.target = '_blank'; a.rel = 'noopener';
+    info.append('① 打開 ', a, '　② 輸入驗證碼 ', el('code', st.code), '（15 分鐘內有效，登入完成這裡會自己切換）');
+  } else if (pending) {
+    info.append(st.text || '等 Codex 產生驗證碼…');
+  } else if (st.status === 'failed') {
+    info.append(`登入沒有完成：${st.error || '原因不明'}`);
+  } else if (st.status === 'cancelled') {
+    info.append('已取消');
+  }
+}
+async function codexLoginClick() {
+  const btn = $('codexLoginBtn');
+  btn.disabled = true;
+  try {
+    const r = codexLogin.status === 'pending'
+      ? await (await fetch('/office/codex/login', { method: 'DELETE' })).json()
+      : await (await fetch('/office/codex/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+    codexLogin = r.ok ? r : { status: 'failed', error: r.error };
+  } catch (e) {
+    codexLogin = { status: 'failed', error: `連不上橋（${e.message}）` };
+  } finally {
+    btn.disabled = false;
+  }
+  pollCodexLogin();
+  if (selected) updateComposer();
+}
+function pollCodexLogin() {
+  clearTimeout(codexLoginTimer);
+  if (codexLogin.status === 'ok') { loadModels(); return; }
+  if (codexLogin.status !== 'pending') return;
+  codexLoginTimer = setTimeout(async () => {
+    try { codexLogin = await (await fetch('/office/codex/login')).json(); } catch { /* 下一輪再試 */ }
+    if (selected) updateComposer();
+    pollCodexLogin();
+  }, 2000);
 }
 
 // Codex 的模型選單：清單來自 Codex 自己的 models_cache（依帳號方案過濾過）。選了會記住（跟 Claude 那份分開），「還原」收回。

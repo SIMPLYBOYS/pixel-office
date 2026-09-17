@@ -2978,6 +2978,22 @@ def codex_engine() -> None:
     fake = r"""#!/usr/bin/env python3
 import json, os, sys
 argv = sys.argv[1:]
+if argv[:1] == ["login"]:   # 照實測 0.154 的 device-auth 輸出（帶 ANSI 顏色、網址與驗證碼各自一行），等測試「在瀏覽器按同意」
+    import time
+    assert argv == ["login", "--device-auth"], argv
+    print("Follow these steps to sign in with ChatGPT using device code authorization:", flush=True)
+    print("   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m", flush=True)
+    print("2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m", flush=True)
+    print("   \x1b[94mABCD-EFGH1\x1b[0m", flush=True)
+    gate = os.environ["FAKE_CODEX_APPROVE"]
+    while not os.path.exists(gate):
+        time.sleep(0.05)
+    if open(gate).read() != "ok":
+        print("Error logging in with device code: access denied", flush=True)
+        sys.exit(1)
+    open(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "w").write("{}")
+    print("Successfully logged in", flush=True)
+    sys.exit(0)
 prompt = sys.stdin.read()
 home = os.environ.get("CODEX_HOME", "")
 with open(os.environ["FAKE_CODEX_LOG"], "a", encoding="utf-8") as f:
@@ -3016,9 +3032,11 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
         old = (main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR)
         main.CODEX_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
         main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
-        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS")}
+        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS", "FAKE_CODEX_APPROVE")}
+        gate = Path(tmp) / "approve"
         os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real",
-                           "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL"})
+                           "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL,FAKE_CODEX_APPROVE", "FAKE_CODEX_APPROVE": str(gate)})
+        old_default = main.CODEX_HOME_DEFAULT
         (Path(tmp) / "codexhome").mkdir(); (Path(tmp) / "codexhome" / "auth.json").write_text("{}", encoding="utf-8")   # 獨立 home 已登入
         os.environ.pop("FAKE_CODEX_FAIL", None); os.environ.pop("OFFICE_CODEX_MODEL", None)
         main.engine_sent.pop("p05", None); main.codex_threads.clear(); main.codex_model.clear()
@@ -3119,10 +3137,51 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                     r = c.post("/office/dispatch", json={"agent": "p05", "text": "x", "engine": "codex"}).json()
                     assert r["ok"] is False and "Codex 引擎未啟用" in r["error"] and why_part in r["error"], r
                     assert main.engine_of("p05", "codex") == main.ENGINE_COGITO and c.get("/office/models").json()["codex"] is False
-                os.environ.pop("OFFICE_CODEX_HOME")
-                blocked_with("OFFICE_CODEX_HOME")                     # 沒有獨立 home：不能共用你本人的 ~/.codex
                 os.environ["OFFICE_CODEX_HOME"] = str(Path.home() / ".codex")
                 blocked_with("你本人的 ~/.codex")
+                r = c.post("/office/codex/login", json={}).json()
+                assert r["ok"] is False and "你本人的 ~/.codex" in r["error"], r   # 也不能在畫面上登入到你本人的 home
+                # 沒設 OFFICE_CODEX_HOME：用預設的獨立 home（不用改 .env），只差登入——選單照樣可選、旁邊給登入
+                main.CODEX_HOME_DEFAULT = Path(tmp) / "預設home"
+                os.environ.pop("OFFICE_CODEX_HOME")
+                assert main.codex_home() == Path(tmp) / "預設home"
+                blocked_with("還沒登入")
+                m = c.get("/office/models").json()
+                assert m["codex_login_needed"] is True, m
+
+                def login_until_done() -> dict:
+                    for _ in range(200):
+                        st = c.get("/office/codex/login").json()
+                        if st["status"] != "pending":
+                            return st
+                        time.sleep(0.05)
+                    raise AssertionError(f"Codex 登入一直沒結束：{st}")
+
+                assert c.post("/office/codex/login").status_code == 422   # 不帶 JSON body（跨站 simple request）不能開始登入
+                # 取消：行程砍掉、狀態講清楚
+                r = c.post("/office/codex/login", json={}).json()
+                assert r["ok"] and r["status"] == "pending" and r["code"] == "ABCD-EFGH1" \
+                    and r["url"] == "https://auth.openai.com/codex/device", r
+                assert c.post("/office/codex/login", json={}).json()["pid"] == r["pid"], "登入中再按一次不能重開一輪"
+                r = c.delete("/office/codex/login").json()
+                assert r["status"] == "cancelled" and main._codex_login_proc is None, r
+                # 被拒：失敗、帶 Codex 印的原因、仍未登入
+                c.post("/office/codex/login", json={})
+                gate.write_text("deny", encoding="utf-8")
+                st = login_until_done()
+                assert st["status"] == "failed" and "access denied" in st["error"] and st["logged_in"] is False, st
+                gate.unlink()
+                # 成功：憑證寫在預設的獨立 home，Codex 引擎變成可用，派工時 CODEX_HOME 一定帶上（不帶會退回你本人的 ~/.codex）
+                c.post("/office/codex/login", json={})
+                gate.write_text("ok", encoding="utf-8")
+                st = login_until_done()
+                assert st["status"] == "ok" and st["logged_in"] is True and (Path(tmp) / "預設home" / "auth.json").exists(), st
+                m = c.get("/office/models").json()
+                assert m["codex"] is True and m["codex_login_needed"] is False and main.codex_blocked() == "", m
+                run({"text": "登入後派工", "engine": "codex"})
+                rec = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+                assert rec["home"] == str(Path(tmp) / "預設home"), rec
+                main.CODEX_HOME_DEFAULT = old_default
                 os.environ["OFFICE_CODEX_HOME"] = str(Path(tmp) / "還沒登入的home")
                 blocked_with("還沒登入")
                 os.environ["OFFICE_CODEX_HOME"] = str(Path(tmp) / "codexhome")
@@ -3137,6 +3196,8 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 assert main.engine_of("p05", "codex") == main.ENGINE_COGITO
         finally:
             main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR = old
+            main.CODEX_HOME_DEFAULT = old_default
+            main.codex_login_state.clear(); main.codex_login_state["status"] = "idle"
             main._audit_last.update({"seq": 0, "hash": "", "path": None})
             for k, v in saved_env.items():
                 if v is None:
@@ -3145,7 +3206,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                     os.environ[k] = v
             main.engine_sent.pop("p05", None); main.engine_sent.pop(main.KANBAN, None)
             main.codex_threads.clear(); main.codex_model.clear(); main.codex_model_sent.clear(); main.busy.discard("p05")
-    print("  ✓ Codex 引擎（含模型清單與選擇）：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
+    print("  ✓ Codex 引擎（含模型清單、選擇與畫面上登入）：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
 
 
 def audit_ledger() -> None:

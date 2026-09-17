@@ -87,7 +87,7 @@
 - `OFFICE_CODEX_HOME` 沒設、`~/.codex-office` 不存在，員工用的是你的 `~/.codex`：你的 ChatGPT 登入、`config.toml` 裡把 `/Users/mac` 與多個 repo 標為 trusted。
 - `OFFICE_CODEX_SANDBOX=danger-full-access` 會完全關掉沙箱，而 exec 模式的審批政策是 never。
 - **修法**：程式裡拒絕 `danger-full-access`；未設獨立 CODEX_HOME 時不啟用 Codex 引擎（或至少警告）；環境變數白名單（同 #3）。
-- **進度（2026-09-17，第一批）**：已修。`codex_blocked()` 在以下情況停用 Codex 引擎並說明原因：沙箱不是 `read-only`／`workspace-write`、沒設 `OFFICE_CODEX_HOME`、設成 `~/.codex`、該目錄沒有登入（`auth.json`）。派工直接回錯；外殼的引擎選單顯示「Codex（未啟用）」與原因。啟用方式：`CODEX_HOME=~/.codex-office codex login`，再在橋的 `.env` 設 `OFFICE_CODEX_HOME=~/.codex-office`。
+- **進度（2026-09-17，第一批）**：已修。`codex_blocked()` 在以下情況停用 Codex 引擎並說明原因：沙箱不是 `read-only`／`workspace-write`、沒設 `OFFICE_CODEX_HOME`、設成 `~/.codex`、該目錄沒有登入（`auth.json`）。派工直接回錯；外殼的引擎選單顯示「Codex（未啟用）」與原因。後續調整（同日）：改成預設就用獨立的 `~/.codex-office`（`OFFICE_CODEX_HOME` 只在要換位置時設），只差登入時選項照樣可選、旁邊出現「登入 Codex」——橋在那個 home 跑 `codex login --device-auth`，外殼只顯示網址與一次性驗證碼，憑證不經過瀏覽器；登入端點要 JSON body（跨站 simple request 觸發不了）。沙箱被關或指到 `~/.codex` 仍整個停用，也不能在畫面上登入到 `~/.codex`。
 
 ---
 

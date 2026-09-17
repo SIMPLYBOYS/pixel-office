@@ -2930,32 +2930,132 @@ def codex_available() -> bool:
     return shutil.which(CODEX_CMD) is not None and not codex_blocked()
 
 
-def codex_blocked() -> str:
-    """Codex 引擎為什麼不能用（空字串＝可以用）。2026-09-17 安全稽核 High #8：
-    - 沒有獨立的 OFFICE_CODEX_HOME：員工會用你本人的 ~/.codex——你的 ChatGPT 登入、把 /Users/mac 標成 trusted 的設定都跟著走。
-    - OFFICE_CODEX_SANDBOX=danger-full-access：完全關掉沙箱，而 exec 模式的審批政策是 never，等於把機器交出去。
-    - 獨立 home 還沒登入：跑起來也只會失敗，先講清楚。"""
+CODEX_HOME_DEFAULT = Path.home() / ".codex-office"
+
+
+def codex_home() -> Path:
+    """員工用的 CODEX_HOME：OFFICE_CODEX_HOME 有設就用它，否則 ~/.codex-office——不用改 .env，登入在外殼按一下就好。
+    不會是你本人的 ~/.codex（codex_setup_problem 會擋）。"""
+    return Path(os.environ.get("OFFICE_CODEX_HOME", "").strip() or CODEX_HOME_DEFAULT).expanduser()
+
+
+def codex_logged_in() -> bool:
+    return (codex_home() / "auth.json").exists()   # 實測 0.154：ChatGPT 登入存成 CODEX_HOME/auth.json（沒設 keyring）
+
+
+def codex_setup_problem() -> str:
+    """登入以外、使用者在畫面上解決不了的問題（空字串＝沒有）。2026-09-17 安全稽核 High #8：
+    - 員工不能共用你本人的 ~/.codex：你的 ChatGPT 登入、把 /Users/mac 標成 trusted 的設定都會跟著走。
+    - OFFICE_CODEX_SANDBOX=danger-full-access：完全關掉沙箱，而 exec 模式的審批政策是 never，等於把機器交出去。"""
     if shutil.which(CODEX_CMD) is None:
         return "找不到 codex 指令"
     if CODEX_SANDBOX not in ("read-only", "workspace-write"):
         return f"OFFICE_CODEX_SANDBOX={CODEX_SANDBOX} 不允許（只接受 read-only 或 workspace-write）"
-    home = os.environ.get("OFFICE_CODEX_HOME", "").strip()
-    if not home:
-        return "還沒設獨立的 OFFICE_CODEX_HOME（員工不能共用你本人的 ~/.codex）"
-    h = Path(home).expanduser()
     try:
-        if h.resolve() == (Path.home() / ".codex").resolve():
+        if codex_home().resolve() == (Path.home() / ".codex").resolve():
             return "OFFICE_CODEX_HOME 指到你本人的 ~/.codex，請換一個獨立目錄"
     except OSError:
         pass
-    if not (h / "auth.json").exists():
-        return f"{h} 還沒登入：CODEX_HOME={home} codex login"
     return ""
 
 
-def codex_home() -> Path:
-    """員工用的 CODEX_HOME：OFFICE_CODEX_HOME（codex_blocked 保證有設、不是 ~/.codex 才會真的跑）；後面的退路只給模型清單這類唯讀用途。"""
-    return Path(os.environ.get("OFFICE_CODEX_HOME") or os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+def codex_blocked() -> str:
+    """Codex 引擎為什麼不能用（空字串＝可以用）。"""
+    if why := codex_setup_problem():
+        return why
+    return "" if codex_logged_in() else "還沒登入 Codex——在引擎選單旁按「登入 Codex」"
+
+
+# ── Codex 登入：在外殼完成，不用開終端機 ──────────────────────────────────────────
+# 走 `codex login --device-auth`：橋在員工的 CODEX_HOME 起登入行程，把它印的網址與一次性驗證碼交給外殼，
+# 你在瀏覽器登入 ChatGPT、輸入驗證碼，行程拿到憑證寫進 auth.json 就結束。憑證只落在員工的 home，外殼碰不到。
+# 不做「貼 API key」：橋還沒有驗證（安全稽核 #4），不在網頁上收金鑰。
+codex_login_state: dict = {"status": "idle"}   # idle｜pending｜ok｜failed｜cancelled；pending 時帶 url、code、text
+_codex_login_proc: asyncio.subprocess.Process | None = None
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+CODEX_LOGIN_URL = re.compile(r"https://[\w.-]*openai\.com/\S*")         # 只認 OpenAI 的網址才給外殼做成連結
+CODEX_LOGIN_CODE = re.compile(r"^\s*([A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+)\s*$")   # 實測：「IJ0T-IU1ZX」自己一行
+
+
+async def _codex_login_watch(proc: asyncio.subprocess.Process) -> None:
+    """讀完登入行程的輸出（不讀會塞住管線），結束時依結果收尾。驗證碼 15 分鐘過期，多等一分鐘還沒結束就砍掉。"""
+    global _codex_login_proc
+    lines: list[str] = []
+    try:
+        async def pump() -> None:
+            async for raw in proc.stdout:
+                if codex_login_state.get("pid") != proc.pid:
+                    continue   # 這一輪已經被取消或換成新的一輪：讀完就好，不寫狀態
+                line = _ANSI.sub("", raw.decode("utf-8", "replace")).rstrip()
+                lines.append(line)
+                if not codex_login_state.get("url") and (m := CODEX_LOGIN_URL.search(line)):
+                    codex_login_state["url"] = m.group(0)
+                if not codex_login_state.get("code") and (m := CODEX_LOGIN_CODE.match(line)):
+                    codex_login_state["code"] = m.group(1)
+                codex_login_state["text"] = "\n".join(x for x in lines if x.strip())[-1500:]
+            await proc.wait()
+        await asyncio.wait_for(pump(), timeout=16 * 60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+    finally:
+        if _codex_login_proc is proc:
+            _codex_login_proc = None
+    if codex_login_state.get("pid") != proc.pid or codex_login_state.get("status") != "pending":
+        return   # 已經被取消，或換成新的一輪
+    if proc.returncode == 0 and codex_logged_in():
+        codex_login_state.update(status="ok", url="", code="")
+    else:
+        tail = next((x for x in reversed(lines) if x.strip()), "")
+        codex_login_state.update(status="failed", url="", code="", error=tail or f"登入行程結束（exit {proc.returncode}）")
+
+
+@app.post("/office/codex/login")
+async def office_codex_login(d: dict):
+    """開始登入（要 JSON body：跨站的 simple request 觸發不了）。已經在登入中就回同一份，不重開。"""
+    global _codex_login_proc
+    if why := codex_setup_problem():
+        return {"ok": False, "error": why}
+    if codex_logged_in():
+        codex_login_state.update(status="ok", url="", code="")
+        return {"ok": True, **codex_login_state}
+    if _codex_login_proc is not None and _codex_login_proc.returncode is None:
+        return {"ok": True, **codex_login_state}
+    home = codex_home()
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env = agent_env()
+    env["CODEX_HOME"] = str(home)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            CODEX_CMD, "login", "--device-auth", env=env, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except OSError as e:
+        return {"ok": False, "error": f"起不了 Codex 登入（{CODEX_CMD}）：{e}"}
+    codex_login_state.clear()
+    codex_login_state.update(status="pending", url="", code="", text="", error="", home=str(home), pid=proc.pid)
+    _codex_login_proc = proc
+    asyncio.create_task(_codex_login_watch(proc))
+    for _ in range(100):   # 等驗證碼印出來（實測約一秒），外殼一次就拿得到；等不到也先回，外殼會輪詢
+        if codex_login_state.get("code") or proc.returncode is not None:
+            break
+        await asyncio.sleep(0.1)
+    return {"ok": True, **codex_login_state}
+
+
+@app.get("/office/codex/login")
+def office_codex_login_status():
+    return {"ok": True, **codex_login_state, "logged_in": codex_logged_in()}
+
+
+@app.delete("/office/codex/login")
+async def office_codex_login_cancel():
+    global _codex_login_proc
+    proc, _codex_login_proc = _codex_login_proc, None
+    if proc is not None and proc.returncode is None:
+        proc.kill()
+    if codex_login_state.get("status") == "pending":
+        codex_login_state.update(status="cancelled", url="", code="")
+    return {"ok": True, **codex_login_state}
 
 
 def codex_model_list() -> list[dict]:
@@ -3062,8 +3162,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     if not tid and not fresh and key in codex_threads:
         log_ev(aid, "ℹ 找不到上次的 Codex 對話紀錄，這次開一條新的")
     env = agent_env()   # 白名單：OPENAI_API_KEY／CODEX_API_KEY 不在裡面（否則改走 API 計費），橋的交付與審批金鑰也不在
-    if os.environ.get("OFFICE_CODEX_HOME"):
-        env["CODEX_HOME"] = str(codex_home())
+    env["CODEX_HOME"] = str(codex_home())   # 一定帶：不帶的話 Codex 會退回你本人的 ~/.codex
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(base), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -3896,6 +3995,8 @@ async def office_models():
             "cli": cli_available(), "cli_cmd": CLI_CMD,
             "codex": codex_available(), "codex_cmd": CODEX_CMD, "codex_models": dict(codex_model),
             "codex_blocked": codex_blocked() if shutil.which(CODEX_CMD) else "",
+            # 只差登入：外殼把 Codex 選項留著可選，旁邊給「登入 Codex」；其他原因（沙箱被關、指到 ~/.codex）才整個停用
+            "codex_login_needed": bool(shutil.which(CODEX_CMD)) and not codex_setup_problem() and not codex_logged_in(),
             "codex_list": codex_model_list() if codex_available() else [],
             "codex_effective": dict(codex_model_sent), "codex_default": os.environ.get("OFFICE_CODEX_MODEL", "").strip(),
             "engines": {aid: engine_of(aid) for aid in agents},
