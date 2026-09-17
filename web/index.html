@@ -1050,7 +1050,9 @@ function paintEngineRow(a, workingNow) {
     // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
     $('engineNote').textContent = (modelInfo.codex_login_needed
       ? '還沒登入 Codex：按下面的按鈕，用瀏覽器登入你的 ChatGPT 帳號（員工用自己的一份登入，不碰你本人的 ~/.codex）'
-      : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`)
+      : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`
+        // 工具講出來：Codex 員工的 MCP 照抄 Claude Code 員工的，網頁走 Codex 內建搜尋（任務裡的 WebFetch／WebSearch 對應它）
+        + `；工具：網頁搜尋${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
       + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;

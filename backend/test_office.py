@@ -24,6 +24,16 @@ main._audit_last.update({"seq": 0, "hash": "", "path": None})
 main.STATE_FILE = Path(main.__file__).parent / "office_state_test.json"
 main.client = None
 main.COGITO_HTTP = ""
+# 啟動時的同步（人設、共通守則、審批 hook、具名 agent）會寫員工工作區與三個引擎的 profile——也要在 import 時就指到暫存目錄。
+# 踩過：9/17 改了 office.md，跑測試就去寫真的 cogito workspace/AGENTS.md（內容沒變時是「已是最新」，所以一直沒發現）。
+_iso = Path(_tempfile.mkdtemp(prefix="office-profiles-test-"))
+main.CHANNELS_DIR = _iso / "workspace" / "channels"
+main.CHANNELS_DIR.mkdir(parents=True)
+os.environ.pop("COGITO_AGENTS_DIR", None)
+os.environ["CLAUDE_CONFIG_DIR"] = str(_iso / "claude-office")
+main.CLI_SESSION_DIR = _iso / "claude-office" / "projects"
+main.CODEX_HOME_DEFAULT = _iso / "codex-office"
+os.environ.pop("OFFICE_CODEX_HOME", None)
 from fastapi.testclient import TestClient
 
 
@@ -2350,28 +2360,39 @@ def caps_per_agent() -> None:
 
 
 def office_guide() -> None:
-    """共通守則同步到兩個座位：cogito 共享根的 AGENTS.md、員工 CLI profile 的 CLAUDE.md；手寫保護同一套。"""
+    """共通守則同步到三個座位：cogito 共享根的 AGENTS.md、員工 CLI profile 的 CLAUDE.md、Codex 員工 home 的 AGENTS.md
+    （多一段工具對照）；手寫保護同一套；Codex home 指到你本人的 ~/.codex 時不寫。"""
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "workspace" / "channels"
         old_cfg = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(tmp) / "claude-office")
+        old_codex = (main.CODEX_CMD, main.CODEX_HOME_DEFAULT)
+        main.CODEX_CMD, main.CODEX_HOME_DEFAULT = sys.executable, Path(tmp) / "codex-office"   # 找得到的執行檔當 codex
         try:
             root_md = Path(tmp) / "workspace" / "AGENTS.md"
             prof_md = Path(tmp) / "claude-office" / "CLAUDE.md"
+            codex_md = Path(tmp) / "codex-office" / "AGENTS.md"
             n = main.sync_office_guide()
-            assert n["wrote"] == 2, f"兩個座位都該寫：{n}"
-            a, b = root_md.read_text(encoding="utf-8"), prof_md.read_text(encoding="utf-8")
-            assert a == b and a.startswith(main.SOUL_MARK) and "辦公室共通守則" in a and "誠實" in a
+            assert n["wrote"] == 3, f"三個座位都該寫：{n}"
+            a, b, x = (f.read_text(encoding="utf-8") for f in (root_md, prof_md, codex_md))
+            assert a == b and a.startswith(main.SOUL_MARK) and "辦公室共通守則" in a and "誠實" in a and "回報格式" in a
             assert "Go" not in a, "共通守則不該再有 6 月 demo 指南那套 Go 專案慣例"
-            assert main.sync_office_guide()["same"] == 2
+            assert x.startswith(a.rstrip("\n")) and "工具對照" in x and "工具對照" not in a, "Codex 那份＝同一份守則＋工具對照"
+            assert main.sync_office_guide()["same"] == 3
             root_md.write_text("# 我自己維護的\n", encoding="utf-8")   # 沒有標記＝人寫的
             n = main.sync_office_guide()
             assert root_md.read_text(encoding="utf-8") == "# 我自己維護的\n" and n["skipped"] == 1
-            # 沒設 CLAUDE_CONFIG_DIR：CLI 那個座位不存在，只寫 cogito 根
+            os.environ["OFFICE_CODEX_HOME"] = str(Path.home() / ".codex")
+            assert Path.home() / ".codex" / "AGENTS.md" not in main.guide_targets(), "不能把辦公室守則寫進你本人的 ~/.codex"
+            del os.environ["OFFICE_CODEX_HOME"]
+            # 沒設 CLAUDE_CONFIG_DIR、沒有 codex：那兩個座位不存在，只寫 cogito 根
             del os.environ["CLAUDE_CONFIG_DIR"]
+            main.CODEX_CMD = str(Path(tmp) / "沒有這個執行檔")
             assert [p.name for p in main.guide_targets()] == ["AGENTS.md"]
         finally:
+            main.CODEX_CMD, main.CODEX_HOME_DEFAULT = old_codex
+            os.environ.pop("OFFICE_CODEX_HOME", None)
             main.CHANNELS_DIR = old_ch
             if old_cfg is not None:
                 os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
@@ -3032,7 +3053,15 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
         old = (main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR)
         main.CODEX_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
         main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
-        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS", "FAKE_CODEX_APPROVE")}
+        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS", "FAKE_CODEX_APPROVE", "CLAUDE_CONFIG_DIR")}
+        prof = Path(tmp) / "claude-office"; prof.mkdir()
+        (prof / ".claude.json").write_text(json.dumps({"mcpServers": {
+            "jobspy": {"type": "stdio", "command": "node", "args": ["/mcp/jobspy/index.js"], "env": {"DOCKER_CMD": "docker"}},
+            "job104": {"type": "stdio", "command": "npx", "args": ["-y", "mcp-server-104@0.2.0"]},
+            "remote": {"type": "http", "url": "https://mcp.example.com/"},
+            "withkey": {"type": "http", "url": "https://mcp.example.com/", "headers": {"Authorization": "Bearer x"}},
+            "bad.name": {"command": "sh"}}}), encoding="utf-8")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(prof)
         gate = Path(tmp) / "approve"
         os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real",
                            "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL,FAKE_CODEX_APPROVE", "FAKE_CODEX_APPROVE": str(gate)})
@@ -3062,6 +3091,19 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 rec = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
                 base = main.CHANNELS_DIR / "office_p05"
                 a = rec["argv"]
+                # 跟 Claude Code 員工對齊（同一個人設不因換廠商換做法）：只讀 cwd 的 AGENTS.md、開網頁搜尋、MCP 照抄員工 profile
+                cs = [a[i + 1] for i, x in enumerate(a) if x == "-c"]
+                assert "project_root_markers=[]" in cs and 'web_search="live"' in cs, a
+                assert 'mcp_servers.jobspy={command="node", args=["/mcp/jobspy/index.js"], env={"DOCKER_CMD"="docker"}}' in cs \
+                    and 'mcp_servers.job104={command="npx", args=["-y", "mcp-server-104@0.2.0"]}' in cs \
+                    and 'mcp_servers.remote={url="https://mcp.example.com/"}' in cs, cs
+                assert not any(x.startswith(("mcp_servers.withkey", "mcp_servers.bad")) for x in cs), "帶 headers 的（金鑰）與名稱不合法的不抄"
+                assert not any(x.startswith("developer_instructions=") for x in cs), "在工作區根：人設已經在 cwd 的 AGENTS.md，不重複帶"
+                assert c.get("/office/models").json()["codex_mcp"] == ["jobspy", "job104", "remote"]
+                # 綁 repo 的 worktree：Codex 不往上讀人設，要用 developer_instructions 帶（實測 0.154）
+                wt_cs = main.codex_parity_args("p05", base / "some-repo")
+                dev = next(x for x in wt_cs if x.startswith("developer_instructions="))
+                assert json.loads(dev.split("=", 1)[1]).startswith(f"# 你是{main.agents['p05'].name}"), dev[:80]
                 assert a[:2] == ["exec", "--json"] and "--skip-git-repo-check" in a and a[a.index("-s") + 1] == "workspace-write" \
                     and a[a.index("-C") + 1] == str(base) and a[-1] == "-" and "resume" not in a and "-m" not in a, a
                 assert rec["prompt"] == "看一下 a.py", "提示走 stdin"

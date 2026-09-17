@@ -3058,6 +3058,52 @@ async def office_codex_login_cancel():
     return {"ok": True, **codex_login_state}
 
 
+def office_mcp_servers() -> dict[str, dict]:
+    """員工 Claude Code profile 裡的 MCP 伺服器（CLAUDE_CONFIG_DIR/.claude.json 的 mcpServers）——辦公室工具的唯一來源，Codex 照抄。
+    只收名稱合法、有 command（stdio）或只有 url 的；帶 headers 的 http 伺服器不抄（那通常是金鑰，不放進命令列）。"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return {}
+    try:
+        servers = json.loads((Path(cfg).expanduser() / ".claude.json").read_text(encoding="utf-8")).get("mcpServers") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {k: v for k, v in servers.items() if re.fullmatch(r"[A-Za-z0-9_-]+", k) and isinstance(v, dict)
+            and (v.get("command") or (v.get("url") and not v.get("headers")))}
+
+
+def codex_parity_args(aid: str, base: Path) -> list[str]:
+    """讓 Codex 員工拿到跟 Claude Code 員工一樣的指令與工具（2026-09-17：同一個人設不該因為換廠商就換一種做事方式）。
+    實測 0.154（codex debug prompt-input）：
+    - Codex 讀 CODEX_HOME/AGENTS.md（共通守則，sync_office_guide 寫的）＋ 從 git 根往下到 cwd 的 AGENTS.md。
+      project_root_markers=[] 讓它只讀 cwd 那一份——不管工作區是不是 git repo，結果都一樣。
+    - 綁 repo 時 cwd 是 worktree：人設在上一層讀不到（Claude Code 會往上找 CLAUDE.md，Codex 不會），用 developer_instructions 帶。
+    - MCP：照抄員工 profile 的 mcpServers。網頁：開內建網頁搜尋（Claude Code 的 WebFetch／WebSearch 對應它，見 personas/codex.md）。
+      shell 仍然沒有網路（workspace-write 沙箱），跟任務文寫的「Bash 在這裡沒有網路」一致。"""
+    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"']
+    toml = lambda v: json.dumps(str(v), ensure_ascii=False)   # JSON 字串就是合法的 TOML 字串；ensure_ascii=False 避免 emoji 變成 TOML 不收的代理對
+    for name, srv in office_mcp_servers().items():
+        if srv.get("command"):
+            parts = [f"command={toml(srv['command'])}"]
+            if srv.get("args"):
+                parts.append("args=[" + ", ".join(toml(a) for a in srv["args"]) + "]")
+            if isinstance(srv.get("env"), dict) and srv["env"]:
+                # ponytail: env 值會出現在命令列（同機同帳號看得到）；哪天有伺服器要金鑰，改用 env_vars 從子行程環境帶
+                parts.append("env={" + ", ".join(f"{toml(k)}={toml(v)}" for k, v in srv["env"].items()) + "}")
+        else:
+            parts = [f"url={toml(srv['url'])}"]
+        out += ["-c", f"mcp_servers.{name}={{{', '.join(parts)}}}"]
+    home = CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None
+    src = Path(__file__).parent / "personas" / f"{aid}.md"
+    try:
+        in_worktree = home is not None and base.resolve() != home.resolve()
+    except OSError:
+        in_worktree = True
+    if in_worktree and aid in agents and src.exists():
+        out += ["-c", "developer_instructions=" + toml(persona_text(aid, src.read_text(encoding="utf-8")))]
+    return out
+
+
 def codex_model_list() -> list[dict]:
     """Codex 可選的模型：讀 Codex 自己的 models_cache.json（它向 OpenAI 拿、依帳號方案過濾過的清單），
     只列 visibility=list 的、照 priority 排。員工的 CODEX_HOME 還沒跑過就退回你本人的 ~/.codex 那份；都沒有就空（選單只剩「Codex 預設」）。"""
@@ -3153,7 +3199,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     if tid and codex_rollout(tid) is None:
         tid = ""   # 那條紀錄不在了（換了 CODEX_HOME、被清掉）：開新的，工作串會講
     want = model or (codex_thread_model(tid) if tid else "") or os.environ.get("OFFICE_CODEX_MODEL", "").strip()
-    argv = [CODEX_CMD, "exec", "--json", "--skip-git-repo-check", "-s", CODEX_SANDBOX, "-C", str(base)]
+    argv = [CODEX_CMD, "exec", "--json", "--skip-git-repo-check", "-s", CODEX_SANDBOX, "-C", str(base), *codex_parity_args(aid, base)]
     if want:
         argv += ["-m", want]
     argv += ["resume", tid, "-"] if tid else ["-"]   # 提示從 stdin 送（長文、換行都安全）
@@ -3999,6 +4045,7 @@ async def office_models():
             "codex_login_needed": bool(shutil.which(CODEX_CMD)) and not codex_setup_problem() and not codex_logged_in(),
             "codex_list": codex_model_list() if codex_available() else [],
             "codex_effective": dict(codex_model_sent), "codex_default": os.environ.get("OFFICE_CODEX_MODEL", "").strip(),
+            "codex_mcp": list(office_mcp_servers()),   # Codex 員工拿到的 MCP（照抄 Claude Code 員工的），外殼講出來
             "engines": {aid: engine_of(aid) for aid in agents},
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
@@ -4560,16 +4607,21 @@ def agents_dir() -> Path | None:
     return CHANNELS_DIR.parent / ".claw" / "agents" if CHANNELS_DIR else None
 
 
-def soul_doc(aid: str, body: str) -> str:
+def persona_text(aid: str, body: str) -> str:
+    """人設本文（不含產生標記）：工作區的 AGENTS.md／CLAUDE.md 與 Codex 的 developer_instructions 共用這一份。"""
     p = agents[aid].persona
     head = "\n".join(x for x in [
         f"# 你是{p.get('name', aid)}（{p.get('role', '員工')}）",
         f"\n個性：{p.get('personality', '')}" if p.get("personality") else "",
         f"說話風格：{p.get('style', '')}" if p.get("style") else "",
     ] if x)
+    return f"{head}\n\n{body.strip()}\n"
+
+
+def soul_doc(aid: str, body: str) -> str:
     return (f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生。手改會在橋下次啟動時被覆蓋；\n"
             f"     想自己維護這個檔案，把這兩行標記刪掉即可，橋就不會再動它。 -->\n\n"
-            f"{head}\n\n{body.strip()}\n")
+            f"{persona_text(aid, body)}")
 
 
 # 子 agent 的工具集是 opt-in 的：具名 agent 沒宣告 tools 就只拿到唯讀探路者子集
@@ -4651,6 +4703,7 @@ def sync_souls() -> dict[str, int]:
 
 
 GUIDE_SRC = Path(__file__).parent / "personas" / "office.md"   # 全辦公室共用守則的唯一來源
+CODEX_GUIDE_SRC = Path(__file__).parent / "personas" / "codex.md"   # 只給 Codex 的附錄：任務照 Claude Code 工具名寫，這份講怎麼對應
 
 
 def guide_doc(body: str) -> str:
@@ -4660,13 +4713,16 @@ def guide_doc(body: str) -> str:
 
 
 def guide_targets() -> list[Path]:
-    """共通守則要放的兩個座位：cogito 讀共享根 workspace 的 AGENTS.md；Claude Code 讀 profile 目錄的 CLAUDE.md
-    （CLAUDE_CONFIG_DIR，員工 CLI 用的那個）。沒設的座位就不寫——寫到沒人讀的地方不算同步。"""
+    """共通守則要放的座位：cogito 讀共享根 workspace 的 AGENTS.md；Claude Code 讀 profile 目錄的 CLAUDE.md
+    （CLAUDE_CONFIG_DIR，員工 CLI 用的那個）；Codex 讀員工 CODEX_HOME 的全域 AGENTS.md。沒設的座位就不寫——寫到沒人讀的地方不算同步。
+    Codex 那個座位只在 home 合規時寫：指到你本人的 ~/.codex 時，不能把辦公室守則塞進你自己的 Codex。"""
     out: list[Path] = []
     if CHANNELS_DIR is not None:
         out.append(CHANNELS_DIR.parent / "AGENTS.md")
     if cfg := os.environ.get("CLAUDE_CONFIG_DIR"):
         out.append(Path(cfg).expanduser() / "CLAUDE.md")
+    if not codex_setup_problem():
+        out.append(codex_home() / "AGENTS.md")
     return out
 
 
@@ -4676,9 +4732,14 @@ def sync_office_guide() -> dict[str, int]:
     n = {"wrote": 0, "same": 0, "skipped": 0}
     if not GUIDE_SRC.exists():
         return n
-    want = guide_doc(GUIDE_SRC.read_text(encoding="utf-8"))
+    body = GUIDE_SRC.read_text(encoding="utf-8")
+    want = guide_doc(body)
+    codex_seat = codex_home() / "AGENTS.md"
     for dst in guide_targets():
-        _sync_one(dst, want, n)
+        if dst == codex_seat and CODEX_GUIDE_SRC.exists():
+            _sync_one(dst, guide_doc(body.rstrip() + "\n\n" + CODEX_GUIDE_SRC.read_text(encoding="utf-8")), n)
+        else:
+            _sync_one(dst, want, n)
     if any(n.values()):
         print(f"共通守則同步（{len(guide_targets())} 個座位）：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
     return n
