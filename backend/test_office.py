@@ -467,6 +467,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     audit_archive()
+    agent_env_allowlist()
     tool_guard()
     codex_engine()
     isolation_at_import()
@@ -659,6 +660,7 @@ def previews() -> None:
         (Path(tmp) / "outside.txt").write_text("secret\n", encoding="utf-8")
 
         main.history.clear(); main.last_report.clear()
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp)   # 卡片工作目錄必須在員工工作區底下才能預覽（稽核 High #6）
         card = main.report_card("p01", "預覽測試", str(wd))
         cid = card["id"]
         with TestClient(main.app) as c:
@@ -727,6 +729,30 @@ def previews() -> None:
                 assert c.get("/office/wsfile/p01", params={"p": bad}).json()["ok"] is False, bad
             assert c.get("/office/wsfile/p01", params={"p": "sub/note.txt"}
                          ).headers["content-type"].startswith("text/plain")
+            # 工作目錄收斂：工作區外的卡不給預覽、不給開資料夾；.app 套件不給開；偽造的 start 事件不記目錄
+            with tempfile.TemporaryDirectory() as outside:
+                (Path(outside) / "creds.json").write_text('{"oauth": "x"}', encoding="utf-8")
+                bad_card = main.report_card("p01", "偽造的工作目錄", outside)
+                r = c.get(f"/office/file/p01/{bad_card['id']}", params={"p": "creds.json"}).json()
+                assert r["ok"] is False, f"工作區外的目錄被當成預覽根目錄：{r}"
+                assert c.post("/office/open", json={"agent": "p01", "card": bad_card["id"]}).json()["ok"] is False
+                app_dir = Path(tmp) / "Evil.app"; app_dir.mkdir()
+                app_card = main.report_card("p01", "app 套件", str(app_dir))
+                assert c.post("/office/open", json={"agent": "p01", "card": app_card["id"]}).json()["ok"] is False, ".app 不能拿去 open"
+                c.post("/office/event", json={"agent": "p01", "kind": "start", "label": "偽造", "detail": outside})
+                forged = main.last_report["p01"]
+                assert c.get(f"/office/file/p01/{forged['id']}", params={"p": "creds.json"}).json()["ok"] is False, "偽造 start 事件的目錄被拿來讀檔"
+                assert c.post("/office/open", json={"agent": "p01", "card": forged["id"]}).json()["ok"] is False
+                assert main.agent_dir("p01") != Path(outside), "工作區面板不能指到偽造的目錄"
+            # SVG：不渲染時也要帶 sandbox CSP，直接開啟不會在橋的來源跑腳本（稽核 Medium #9）
+            (wd / "chart.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', encoding="utf-8")
+            svg = c.get(f"/office/file/p01/{cid}", params={"p": "chart.svg"})
+            assert svg.headers.get("content-security-policy") == "sandbox", svg.headers.get("content-security-policy")
+            # /shell 只准同源嵌入
+            sh = c.get("/shell/")
+            assert "frame-ancestors 'self'" in sh.headers.get("content-security-policy", "") and sh.headers.get("x-frame-options") == "SAMEORIGIN", dict(sh.headers)
+        main.CHANNELS_DIR = old_ch
+        main.STATE_FILE.unlink(missing_ok=True)   # 上面送了事件、TestClient 收工會存檔：別讓這些卡被下一個測試載回去
     main.history.clear(); main.last_report.clear()
 
 
@@ -1145,6 +1171,7 @@ for o in out:
         old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
         argv_log = Path(tmp) / "argv.log"
         os.environ["FAKE_ARGV_LOG"] = str(argv_log)
+        old_pass = os.environ.get("OFFICE_AGENT_ENV_PASS"); os.environ["OFFICE_AGENT_ENV_PASS"] = "FAKE_ARGV_LOG"   # 員工子行程的環境變數是白名單
         old_sess, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp) / "sessions"
         main.CLI_SESSION_DIR.mkdir()
         main.engine_sent.clear()   # 這個是會持久化的：先前跑測試留下的殘值會讓斷言錯亂
@@ -1277,6 +1304,8 @@ for o in out:
             main.CLI_CMD, main.CHANNELS_DIR = old_cmd, old_ch
             main.CLI_SESSION_DIR = old_sess
             os.environ.pop("FAKE_ARGV_LOG", None)
+            if old_pass is None: os.environ.pop("OFFICE_AGENT_ENV_PASS", None)
+            else: os.environ["OFFICE_AGENT_ENV_PASS"] = old_pass
             main.busy.discard("p05")
             # engine_sent 會【持久化】：不 flush 的話，殘值留在 state 檔裡，
             # 下一個測試的 TestClient 啟動時 load_state 又把它讀回來（踩過：
@@ -2415,6 +2444,15 @@ def schedule_delivery() -> None:
             evs = [e["text"] for e in main.last_report["p19"]["events"]]
             assert any("送 slack:C0ABC 失敗：missing_scope" in t for t in evs), evs[-3:]
             assert not any("已送到 slack" in t for t in evs[-2:]), "Slack 200+ok:false 被寫成已送"
+            # 3b) 報告被做成指向工作區外的 symlink（例：../../.env）→ 拒絕交付，不上傳（稽核 High #7）
+            secret = Path(tmp) / "secret.env"; secret.write_text("TOKEN=x\n", encoding="utf-8")
+            (wd / f"trend-{today}.md").unlink(); (wd / f"trend-{today}.md").symlink_to(secret)
+            got, why = main.deliver_path("p19", job, started)
+            assert got is None and "工作區以外" in why, (got, why)
+            fake = _DeliverHTTP(); main.httpx.AsyncClient = lambda **kw: fake
+            asyncio.run(main.deliver_job("p19", job, "ok", started))
+            assert not any(u.endswith("/sendDocument") for u, _ in fake.calls), "指向工作區外的檔案被上傳了"
+            (wd / f"trend-{today}.md").unlink()
             # 4) 沒有 deliver 設定的 job 什麼都不送
             fake = _DeliverHTTP(); main.httpx.AsyncClient = lambda **kw: fake
             asyncio.run(main.deliver_job("p19", {"name": "巡邏"}, "ok", started))
@@ -2659,6 +2697,31 @@ def cli_hitl() -> None:
         if saved_engine: main.engine_sent[aid] = saved_engine
         else: main.engine_sent.pop(aid, None)
         main.clear_approval(aid); main.cli_permission.pop(aid, None)
+
+
+def agent_env_allowlist() -> None:
+    """員工子行程的環境變數是白名單（2026-09-17 安全稽核 High #3）：橋 .env 裡的交付與 cogito 派工／審批金鑰、API 金鑰都不能傳下去；
+    登入與執行需要的（PATH、HOME、CLAUDE_CONFIG_DIR、語系）照傳；真的要多傳就寫進 OFFICE_AGENT_ENV_PASS。"""
+    names = ("TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "COGITO_HTTP_TOKEN", "COGITO_HTTP_APPROVER_TOKEN", "ANTHROPIC_API_KEY",
+             "OPENAI_API_KEY", "CODEX_API_KEY", "SOME_NEW_SECRET", "LC_ALL", "CLAUDE_CONFIG_DIR", "OFFICE_AGENT_ENV_PASS", "MY_EXTRA")
+    saved = {k: os.environ.get(k) for k in names}
+    try:
+        for k in names:
+            os.environ[k] = "x"
+        os.environ["OFFICE_AGENT_ENV_PASS"] = "MY_EXTRA"
+        env = main.agent_env()
+        for k in ("TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN", "COGITO_HTTP_TOKEN", "COGITO_HTTP_APPROVER_TOKEN", "ANTHROPIC_API_KEY",
+                  "OPENAI_API_KEY", "CODEX_API_KEY", "SOME_NEW_SECRET"):
+            assert k not in env, f"{k} 傳給了員工子行程"
+        for k in ("PATH", "HOME", "CLAUDE_CONFIG_DIR", "LC_ALL", "MY_EXTRA"):
+            assert k in env, f"{k} 該傳卻沒傳"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("  ✓ 員工子行程環境變數白名單：金鑰不外流、必要變數照傳、額外通行可設定")
 
 
 def tool_guard() -> None:
@@ -2953,8 +3016,10 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
         old = (main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR)
         main.CODEX_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
         main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
-        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL")}
-        os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real"})
+        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS")}
+        os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real",
+                           "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL"})
+        (Path(tmp) / "codexhome").mkdir(); (Path(tmp) / "codexhome" / "auth.json").write_text("{}", encoding="utf-8")   # 獨立 home 已登入
         os.environ.pop("FAKE_CODEX_FAIL", None); os.environ.pop("OFFICE_CODEX_MODEL", None)
         main.engine_sent.pop("p05", None); main.codex_threads.clear(); main.codex_model.clear()
 
@@ -3047,6 +3112,26 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 os.environ["FAKE_CODEX_FAIL"] = "1"
                 card3 = run({"text": "會失敗的", "engine": "codex"})
                 assert card3["status"] == "error" and "模型不支援" in (card3.get("report") or ""), card3
+                # 安全預設（2026-09-17 安全稽核 High #8）：不符合就不啟用 Codex，派工明講原因、不靜靜改派給 cogito
+                os.environ.pop("FAKE_CODEX_FAIL", None)
+                def blocked_with(why_part: str) -> None:
+                    main.busy.discard("p05")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "x", "engine": "codex"}).json()
+                    assert r["ok"] is False and "Codex 引擎未啟用" in r["error"] and why_part in r["error"], r
+                    assert main.engine_of("p05", "codex") == main.ENGINE_COGITO and c.get("/office/models").json()["codex"] is False
+                os.environ.pop("OFFICE_CODEX_HOME")
+                blocked_with("OFFICE_CODEX_HOME")                     # 沒有獨立 home：不能共用你本人的 ~/.codex
+                os.environ["OFFICE_CODEX_HOME"] = str(Path.home() / ".codex")
+                blocked_with("你本人的 ~/.codex")
+                os.environ["OFFICE_CODEX_HOME"] = str(Path(tmp) / "還沒登入的home")
+                blocked_with("還沒登入")
+                os.environ["OFFICE_CODEX_HOME"] = str(Path(tmp) / "codexhome")
+                old_sb, main.CODEX_SANDBOX = main.CODEX_SANDBOX, "danger-full-access"
+                try:
+                    blocked_with("danger-full-access")
+                finally:
+                    main.CODEX_SANDBOX = old_sb
+                assert main.codex_blocked() == "" and main.engine_of("p05", "codex") == main.ENGINE_CODEX
                 # 找不到 Codex 就不給這個引擎
                 main.CODEX_CMD = str(Path(tmp) / "沒有這個執行檔")
                 assert main.engine_of("p05", "codex") == main.ENGINE_COGITO

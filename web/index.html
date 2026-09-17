@@ -1011,7 +1011,13 @@ function paintEngineRow(a, workingNow) {
   if (row.hidden) return;
   for (const o of sel.options) {   // 找不到的引擎不給選（Claude Code 與 Codex 各自判斷）
     if (o.value === 'cli') o.hidden = !modelInfo.cli;
-    if (o.value === 'codex') o.hidden = !modelInfo.codex;
+    if (o.value === 'codex') {
+      // 裝了 Codex 但安全條件不符（沒有獨立 CODEX_HOME、沙箱被關）：選項留著但停用，把原因講出來，不讓人以為功能不見了
+      o.hidden = !modelInfo.codex && !modelInfo.codex_blocked;
+      o.disabled = !modelInfo.codex;
+      o.textContent = modelInfo.codex ? 'Codex（ChatGPT 訂閱）' : 'Codex（未啟用）';
+      o.title = modelInfo.codex_blocked || '';
+    }
   }
   if (!sel.dataset.bound) {
     sel.onchange = () => updateComposer();
@@ -1035,10 +1041,11 @@ function paintEngineRow(a, workingNow) {
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;
   }
-  $('engineNote').textContent = cli
-    ? `用 ${esc(modelInfo.cli_cmd || 'claude')} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
+  $('engineNote').textContent = (cli
+    ? `用 ${modelInfo.cli_cmd || 'claude'} 跑（訂閱額度，不走 API 計費）——審批進辦公室、可插話，中止是直接砍掉行程`
       + (cogitoDown ? '　⚠ cogito 沒開，先走 CLI' : '')
-    : (modelInfo.cogito_up === false ? '⚠ cogito 沒開——現在派給它會失敗，開了再派或改選 CLI' : '');
+    : (modelInfo.cogito_up === false ? '⚠ cogito 沒開——現在派給它會失敗，開了再派或改選 CLI' : ''))
+    + (modelInfo.codex_blocked ? `　（Codex 未啟用：${modelInfo.codex_blocked}）` : '');
 }
 
 // Codex 的模型選單：清單來自 Codex 自己的 models_cache（依帳號方案過濾過）。選了會記住（跟 Claude 那份分開），「還原」收回。
@@ -1807,11 +1814,14 @@ function enqueue(job) {
 }
 async function drain() {
   draining = true;
-  while (queue.length) {
-    if (queue.length > 30) { queue.splice(0, queue.length).forEach(j => j(true)); break; } // 積太多就秒出
-    await queue.shift()(false);
+  try {
+    while (queue.length) {
+      if (queue.length > 30) { queue.splice(0, queue.length).forEach(j => { try { j(true); } catch { /* 一則壞掉不拖垮其他則 */ } }); break; } // 積太多就秒出
+      try { await queue.shift()(false); } catch (e) { console.warn('播放一則訊息失敗，略過', e); }   // 一則出錯不能讓整條工作串停住
+    }
+  } finally {
+    draining = false;
   }
-  draining = false;
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -2000,16 +2010,19 @@ const BLOCK_COMMENT = { javascript: 1, typescript: 1, go: 1, css: 1 };
 
 function tokenizer(lang) {
   const parts = [];
-  if (BLOCK_COMMENT[lang]) parts.push('\\/\\*[\\s\\S]*?\\*\\/');
-  const lc = lang in LINE_COMMENT ? LINE_COMMENT[lang] : '#';   // 未知語言：當 # 與 // 都算註解
+  if (Object.hasOwn(BLOCK_COMMENT, lang)) parts.push('\\/\\*[\\s\\S]*?\\*\\/');
+  // Object.hasOwn 不用 in：語言名寫成 constructor／toString／__proto__ 時，in 會找到 Object.prototype 上的東西，
+  // 接著 lc.replace 丟例外、整個播放佇列卡死（2026-09-17 安全稽核 Low）
+  const known = Object.hasOwn(LINE_COMMENT, lang);
+  const lc = known ? LINE_COMMENT[lang] : '#';   // 未知語言：當 # 與 // 都算註解
   if (lc) parts.push(`${lc.replace(/[/\-]/g, '\\$&')}[^\n]*`);
-  if (!(lang in LINE_COMMENT)) parts.push('\\/\\/[^\n]*');
+  if (!known) parts.push('\\/\\/[^\n]*');
   parts.push('"(?:[^"\\\\\n]|\\\\.)*"', "'(?:[^'\\\\\n]|\\\\.)*'", '`(?:[^`\\\\]|\\\\.)*`');
   parts.push('\\b\\d[\\d_.]*\\b');
-  if (KW[lang]) parts.push(`\\b(?:${KW[lang].split(' ').join('|')})\\b`);
+  if (Object.hasOwn(KW, lang)) parts.push(`\\b(?:${KW[lang].split(' ').join('|')})\\b`);
   return new RegExp(parts.join('|'), 'g');
 }
-const TOKEN_RE = {};
+const TOKEN_RE = Object.create(null);   // 沒有原型：語言名是 constructor 也不會撈到 Object 的東西當成快取的正規式
 
 function highlight(code, text, lang) {
   const key = lang || '';

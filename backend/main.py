@@ -1484,7 +1484,9 @@ async def office_event(ev: dict):
                 task = ("🔄 續跑：" + prev["task"].removeprefix("🔄 續跑：")) if prev else "🔄 續跑上次中斷的任務"
                 if prev:
                     supersede_card(prev)
-            card = report_card(aid, task, ev.get("detail", ""))  # start 的 detail＝工作目錄
+            # start 的 detail＝工作目錄。照記（卡上要顯示產出落在哪），但拿來讀檔、列目錄、開資料夾之前一律過 workdir_ok——
+            # 邊界放在【用的那一刻】，狀態檔裡的舊卡、偽造的事件都一樣擋得住（2026-09-17 安全稽核 High #6）
+            card = report_card(aid, task, ev.get("detail", ""))
             # 回溯的鑰匙：哪個引擎、哪條 session、幾點開始。有了它，卡片才連得到完整紀錄。
             card["engine"] = str(ev.get("engine") or ENGINE_COGITO)
             card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
@@ -1894,9 +1896,25 @@ PREVIEW_TYPES = {
 }
 
 
+def workdir_ok(wd: str) -> bool:
+    """卡片的工作目錄能不能拿來【讀檔、列目錄、用 Finder 打開】：必須在員工工作區（CHANNELS_DIR）底下，
+    而且路徑裡沒有 .app 套件（macOS 對 .app 目錄 `open` 會直接啟動它）。
+    2026-09-17 安全稽核 High #6：start 事件的 detail 原本直接成為檔案服務的根目錄，同機程式送一個事件就能讀任意檔案。
+    檢查放在【讀的那一刻】而不是只在寫入時：狀態檔裡的舊卡、或任何繞過寫入檢查的路徑都一樣擋得住。"""
+    if not wd or CHANNELS_DIR is None:
+        return False
+    try:
+        p, root = Path(wd).resolve(), CHANNELS_DIR.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not p.is_relative_to(root) or any(part.lower().endswith(".app") for part in p.parts):
+        return False
+    return p.is_dir()
+
+
 def card_dir(aid: str, cid) -> Path | None:
     wd = (find_card(aid, cid) or {}).get("workdir", "")
-    return Path(wd) if wd and Path(wd).is_dir() else None
+    return Path(wd) if workdir_ok(wd) else None
 
 
 def agent_dir(aid: str) -> Path | None:
@@ -1904,7 +1922,7 @@ def agent_dir(aid: str) -> Path | None:
     沒有卡就退回 COGITO_CHANNELS/office_<aid>（還沒接過任務的新人也看得到自己的資料夾）。"""
     for card in reversed(history.get(aid, [])):
         wd = card.get("workdir", "")
-        if wd and Path(wd).is_dir():
+        if workdir_ok(wd):
             return Path(wd)
     if CHANNELS_DIR:
         d = CHANNELS_DIR / f"office_{aid}"
@@ -2076,6 +2094,10 @@ def serve_file(base: Path, rel: str, render: int):
     if render and ext in ("html", "svg"):
         media = "text/html; charset=utf-8" if ext == "html" else media
         headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    elif ext == "svg":
+        # 不渲染時 SVG 仍以 image/svg+xml 送出：直接在分頁開啟就會在橋的來源執行它裡面的 script（稽核 Medium #9）。
+        # 加 sandbox（不含 allow-scripts）：<img> 顯示不受影響，直接開啟時腳本不跑、也拿不到本站來源
+        headers["Content-Security-Policy"] = "sandbox"
     # 檔名交給 FileResponse 編碼：自己塞進 header 的話，「趨勢報告.md」這種非 latin-1 檔名會 UnicodeEncodeError（codex review 抓到）
     return FileResponse(f, media_type=media, headers=headers, filename=f.name, content_disposition_type="inline")
 
@@ -2296,8 +2318,8 @@ def office_open(d: dict):
     只吃 agent + 卡號、路徑由橋自己查——不接受客戶端傳路徑，否則這就是個任意路徑開啟器。"""
     card = find_card(d.get("agent", ""), d.get("card"))
     wd = (card or {}).get("workdir", "")
-    if not wd or not Path(wd).is_dir():
-        return {"ok": False, "error": "這張卡沒有產出目錄（或目錄已不在）"}
+    if not workdir_ok(wd):
+        return {"ok": False, "error": "這張卡沒有產出目錄（或目錄已不在、不在員工工作區內）"}
     try:
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", wd])
     except OSError as e:
@@ -2469,6 +2491,21 @@ CLI_TIMEOUT = float(os.environ.get("OFFICE_CLI_TIMEOUT", "1800"))  # 這麼久�
 cli_procs: dict[str, asyncio.subprocess.Process] = {}   # aid -> 執行中的 CLI（供中止）
 cli_model: dict[str, str] = {}   # aid -> CLI 上次實際跑的模型（system/init 會報，供介面揭露）
 cli_caps: dict = {}              # CLI 上次回報的能力（工具/技能/MCP）——init 全都帶了
+
+
+# 員工子行程（Claude Code、Codex，以及它們啟動的 MCP）只拿得到這些環境變數。先前是黑名單（只濾 ANTHROPIC_* 等計費金鑰），
+# 橋 .env 裡的 TELEGRAM_BOT_TOKEN、SLACK_BOT_TOKEN、COGITO_HTTP_TOKEN、COGITO_HTTP_APPROVER_TOKEN 全部被繼承——
+# 被提示注入的員工一行 printenv 就拿到，有審批金鑰還能自己核准高危操作（2026-09-17 安全稽核 High #3）。
+# 白名單：新加的秘密預設就不會外流；真的需要傳某個變數，就加進 OFFICE_AGENT_ENV_PASS（逗號分隔的名稱）。
+AGENT_ENV_KEEP = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TZ", "TERM", "COLORTERM", "LANG",
+                  "__CF_USER_TEXT_ENCODING", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+                  "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"}
+
+
+def agent_env() -> dict[str, str]:
+    keep = AGENT_ENV_KEEP | {k.strip() for k in os.environ.get("OFFICE_AGENT_ENV_PASS", "").split(",") if k.strip()}
+    return {k: v for k, v in os.environ.items() if k in keep or k.startswith("LC_")}
 
 
 def cli_available() -> bool:
@@ -2755,7 +2792,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         # 員工 CLI 走訂閱（office profile 的登入），【不能】把橋自己的 ANTHROPIC_* 帶給它：Claude Code 看到
         # ANTHROPIC_API_KEY 會優先用 API key 計費。實際踩到：一場會議的子 agent 被「Credit balance is too low」打掉——
         # 帳算到 console 的餘額上，訂閱額度根本沒用到。
-        env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+        env = agent_env()   # 白名單（見 AGENT_ENV_KEEP）：ANTHROPIC_* 自然不在裡面，員工走訂閱不走 API 計費
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(base), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=1 << 22)   # 單行可能很長（工具參數）
@@ -2882,7 +2919,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
 #   兩者都明講不支援，不假裝。審批要走 Codex 的 hooks 或 app-server，是下一步。
 # - 訂閱計費：跟 Claude Code 同一個坑——子行程不帶 OPENAI_API_KEY／CODEX_API_KEY，免得它改走 API 計費。
 CODEX_CMD = os.environ.get("OFFICE_CODEX_CMD", "codex")
-CODEX_SANDBOX = os.environ.get("OFFICE_CODEX_SANDBOX", "workspace-write")   # read-only｜workspace-write｜danger-full-access
+CODEX_SANDBOX = os.environ.get("OFFICE_CODEX_SANDBOX", "workspace-write")   # read-only｜workspace-write（danger-full-access 由 codex_blocked 拒絕）
 ENGINE_CODEX = "codex"
 codex_model: dict[str, str] = {}     # aid -> Codex 上次實際跑的模型（從 rollout 的 turn_context 讀，供介面揭露）
 codex_threads: dict[str, str] = {}   # "<aid>|<工作目錄>" -> thread id：老闆派的活接著同一條（隨 state 持久化）
@@ -2890,11 +2927,34 @@ codex_model_sent: dict[str, str] = {}   # aid -> 外殼替 Codex 選的模型（
 
 
 def codex_available() -> bool:
-    return shutil.which(CODEX_CMD) is not None
+    return shutil.which(CODEX_CMD) is not None and not codex_blocked()
+
+
+def codex_blocked() -> str:
+    """Codex 引擎為什麼不能用（空字串＝可以用）。2026-09-17 安全稽核 High #8：
+    - 沒有獨立的 OFFICE_CODEX_HOME：員工會用你本人的 ~/.codex——你的 ChatGPT 登入、把 /Users/mac 標成 trusted 的設定都跟著走。
+    - OFFICE_CODEX_SANDBOX=danger-full-access：完全關掉沙箱，而 exec 模式的審批政策是 never，等於把機器交出去。
+    - 獨立 home 還沒登入：跑起來也只會失敗，先講清楚。"""
+    if shutil.which(CODEX_CMD) is None:
+        return "找不到 codex 指令"
+    if CODEX_SANDBOX not in ("read-only", "workspace-write"):
+        return f"OFFICE_CODEX_SANDBOX={CODEX_SANDBOX} 不允許（只接受 read-only 或 workspace-write）"
+    home = os.environ.get("OFFICE_CODEX_HOME", "").strip()
+    if not home:
+        return "還沒設獨立的 OFFICE_CODEX_HOME（員工不能共用你本人的 ~/.codex）"
+    h = Path(home).expanduser()
+    try:
+        if h.resolve() == (Path.home() / ".codex").resolve():
+            return "OFFICE_CODEX_HOME 指到你本人的 ~/.codex，請換一個獨立目錄"
+    except OSError:
+        pass
+    if not (h / "auth.json").exists():
+        return f"{h} 還沒登入：CODEX_HOME={home} codex login"
+    return ""
 
 
 def codex_home() -> Path:
-    """員工用的 CODEX_HOME：OFFICE_CODEX_HOME 有設就用它（建議跟你本人的 ~/.codex 分開，理由同 ~/.claude-office），否則沿用 CODEX_HOME／~/.codex。"""
+    """員工用的 CODEX_HOME：OFFICE_CODEX_HOME（codex_blocked 保證有設、不是 ~/.codex 才會真的跑）；後面的退路只給模型清單這類唯讀用途。"""
     return Path(os.environ.get("OFFICE_CODEX_HOME") or os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
 
 
@@ -3001,8 +3061,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
                         "engine": ENGINE_CODEX, "session": tid})
     if not tid and not fresh and key in codex_threads:
         log_ev(aid, "ℹ 找不到上次的 Codex 對話紀錄，這次開一條新的")
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("ANTHROPIC_") and k not in ("OPENAI_API_KEY", "CODEX_API_KEY")}
+    env = agent_env()   # 白名單：OPENAI_API_KEY／CODEX_API_KEY 不在裡面（否則改走 API 計費），橋的交付與審批金鑰也不在
     if os.environ.get("OFFICE_CODEX_HOME"):
         env["CODEX_HOME"] = str(codex_home())
     try:
@@ -3836,6 +3895,7 @@ async def office_models():
             # 引擎：CLI 找不到就不給這個選項（入口資料驅動，跟 repo 那排同一個原則）
             "cli": cli_available(), "cli_cmd": CLI_CMD,
             "codex": codex_available(), "codex_cmd": CODEX_CMD, "codex_models": dict(codex_model),
+            "codex_blocked": codex_blocked() if shutil.which(CODEX_CMD) else "",
             "codex_list": codex_model_list() if codex_available() else [],
             "codex_effective": dict(codex_model_sent), "codex_default": os.environ.get("OFFICE_CODEX_MODEL", "").strip(),
             "engines": {aid: engine_of(aid) for aid in agents},
@@ -3865,6 +3925,10 @@ async def office_dispatch(d: dict):
             return {"ok": False, "error": "插話是空的——/steer 後面要接要補的那句話"}
     # 引擎分流：CLI 模式不經過 cogito——它自己就是完整的 agent，橋只負責把它的事件
     # 轉成 office 事件（走位/泡泡/工作串/卡片全部共用同一條投影路徑）。
+    want_engine = str(d.get("engine") or "") or engine_sent.get(aid) or (agents[aid].engine if aid in agents else "")
+    if want_engine == ENGINE_CODEX and verb not in ("/stop",) and (why := codex_blocked()):
+        # 選了 Codex 卻不能用：明講原因，不要靜靜改派給 cogito（那會讓人以為是 Codex 在做）
+        return {"ok": False, "error": f"Codex 引擎未啟用：{why}"}
     eng_now = engine_of(aid, str(d.get("engine") or ""))
     cli_mode = eng_now == ENGINE_CLI
     codex_mode = eng_now == ENGINE_CODEX
@@ -4103,8 +4167,11 @@ def deliver_path(aid: str, job: dict, started: float) -> tuple[Path | None, str]
     base = job_workdir(aid, job)   # 跟 CLI 實際跑的目錄同一個算法，找檔才找得到
     if base is None:
         return None, f"沒有工作區可找 {name}"
-    p = base / name
-    if not p.is_file():
+    raw = base / name
+    p = resolve_in(base, name)   # 先 resolve 再確認仍在工作區內：員工把報告做成指向 ../../.env 的 symlink，這裡就擋下
+    if p is None and (raw.exists() or raw.is_symlink()):
+        return None, f"{name} 指向員工工作區以外的位置，拒絕交付（2026-09-17 安全稽核 High #7）"
+    if p is None or not p.is_file():
         return None, f"任務結束但沒有產出 {name}"
     if p.stat().st_mtime < started - 1:
         return None, f"任務結束但 {name} 沒有更新（最後修改 {time.strftime('%m-%d %H:%M', time.localtime(p.stat().st_mtime))}）"
@@ -4688,6 +4755,9 @@ async def no_store_dev_assets(request, call_next):
     resp = await call_next(request)
     if request.url.path.startswith(("/unity", "/shell")):
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        # 只准同源嵌入（外殼嵌 Unity 是同源）：別的網站用 iframe 疊住外殼、誘導點「核准」行不通（稽核 Low）
+        resp.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN"
     elif request.url.path.startswith("/avatars"):
         resp.headers["Cache-Control"] = "no-cache"
     return resp

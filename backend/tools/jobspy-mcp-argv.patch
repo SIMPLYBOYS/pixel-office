@@ -1,0 +1,85 @@
+diff --git a/src/tools/search-jobs.js b/src/tools/search-jobs.js
+index 3c953d0..a072497 100644
+--- a/src/tools/search-jobs.js
++++ b/src/tools/search-jobs.js
+@@ -1,6 +1,6 @@
+ import logger from '../logger.js';
+ import { searchParams } from '../schemas/searchParamsSchema.js';
+-import { execSync } from 'node:child_process';
++import { execFileSync } from 'node:child_process';
+ import { z } from 'zod';
+ import changeCase from 'change-case-object';
+ 
+@@ -173,11 +173,14 @@ export function searchJobsHandler(params) {
+ 
+     const args = buildCommandArgs(validatedParams);
+     const dockerCmd = process.env.DOCKER_CMD || 'docker';
+-    const cmd = `${dockerCmd} run --rm jobspy ${args.join(' ')}`;
+-    logger.info(`Spawning process with args: ${cmd}`);
++    // Pixffice patch (2026-09-17 security audit, Critical #1): run with an argv array, never a shell string.
++    // Parameters are chosen by an LLM that reads untrusted web pages; interpolating them into a shell
++    // command let `$(...)` / backticks / quotes execute arbitrary commands outside the agent sandbox.
++    const argv = ['run', '--rm', 'jobspy', ...args];
++    logger.info('Spawning process', { cmd: dockerCmd, argv });
+ 
+     const timeout = params.timeout || 60000; // Default timeout of 60 seconds
+-    result = execSync(cmd, { timeout }).toString();
++    result = execFileSync(dockerCmd, argv, { timeout }).toString();
+ 
+     const parsedData = JSON.parse(result);
+ 
+@@ -218,13 +221,13 @@ function buildCommandArgs(params) {
+ 
+   // Add each parameter as a command line argument
+   if (params.siteNames) {
+-    args.push('--site_name', `"${params.siteNames}"`);
++    args.push(`--site_name=${params.siteNames}`);
+   }
+   if (params.searchTerm) {
+-    args.push('--search_term', `"${params.searchTerm}"`);
++    args.push(`--search_term=${params.searchTerm}`);
+   }
+   if (params.location) {
+-    args.push('--location', `"${params.location}"`);
++    args.push(`--location=${params.location}`);
+   }
+   if (params.distance) {
+     args.push('--distance', `${params.distance}`);
+@@ -233,7 +236,7 @@ function buildCommandArgs(params) {
+     args.push('--job_type', `${params.jobType}`);
+   }
+   if (params.googleSearchTerm) {
+-    args.push('--google_search_term', `"${params.googleSearchTerm}"`);
++    args.push(`--google_search_term=${params.googleSearchTerm}`);
+   }
+   if (params.resultsWanted) {
+     args.push('--results_wanted', `${params.resultsWanted}`);
+@@ -254,7 +257,7 @@ function buildCommandArgs(params) {
+     args.push('--verbose', `${params.verbose}`);
+   }
+   if (params.countryIndeed) {
+-    args.push('--country_indeed', `"${params.countryIndeed}"`);
++    args.push(`--country_indeed=${params.countryIndeed}`);
+   }
+   if (params.isRemote) {
+     args.push('--is_remote');
+@@ -263,16 +266,16 @@ function buildCommandArgs(params) {
+     args.push('--linkedin_fetch_description');
+   }
+   if (params.linkedinCompanyIds) {
+-    args.push('--linkedin_company_ids', `"${params.linkedinCompanyIds}"`);
++    args.push(`--linkedin_company_ids=${params.linkedinCompanyIds}`);
+   }
+   if (params.enforceAnnualSalary) {
+     args.push('--enforce_annual_salary');
+   }
+   if (params.proxies) {
+-    args.push('--proxies', `"${params.proxies}"`);
++    args.push(`--proxies=${params.proxies}`);
+   }
+   if (params.caCert) {
+-    args.push('--ca_cert', `"${params.caCert}"`);
++    args.push(`--ca_cert=${params.caCert}`);
+   }
+   args.push('--format', params.format || 'json');
+   return args;
