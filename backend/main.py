@@ -692,6 +692,7 @@ async def sweep_work() -> None:
             await sync_emote(aid)
 
     refresh_proposed()      # 提案是 consolidate 工具寫的，任務中就可能多出來
+    sweep_memory()          # 記憶檔：cogito 放行後才落地、hook 沒送到的，這裡補記
     # 徽章對帳：上面那些轉換點都會即時送，這裡是保險——宣告式的好處就是重算一次
     # 永遠安全，漏掉的轉換點最多晚一輪，不會留下「狀態過了徽章還在」的殘影。
     for aid in list(agents):
@@ -1807,7 +1808,8 @@ async def office_proposed_act(aid: str, d: dict):
     if aid not in agents:
         return {"ok": False, "error": "沒有這位員工"}
     nums = [int(n) for n in (d.get("nums") or []) if str(n).isdigit()]
-    total = len(parse_proposed(aid))
+    parse_proposed_before = parse_proposed(aid)   # 送出去之後就讀不到了（cogito 會把那幾條搬走）
+    total = len(parse_proposed_before)
     if bad := [n for n in nums if not 1 <= n <= total]:
         return {"ok": False, "error": f"編號超出範圍（現有 1–{total}）：{bad}"}
     if not COGITO_HTTP:
@@ -1824,8 +1826,12 @@ async def office_proposed_act(aid: str, d: dict):
         return {"ok": False, "error": f"cogito 回 {r.status_code}：{r.text[:120]}——一條都沒動"}
     # cogito 是非同步收下的（202），檔案不會在這一刻就改好。刻意【不】立刻回報新數字：
     # 現在讀到的還是舊的，回一個「還沒變」的數字看起來像沒生效。等下一輪 sweep 對齊。
-    log_ev(aid, f"🧑‍💼 老闆{'放行' if verb == 'apply' else '丟棄'}了記憶提案"
-                f"（{'第 ' + '、'.join(map(str, nums)) + ' 條' if nums else '全部'}）")
+    # 帶上提案內容：光寫「放行了第 3 條」，事後對不回那條變成哪個記憶檔（資料留存說明書第 6 類）。
+    # 檔名要等 cogito 寫完才有，由 sweep_memory() 補記。
+    picked = [it for it in (parse_proposed_before or []) if not nums or it["n"] in nums]
+    what = "；".join(f"{it['n']}. {it['text'][:60]}" for it in picked[:5]) or ("第 " + "、".join(map(str, nums)) if nums else "全部")
+    log_ev(aid, f"🧑‍💼 老闆{'放行' if verb == 'apply' else '丟棄'}了記憶提案（{what}）")
+    audit("memory." + verb, aid, items=[it["text"][:200] for it in picked], nums=nums or "全部")
     return {"ok": True, "sent": cmd}
 
 
@@ -3103,7 +3109,10 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
       跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的照樣被擋。
     - 你本人的 ~/.agents/skills 關掉：Claude Code 員工看不到它們；實測 firecrawl 技能寫著「MUST replace WebFetch and WebSearch」，
       直接跟辦公室的工具對照打架。Codex 自己內建的技能（CODEX_HOME 底下）不動。"""
-    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"', "-c", "sandbox_workspace_write.network_access=true"]
+    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"', "-c", "sandbox_workspace_write.network_access=true",
+           # 辦公室的記憶制度是「提案→老闆放行」（cogito 那套）。Codex 自己的記憶沒有放行關卡、也投影不到畫面，
+           # 所以明確關掉——上游目前預設就是關的，但那是上游的預設，不是我們的決定。
+           "-c", "features.memories=false"]
     toml = lambda v: json.dumps(str(v), ensure_ascii=False)   # JSON 字串就是合法的 TOML 字串；ensure_ascii=False 避免 emoji 變成 TOML 不收的代理對
     allowed = office_mcp_allowed()
     for name, srv in office_mcp_servers().items():
@@ -3373,6 +3382,9 @@ HOOK_SCRIPT = Path(__file__).parent / "tools" / "office_permission_hook.py"
 # 2026-09-17 安全稽核 Critical #1：jobspy MCP 把參數拼進 shell 字串執行——根本修法（改參數陣列）之前先擋在這裡。
 GUARD_SCRIPT = Path(__file__).parent / "tools" / "office_tool_guard.py"
 GUARD_MATCHER = "mcp__jobspy__.*"
+# 記憶落帳（PostToolUse）：員工自己寫的記憶檔要對得回「誰、哪張卡、什麼時候」（2026-09-18 資料留存說明書第 6 類驗收）。
+MEMORY_SCRIPT = Path(__file__).parent / "tools" / "office_memory_hook.py"
+MEMORY_MATCHER = "Write|Edit"
 CLI_APPROVAL_S = float(os.environ.get("OFFICE_CLI_APPROVAL_S", "300"))   # 無人回應就自動拒絕（與 cogito 同款 5 分鐘）
 cli_permission: dict[str, asyncio.Future] = {}   # aid -> 等老闆決定的 future（allow?, why）
 cli_turns: dict[str, int] = {}                    # aid -> 還要等幾個 result 才算收工（1 ＋ 插話數）
@@ -3381,9 +3393,10 @@ CWD_AGENT_RE = re.compile(r"/office_(kanban|p\d+)(?:/|$)")
 
 
 def sync_office_hook() -> str:
-    """把辦公室的兩個 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
+    """把辦公室的三個 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
     - PermissionRequest：審批 hook（權限請求交給辦公室審批）
     - PreToolUse：工具守門（jobspy MCP 的參數白名單；2026-09-17 安全稽核 Critical #1）
+    - PostToolUse：記憶落帳（員工寫 memory/*.md 就記一筆；2026-09-18 資料留存說明書第 6 類）
     掛在 profile 而不是各工作區：權限線是辦公室的制度，不該每個員工各一份、漏一個就變成無聲拒絕或無聲放行。"""
     cfg = os.environ.get("CLAUDE_CONFIG_DIR")
     if not cfg:
@@ -3397,7 +3410,8 @@ def sync_office_hook() -> str:
     changed = False
     for event, matcher, want in (
             ("PermissionRequest", "", {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}),
-            ("PreToolUse", GUARD_MATCHER, {"type": "command", "command": str(GUARD_SCRIPT), "timeout": 10})):
+            ("PreToolUse", GUARD_MATCHER, {"type": "command", "command": str(GUARD_SCRIPT), "timeout": 10}),
+            ("PostToolUse", MEMORY_MATCHER, {"type": "command", "command": str(MEMORY_SCRIPT), "timeout": 10})):
         entries = d.setdefault("hooks", {}).setdefault(event, [])
         found = None
         for entry in entries:
@@ -3419,8 +3433,83 @@ def sync_office_hook() -> str:
         return "same"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"審批 hook／工具守門已同步進 {p}")
+    print(f"審批 hook／工具守門／記憶落帳已同步進 {p}")
     return "wrote"
+
+
+# ── 記憶落帳：員工自己寫的記憶，辦公室要答得出「誰、哪張卡、什麼時候、哪個檔」──────────────
+# 2026-09-18 資料留存說明書第 6 類的驗收：抽查記憶檔，要能在工作串找到那一筆寫入。先前兩個引擎都沒有：
+# cogito 只寫「老闆放行了記憶提案」（沒有檔名），CLI 那份橋根本沒碰過。
+# 兩條進料：PostToolUse hook（CLI，當下就知道是誰的 cwd）與 30 秒一輪的掃描（cogito 寫的檔、hook 沒送到的）。
+memory_seen: dict[str, float] = {}   # 記憶檔路徑 -> 已經記過的 mtime（隨 state 持久化，重啟不重複記）
+
+
+def memory_roots() -> list[tuple[str, Path]]:
+    """(員工代號, 記憶目錄)。CLI 的記憶是按【專案根】存的，員工的工作區都在 cogito workspace 底下＝
+    同一個根，所以那一份是全員共用的池子，認不出是誰寫的——代號留空，照實記。"""
+    out: list[tuple[str, Path]] = []
+    if CHANNELS_DIR is not None:
+        out += [(aid, CHANNELS_DIR / f"office_{aid}" / ".claw" / "memory") for aid in agents]
+    if cfg := os.environ.get("CLAUDE_CONFIG_DIR"):
+        for d in sorted((Path(cfg).expanduser() / "projects").glob("*/memory")):
+            m = re.search(r"office-(kanban|p\d+)(?:-|$)", d.parent.name)
+            out.append((m.group(1) if m and m.group(1) in agents else "", d))
+    return out
+
+
+def record_memory(aid: str, path: Path, via: str, quiet: bool = False) -> bool:
+    """記一筆記憶檔寫入（帳本＋那位員工的工作串）。同一個檔 mtime 沒變就不重複記。
+    quiet＝只落帳不寫工作串：首次盤點的是【以前就寫好的】檔，寫進今天的卡等於謊報寫入時間。"""
+    global _dirty
+    try:
+        mt = path.stat().st_mtime
+    except OSError:
+        return False
+    if memory_seen.get(str(path)) == mt:
+        return False
+    memory_seen[str(path)] = mt
+    _dirty = True
+    card = (last_report.get(aid) or {}).get("id") if aid else None
+    audit("memory.write", aid, file=str(path), card=card, via=via,
+          at_file=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mt)))
+    if aid and not quiet:
+        log_ev(aid, f"🧠 寫了記憶檔 {path.name}")
+    return True
+
+
+def sweep_memory() -> None:
+    """掃一輪所有記憶目錄：新檔或被改過的檔就補記。cogito 放行的記憶是它自己寫的檔，只能這樣看得到。"""
+    for aid, d in memory_roots():
+        try:
+            files = sorted(d.glob("*.md"))
+        except OSError:
+            continue
+        for f in files:
+            record_memory(aid, f, "掃描")
+
+
+def memory_inventory() -> None:
+    """第一次啟用這條線時，把【已經存在】的記憶檔各記一筆「首次盤點」。
+    不落這一筆的話，說明書要求的「每個記憶檔都找得到一筆紀錄」對舊檔永遠不成立；
+    但也不能假裝是今天寫的——所以 via 寫「首次盤點」、帶檔案自己的時間、不進工作串。"""
+    n = sum(record_memory(aid, f, "首次盤點", quiet=True)
+            for aid, d in memory_roots() for f in sorted(d.glob("*.md")) if d.is_dir())
+    if n:
+        print(f"記憶檔首次盤點：{n} 個（只落帳，不寫進今天的工作串）")
+
+
+@app.post("/office/memory")
+async def office_memory(d: dict):
+    """CLI 的 PostToolUse hook：員工剛寫完一個記憶檔。只收落在辦公室認得的記憶目錄裡的檔。"""
+    aid = agent_from_cwd(d.get("cwd")) or next((a for a, s in cli_session_of.items() if s == d.get("session_id")), "") or ""
+    try:
+        p = Path(str(d.get("file") or "")).expanduser().resolve()
+    except OSError:
+        return {"ok": False, "error": "路徑不合法"}
+    roots = [r.resolve() for _, r in memory_roots() if r.exists()]   # resolve 兩邊再比：macOS 的 /var 是 /private/var 的連結
+    if not any(p.is_relative_to(r) for r in roots):
+        return {"ok": False, "error": "不是辦公室認得的記憶目錄"}
+    return {"ok": True, "recorded": record_memory(aid, p, "hook"), "agent": aid}
 
 
 def agent_from_cwd(cwd: str) -> str | None:
@@ -4801,7 +4890,8 @@ def save_state() -> None:
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
             "cli_caps": cli_caps, "cli_model": cli_model,
-            "codex_model": codex_model, "codex_threads": codex_threads, "codex_model_sent": codex_model_sent}  # 模型覆蓋是 cogito session 級的，重啟後畫面不能忘記
+            "codex_model": codex_model, "codex_threads": codex_threads, "codex_model_sent": codex_model_sent,
+            "memory_seen": memory_seen}   # 記憶檔記過哪些：重啟後不該把舊檔當成新寫的再記一次
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -4828,6 +4918,7 @@ def load_state() -> None:
                 _card_seq += 1       # 事件每輪重覆插入（畫面上就是「一次冒出好幾則」）
                 t["id"] = _card_seq
     conv_npc.update(data.get("conv_npc", {}))
+    memory_seen.update({k: float(v) for k, v in (data.get("memory_seen") or {}).items()})
     pending_approval.update(data.get("pending_approval", {}))
     approval_src.update(data.get("approval_src", {}))
     approval_meta.update(data.get("approval_meta", {}))
@@ -4899,6 +4990,7 @@ async def _startup() -> None:
     sync_souls()
     sync_office_guide()   # 共通守則：cogito 根 AGENTS.md ＋ 員工 CLI profile 的 CLAUDE.md
     sync_office_hook()    # 審批線：PermissionRequest hook 掛進員工 CLI profile
+    memory_inventory()    # 記憶檔：舊檔各補一筆「首次盤點」，之後的寫入由 hook 與 sweep 記
     sync_agents()   # kanban 頻道的具名 agent（主持人才點得到名）
     # 提案數要在【第一次開名冊之前】就是對的。只靠 sweep（30 秒一輪）的話，剛啟動那段
     # 名冊會說「0 條」——那不是「還沒載入」，是一句錯的話（實際上看板就有 33 條）。

@@ -476,6 +476,7 @@ def run() -> None:
     trace_links()
     start_records_engine()
     audit_ledger()
+    memory_ledger()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -1543,11 +1544,85 @@ def proposed_review() -> None:
                     assert c.post("/office/proposed/p07",
                                   json={"verb": "reject", "nums": []}).json()["ok"]
                     assert sent == ["apply memory 1 3", "reject memory"], sent
+                    # 放行那一刻要留下「放行了什麼」：只寫編號的話，事後對不回它變成哪個記憶檔
+                    # （2026-09-18 資料留存說明書第 6 類驗收）
+                    line = main.last_report["p07"]["events"][-2]["text"]
+                    assert "第一條學到的事" in line and "DELETE stale-slug" in line, line
+                    led = [json.loads(x) for x in main.audit_path().read_text(encoding="utf-8").splitlines()]
+                    ap = [e for e in led if e["kind"] == "memory.apply"]
+                    assert len(ap) == 1 and ap[0]["agent"] == "p07" and any("第一條學到的事" in t for t in ap[0]["items"]), ap
                 finally:
                     main.httpx.AsyncClient = old_cl
         finally:
             main.CHANNELS_DIR, main.COGITO_HTTP = old_ch, old_http
             main.memo_pending.pop("p07", None)
+
+
+def memory_ledger() -> None:
+    """記憶落帳（2026-09-18 資料留存說明書第 6 類驗收：抽查記憶檔要答得出誰、哪張卡、什麼時候）：
+    舊檔開帳時各補一筆「首次盤點」（不寫進今天的工作串——那等於謊報寫入時間）；
+    之後 cogito 寫的檔由 sweep 補記、CLI 寫的由 PostToolUse hook 當下記；同一個檔沒改就不重複記；
+    CLI 的記憶是按專案根存的＝全員共用一池，認不出是誰寫的就照實留空，不硬掛給某個人。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ch = Path(tmp) / "channels"
+        cog = ch / "office_p07" / ".claw" / "memory"; cog.mkdir(parents=True)
+        (cog / "舊的.md").write_text("以前就寫好的", encoding="utf-8")
+        prof = Path(tmp) / "claude-office"
+        mine = prof / "projects" / "-Users-x-workspace-channels-office-p07" / "memory"; mine.mkdir(parents=True)
+        pool = prof / "projects" / "-Users-x-workspace" / "memory"; pool.mkdir(parents=True)
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, ch
+        old_cfg = os.environ.get("CLAUDE_CONFIG_DIR"); os.environ["CLAUDE_CONFIG_DIR"] = str(prof)
+        old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+        main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        main.memory_seen.clear(); main.last_report.pop("p07", None); main.history.pop("p07", None)
+
+        def led(kind: str) -> list[dict]:
+            if not main.audit_path().exists():
+                return []
+            return [json.loads(x) for x in main.audit_path().read_text(encoding="utf-8").splitlines() if json.loads(x)["kind"] == kind]
+
+        try:
+            main.memory_inventory()
+            inv = led("memory.write")
+            assert len(inv) == 1 and inv[0]["via"] == "首次盤點" and inv[0]["file"].endswith("舊的.md"), inv
+            assert "p07" not in main.last_report, "舊檔不該寫進今天的工作串（那是謊報寫入時間）"
+            main.memory_inventory(); assert len(led("memory.write")) == 1, "盤點過的不再重複記"
+
+            with TestClient(main.app) as c:
+                # cogito 放行後才落地的檔：只能靠掃描看見，掛在那位員工身上、寫進他的工作串
+                (cog / "mem-新的.md").write_text("放行後 cogito 寫的", encoding="utf-8")
+                main.sweep_memory()
+                w = [e for e in led("memory.write") if e["file"].endswith("mem-新的.md")]
+                assert len(w) == 1 and w[0]["agent"] == "p07" and w[0]["via"] == "掃描", w
+                assert any("mem-新的.md" in e["text"] for e in main.last_report["p07"]["events"]), main.last_report["p07"]["events"]
+                main.sweep_memory(); assert len(led("memory.write")) == 2, "mtime 沒變就不重複記"
+
+                # CLI：hook 當下送來，用 cwd 認人
+                f = mine / "cli-記得的事.md"; f.write_text("x", encoding="utf-8")
+                r = c.post("/office/memory", json={"cwd": str(ch / "office_p07"), "file": str(f), "tool": "Write"}).json()
+                assert r["ok"] and r["recorded"] and r["agent"] == "p07", r
+                assert c.post("/office/memory", json={"cwd": str(ch / "office_p07"), "file": str(f)}).json()["recorded"] is False
+                hooked = [e for e in led("memory.write") if e["file"].endswith("cli-記得的事.md")]
+                assert hooked[0]["via"] == "hook" and hooked[0]["card"] == main.last_report["p07"]["id"], hooked
+                # 共用池：認不出是誰寫的就留空，不硬掛給某個人
+                (pool / "共用的.md").write_text("y", encoding="utf-8")
+                main.sweep_memory()
+                shared = [e for e in led("memory.write") if e["file"].endswith("共用的.md")]
+                assert len(shared) == 1 and not shared[0].get("agent"), shared
+                # 不在任何記憶目錄裡的路徑不收（偽造的 POST 不能亂塞帳）
+                bad = Path(tmp) / "別的地方" / "memory" / "假的.md"; bad.parent.mkdir(parents=True)
+                bad.write_text("z", encoding="utf-8")
+                assert c.post("/office/memory", json={"cwd": str(ch / "office_p07"), "file": str(bad)}).json()["ok"] is False
+        finally:
+            main.CHANNELS_DIR, main.AUDIT_DIR = old_ch, old_dir
+            main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            main.memory_seen.clear(); main.last_report.pop("p07", None); main.history.pop("p07", None)
+            if old_cfg is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
+    print("  ✓ 記憶落帳：舊檔首次盤點、cogito 靠掃描、CLI 靠 hook、重複不記、共用池不硬掛人、偽造路徑不收")
 
 
 def approver_key_separation() -> None:
@@ -3098,6 +3173,8 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 # 跟 Claude Code 員工對齊（同一個人設不因換廠商換做法）：只讀 cwd 的 AGENTS.md、開網頁搜尋、MCP 照抄員工 profile
                 cs = [a[i + 1] for i, x in enumerate(a) if x == "-c"]
                 assert "project_root_markers=[]" in cs and 'web_search="live"' in cs and "sandbox_workspace_write.network_access=true" in cs, a
+                # Codex 自己的記憶沒有「提案→老闆放行」那道關卡，也投影不到畫面：明確關掉
+                assert "features.memories=false" in cs, cs
                 # 核准跟 Claude Code 員工同一條線：整台放行的設 approve（exec 模式沒設就一律擋）；只放行單一工具的不整台放行
                 assert 'mcp_servers.jobspy={command="node", args=["/mcp/jobspy/index.js"], env={"DOCKER_CMD"="docker"}, default_tools_approval_mode="approve"}' in cs \
                     and 'mcp_servers.job104={command="npx", args=["-y", "mcp-server-104@0.2.0"]}' in cs \
