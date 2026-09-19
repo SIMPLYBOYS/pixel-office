@@ -38,5 +38,49 @@
       "file": "jobs-{date}.md"
     },
     "text": "每日職缺整理（班表任務，不是老闆派的）。你是秘書，只做收集與條件比對，不替老闆決定、絕不投遞、不聯絡任何人。【條件核對表——請老闆在 schedule.json 裡改成自己的】：地點台北或可遠端；方向 AI agent／LLM 應用／Web3／blockchain／後端／平台工程；年資五年以上；排除：純前端、需長期出差、外派；外包／接案：AI agent、LLM 整合、後端自動化這類需求也收。步驟：1) 用 Bash 跑 date +%F 取今天日期、算出昨天，不要猜；不要用 gh／curl，Bash 在這裡沒有網路。工具回傳太大被存成檔案時，用 Read 讀那個檔再自己整理，不要用 Bash 跑 jq／python 去解（無人值守下 Bash 會被拒，等於白做）。2) 讀目前目錄裡昨天那份 jobs-<昨天>.md（沒有就寫「沒有昨天那份」），今天要標「新出現／延續／消失」。3) 來源依序，前一個能用就別浪費時間在後面的（但 a 的兩顆 MCP 與 b 的 JobFrog 是【每天一定查】，不管前面回了多少）：a. 【第一優先 MCP，兩顆】a1. mcp__job104__search_jobs（104）：keyword 分別 'AI Agent'、'LLM'、'Web3'、'區塊鏈'、'後端工程師'、'平台工程師'，area '台北市'，excludeFeatured true（廣告置頂的不要），sort 最新，limit 20；remote 條件再跑一次 keyword 'AI Agent' 帶 remote；每筆拿 jobName／companyName／area／salary／appearDate／url。注意 104 的 appearDate 是【更新日】不是刊登日（官方只給這個），所以 104 的日期靠 seen.json 的首見日判斷（見步驟 4），不要拿 appearDate 當刊登日；這顆走的是非官方端點，一天只在班表這一輪用、不重複打、不翻超過第 2 頁。a2. mcp__jobspy__search_jobs（Indeed＋LinkedIn）：siteNames 'indeed,linkedin'、location 'Taiwan'、countryIndeed 'Taiwan'、hoursOld 168、resultsWanted 25，searchTerm 至少跑六次：'AI Agent'、'LLM'、'Web3'、'Blockchain'、'Backend Engineer'、'Platform Engineer'（中文再跑 'AI 工程師'、'後端工程師'、'區塊鏈'）；isRemote true 再跑一次 'AI Agent'。每筆拿 title／company／location／datePosted／jobUrl／（有就用）minAmount／maxAmount／description。b. 【每天一定查】JobFrog（外商科技職缺，https://www.job-frog.com ；只讀 /companies/<slug> 與 /jobs/<id>，robots 禁止 /api/ 與 /go/ 不要碰；它的站內搜尋是 JS 走 /api/，所以不用它的搜尋）：【用關鍵字、不鎖公司】WebSearch 帶 allowed_domains ['job-frog.com']，關鍵字分別跑 'AI Agent'、'LLM'、'Web3'、'Blockchain'、'AI Engineer 台北'、'區塊鏈'、'LLM 工程師'、'Agent 開發'（一種語言一查、2～3 個詞、不用 OR），只收 /jobs/<id> 的結果、去重後每筆 WebFetch https://www.job-frog.com/jobs/<id> 拿「發布：YYYY-MM-DD」、公司、地點、年資、類別，只留 7 天內；連結就用 job-frog 的職缺頁。來源狀態要寫「搜尋引擎索引可能落後，幾則 /jobs/ 命中、幾則在 7 天內」，搜不到就寫搜不到。c. 【第三】WebFetch LinkedIn 訪客搜尋 https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=<關鍵字>&location=Taiwan&f_TPR=r604800&start=0 （每頁 10 筆，start 加 25 翻頁）補 MCP 沒回的關鍵字；c. 【外包】WebFetch Freelancer 公開 API https://www.freelancer.com/api/projects/0.1/projects/active/?query=<單一英文字>&full_description=true&limit=30&compact=true&job_details=true （query 只吃單一個字才會過濾，分別跑 LLM、chatbot、langchain、openai、agent；取 title／budget／type／time_submitted／bid_stats／seo_url，連結是 https://www.freelancer.com/projects/<seo_url>；只留 time_submitted 在 7 天內、且標題或說明與 AI／LLM／agent／自動化有關的）；d. 【第四】WebFetch Yourator JSON https://www.yourator.co/api/v4/jobs?term%5B%5D=<關鍵字>&page=1 （payload.jobs，欄位 name／company.brand／location／salary／lastActiveAt／path，連結 https://www.yourator.co<path>，只留「一天內更新」「一週內更新」）。104 只用 MCP 那顆，不要 WebFetch 它；Cake、1111、Upwork 有機器人驗證拿不到，不要試；4) 首見帳：讀目前目錄的 seen.json（沒有就建，JSON 物件，key 是連結，值 {first_seen, last_seen, source, company, title}）；今天查到的每一筆：不在帳上 → 新增、first_seen 與 last_seen 都填今天；在帳上 → 只把 last_seen 改成今天。查完寫回 seen.json（整份、排序、縮排）。去重：同一公司同一職稱只留一筆（優先留有日期與薪資的那筆）。窗口判斷：有刊登日的來源（LinkedIn／Indeed／JobFrog／Freelancer）用刊登日在 7 天內；104 用 first_seen 在 7 天內。沒有日期又不在帳上的不列進正式表、另放「日期不明」一小節最多 5 筆。5) 在目前目錄寫 jobs-<今天>.md，格式固定、不要加別的段：第一段「來源狀態」一張表（來源｜查了什麼｜回幾筆｜7 天內幾筆｜問題）；第二段「職缺」一張表最多 20 筆，欄位「公司｜職稱｜地點／遠端｜薪資（有寫才寫，沒寫留空）｜條件符合 n／總數｜刊登日｜連結」；刊登日欄：有刊登日的來源直接填，104 填「首見 YYYY-MM-DD（更新 YYYY/MM/DD）」，依符合數再依日期排序，【每一列都必須有連結與刊登日，缺一不列】；第三段「外包／接案」一張表最多 10 筆，欄位「平台｜需求標題｜預算｜類型（固定／時薪）｜投標數｜刊登日｜連結」；第四段「與昨天相比」三行，用 seen.json 算不用翻昨天的檔：新出現＝first_seen 是今天（列公司＋職稱）、消失＝last_seen 是昨天但今天沒查到、延續＝其餘；第一天全是新出現就照實寫；第五段「要問老闆」最多 3 條，只列不判斷。整份不寫感想、不寫過程敘述、不重複資料；表格外的文字每段不超過兩行。6) 只讀不改、不投遞、不註冊、不聯絡、不留下老闆任何個資。"
+  },
+  {
+    "name": "trend-weekly-老徐",
+    "weekday": 6,
+    "hour": 11,
+    "engine": "cli",
+    "agent": "p19",
+    "text": "每週 GitHub 趨勢分析（班表任務，每週日，不是老闆派的）。你是 CTO，這份給工程團隊看：這一週開源圈往哪裡走、哪些值得花時間看。步驟：1) 用 Bash 跑 date +%F 取今天日期，算出含今天在內的過去 7 天日期，不要猜；2) 讀目前目錄這 7 天的 trend-<日期>.md（缺哪天記下來，寫進「資料覆蓋」，不要補猜、不要為了補那天去重抓）；再讀上週那份 weekly-trend-<7 天前>.md（沒有就寫「第一週，沒有上週可比」）。這份只整理本週已經收集到的日報，不重新上網抓資料。3) 在目前目錄寫 weekly-trend-<今天>.md，段落固定：開頭三行結論；「本週趨勢」：升溫的技術方向（至少兩個 repo 共同指向才算方向）、降溫的、屬於噪音的，各一到三條，每條附代表 repo；「前 10 名」一張表（排名｜repo｜一句話它解決誰的問題｜本週上榜天數｜最近一次 stars 或名次｜連結），排序依本週上榜天數、同天數再比最近一次的 stars；「與上週相比」三行（前 10 名裡新進榜／連續在榜／掉出，第一週就照實寫）；最後「資料覆蓋」一行：本週讀到幾份日報、缺哪幾天。前 10 名的每一列都要能在本週某一份日報裡找到，連結照抄日報裡的、不另外找；日報裡沒有的東西不寫。4) 只讀不改任何 repo、不 push。",
+    "deliver": {
+      "file": "weekly-trend-{date}.md"
+    }
+  },
+  {
+    "name": "intel-weekly-小樺",
+    "weekday": 6,
+    "hour": 11,
+    "engine": "cli",
+    "agent": "p08",
+    "text": "每週市場情報分析（班表任務，每週日，不是老闆派的）。你是市場研究員，交出去的是判斷材料，不是判斷。步驟：1) 用 Bash 跑 date +%F 取今天日期，算出含今天在內的過去 7 天日期，不要猜；2) 讀目前目錄這 7 天的 intel-<日期>.md（缺哪天記下來，寫進「資料覆蓋」，不要補猜、不要為了補那天去重抓）；再讀上週那份 weekly-intel-<7 天前>.md（沒有就寫「第一週，沒有上週可比」）。這份只整理本週已經收集到的日報，不重新上網抓資料。3) 在目前目錄寫 weekly-intel-<今天>.md，段落固定：開頭三行結論；「本週趨勢」：依 AI／半導體／平台與消費／資本市場／台灣 分組，每組一行（延續整週的主題、本週新出現的、已經落幕的）；「前 10 名」一張表（排名｜一句話｜分組｜提到的來源數｜本週出現天數｜連結），排序依提到的來源數、同數再比出現天數，單一來源的不進前 10；「來源狀態」一行：本週哪些來源失敗、各失敗幾天；「給小美的本週判斷材料」2–3 條，每條列選項與各自代價，不下判斷；「與上週相比」三行（前 10 名裡新進榜／連續在榜／掉出，第一週就照實寫）；最後「資料覆蓋」一行：本週讀到幾份日報、缺哪幾天。前 10 名的每一列都要能在本週某一份日報裡找到，連結照抄日報裡的、不另外找；日報裡沒有的東西不寫。4) 只讀不改任何 repo、不 push。",
+    "deliver": {
+      "file": "weekly-intel-{date}.md"
+    }
+  },
+  {
+    "name": "pm-weekly-小美",
+    "weekday": 6,
+    "hour": 11,
+    "engine": "cli",
+    "agent": "p01",
+    "text": "每週 PM 市場觀點分析（班表任務，每週日，不是老闆派的）。你是產品經理，這份給老闆看：這一週市場往哪裡走、對 Pixffice（像素辦公室裡的數字員工團隊）意味什麼、下週做什麼與不做什麼。步驟：1) 用 Bash 跑 date +%F 取今天日期，算出含今天在內的過去 7 天日期，不要猜；2) 讀目前目錄這 7 天的 pm-<日期>.md（缺哪天記下來，寫進「資料覆蓋」，不要補猜、不要為了補那天去重抓）；再讀上週那份 weekly-pm-<7 天前>.md（沒有就寫「第一週，沒有上週可比」）。這份只整理本週已經收集到的日報，不重新上網抓資料。3) 在目前目錄寫 weekly-pm-<今天>.md，段落固定：開頭三行結論；「本週趨勢」：本週反覆出現、對 AI agent／數字員工／辦公室協作有意義的方向，一到三條；「前 10 名」一張表（排名｜訊息｜對 Pixffice 的意涵｜做／不做／觀察｜本週出現天數｜連結），排序依判斷（做 → 觀察 → 不做）、同判斷再比出現天數；「本週觀察項目的進展」：日報裡列「觀察」的，逐條寫有沒有進展；「下週做什麼、不做什麼」各一條，要做的那條附一句可機械檢查的驗收標準；結論裡不能出現「大概」「應該」；「與上週相比」三行（前 10 名裡新進榜／連續在榜／掉出，第一週就照實寫）；最後「資料覆蓋」一行：本週讀到幾份日報、缺哪幾天。前 10 名的每一列都要能在本週某一份日報裡找到，連結照抄日報裡的、不另外找；日報裡沒有的東西不寫。4) 只讀不改任何 repo、不 push。",
+    "deliver": {
+      "file": "weekly-pm-{date}.md"
+    }
+  },
+  {
+    "name": "jobs-weekly-小安",
+    "weekday": 6,
+    "hour": 11,
+    "engine": "cli",
+    "agent": "p10",
+    "text": "每週職缺趨勢分析（班表任務，每週日，不是老闆派的）。你是秘書，只做整理與條件比對，不替老闆決定、絕不投遞、不聯絡任何人。條件核對表以 jobs-daily-小安 那張班表裡寫的為準。步驟：1) 用 Bash 跑 date +%F 取今天日期，算出含今天在內的過去 7 天日期，不要猜；2) 讀目前目錄這 7 天的 jobs-<日期>.md（缺哪天記下來，寫進「資料覆蓋」，不要補猜、不要為了補那天去重抓）；再讀上週那份 weekly-jobs-<7 天前>.md（沒有就寫「第一週，沒有上週可比」）。這份只整理本週已經收集到的日報，不重新上網抓資料。3) 在目前目錄寫 weekly-jobs-<今天>.md，段落固定：開頭三行結論；「本週趨勢」：用 seen.json 算本週新出現幾筆、消失幾筆、延續幾筆；依方向（AI agent／LLM 應用／Web3／blockchain／後端／平台工程／外包）各計本週筆數，寫哪一類變多、哪一類變少；有寫薪資的才列薪資區間，沒寫的不猜；「前 10 名」一張表，職缺與外包合併排名（排名｜類型：職缺或外包｜公司或平台｜職稱或需求標題｜地點／遠端｜薪資或預算｜條件符合 n／總數｜首見日｜本週出現天數｜連結），排序依條件符合數、同數再比首見日新的在前，【每一列都必須有連結與首見日，缺一不列】；「要問老闆」最多 3 條，只列不判斷；「與上週相比」三行（前 10 名裡新進榜／連續在榜／掉出，第一週就照實寫）；最後「資料覆蓋」一行：本週讀到幾份日報、缺哪幾天。前 10 名的每一列都要能在本週某一份日報裡找到，連結照抄日報裡的、不另外找；日報裡沒有的東西不寫。4) 只讀不改任何 repo、不 push。",
+    "deliver": {
+      "file": "weekly-jobs-{date}.md"
+    }
   }
 ]
