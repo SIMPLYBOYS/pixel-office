@@ -311,15 +311,18 @@ def main():
             r_end = max(r for r, _ in comp)
             c_end = next(c for r, c in comp if r == r_end)
             if room(r_end + 1, c_end):
-                x0, y0 = p0 + off, r_end * CELL
-                for j in range(6, CELL - 1):
-                    for i in range(thick):
-                        canvas[y0 + j][x0 + i] = wall_body[j % CELL][(x0 + i) % CELL]
-                for i in range(thick):
-                    canvas[y0 + CELL - 1][x0 + i] = wall_foot[0][(x0 + i) % CELL]
+                # 端點做成【整格寬】的門框柱：跟牆同寬（7px）時像一截細白棒，整格寬才讀得出
+                # 「牆到這裡結束、旁邊是門口」（2026-09-20 Aaron 選的做法：補門框柱、不動走廊寬度）。
+                x0, y0 = c_end * CELL, r_end * CELL
+                for j in range(CELL):
+                    src = wall_cap[j] if j < len(wall_cap) else wall_body[j - len(wall_cap)]
+                    for i in range(CELL):
+                        canvas[y0 + j][x0 + i] = src[i]
+                for i in range(CELL):
+                    canvas[y0 + CELL - 1][x0 + i] = wall_foot[0][i]
                 for j in range(len(shadow)):
-                    for i in range(thick):
-                        canvas[y0 + CELL + j][x0 + i] = shadow[j][(x0 + i) % CELL]
+                    for i in range(CELL):
+                        canvas[y0 + CELL + j][x0 + i] = shadow[j][i]
 
         # 兩側都是房間的隔牆要有地面陰影，否則那條白線看起來像貼在地上的膠帶，不像牆
         # （實際回報：櫃檯與會議室之間那道）。官方素材的直牆都是【外牆】——另一側是建築物
