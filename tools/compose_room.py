@@ -162,6 +162,8 @@ def main():
     # 立體牆面（'='）＝【外框 + 填滿 + 外框】，結構取自 LimeZu 官方 Gym_2：它的直牆剖面
     # 就是 N+WWWWW+N。所以只要兩種像素：牆頂那片白，跟收邊的深藍。
     wall_top = wall_cap[2][0]                          # 頂面的白
+    SHADOW_W = 7                                       # 隔牆在地板上的陰影寬度（同牆腳陰影）
+    SHADOW_K = 150 / 178                               # 壓暗倍率：牆腳陰影 969696 ÷ 乾淨地板 b2b2b2
     wall_edge = wall_cap[0][0]                         # 外框的深藍
     if min(wall_top[:3]) < 235 or max(wall_edge[:3]) > 90:
         raise SystemExit("compose_room: 牆頂剖面不是預期的白/深藍——bg_base 換版了，要重新量")
@@ -301,6 +303,41 @@ def main():
                     if nb not in cset and atw(*nb) != "=" and room(*nb):
                         for i in range(thick):
                             canvas[yj][p0 + off + i] = wall_edge
+
+        # 隔牆的南端要看得到牆面：牆到這裡就斷了，只有頂面的話像一條白線斷在地板中間。
+        # 這個視角下，朝南的牆面本來就看得到（橫牆的立面就是這樣畫的），所以端點沿用同一套
+        # 素材：白頂 6px（線本來就有）＋牆身 ~9px＋腳線＋陰影，寬度跟牆一樣，不做成粗柱子。
+        if not h and neg and pos:
+            r_end = max(r for r, _ in comp)
+            c_end = next(c for r, c in comp if r == r_end)
+            if room(r_end + 1, c_end):
+                x0, y0 = p0 + off, r_end * CELL
+                for j in range(6, CELL - 1):
+                    for i in range(thick):
+                        canvas[y0 + j][x0 + i] = wall_body[j % CELL][(x0 + i) % CELL]
+                for i in range(thick):
+                    canvas[y0 + CELL - 1][x0 + i] = wall_foot[0][(x0 + i) % CELL]
+                for j in range(len(shadow)):
+                    for i in range(thick):
+                        canvas[y0 + CELL + j][x0 + i] = shadow[j][(x0 + i) % CELL]
+
+        # 兩側都是房間的隔牆要有地面陰影，否則那條白線看起來像貼在地上的膠帶，不像牆
+        # （實際回報：櫃檯與會議室之間那道）。官方素材的直牆都是【外牆】——另一側是建築物
+        # 外面（透明），所以只有頂面也讀得出是牆；隔牆兩側都有地板，撐起高度的就只剩陰影。
+        # 配方照橫牆的牆腳陰影量的：地板壓暗到 0.84（b2b2b2 → 969696），寬度同樣 7px、不做漸層。
+        # 落在哪一側跟橫牆一致：橫牆的陰影在南側，所以直牆的在東側（同一個光源）。
+        if neg and pos:
+            for r, c in comp:
+                x, y = c * CELL, r * CELL
+                for j in range(CELL):          # 沿著牆的方向
+                    for i in range(SHADOW_W):  # 垂直於牆、往陰影那側
+                        sx, sy = (x + j, p0 + off + thick + i) if h else (p0 + off + thick + i, y + j)
+                        if not (0 <= sy < H and 0 <= sx < W):
+                            continue
+                        px = canvas[sy][sx]
+                        if px[3] > 8 and min(px[:3]) < 230:   # 只壓地板：牆頂的白與收邊不動
+                            canvas[sy][sx] = (int(px[0] * SHADOW_K), int(px[1] * SHADOW_K),
+                                              int(px[2] * SHADOW_K), px[3])
 
     # 櫃檯房的北牆牆身換磚面（D1 上排房間的樣式）。蓋掉立面的淡紫牆身 y6-30，
     # 保留上緣的白色頂線（y0-5）與下緣的深藍腳線（y31）——D1 的磚牆本來就這樣收邊。
