@@ -472,6 +472,7 @@ def run() -> None:
     schedule_file_valid()
     schedule_visible()
     schedule_manual_run()
+    weekly_makeup()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -2581,6 +2582,57 @@ def schedule_file_valid() -> None:
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
                 assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
+
+
+def weekly_makeup() -> None:
+    """週報漏跑不能隔天就消失：指定 weekday 的班表，那天沒跑的話，之後每天都還列在收件匣可以補跑，
+    直到下一次該跑的時間到。實際回報：9/20（週日）11:00 電腦關著，9/21 收件匣什麼都沒有，那份週報等於憑空消失。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = Path(tmp) / "schedule.json"
+        sched.write_text(json.dumps([
+            {"name": "週報", "weekday": 6, "hour": 11, "engine": "cli", "agent": "p19",
+             "text": "整理本週", "deliver": {"file": "weekly-{date}.md"}}], ensure_ascii=False), encoding="utf-8")
+        old = (main.SCHEDULE_FILE, main.CHANNELS_DIR, dict(main.sched_last))
+        main.SCHEDULE_FILE, main.CHANNELS_DIR = sched, Path(tmp)
+        main.sched_last.clear(); main.sched_running.pop("p19", None); main.busy.discard("p19")
+        at = lambda s: time.strptime(s, "%Y-%m-%d %H:%M")
+        names = lambda t: sorted(j["name"] for j in main.missed_jobs(t))
+        try:
+            assert names(at("2026-09-20 09:00")) == [], "當天還沒到點：不算漏"
+            assert names(at("2026-09-20 12:00")) == ["週報"], "當天到點沒跑：要列"
+            miss = main.missed_jobs(at("2026-09-21 09:00"))          # ← 這次修的：隔天仍要列得出來
+            assert [j["name"] for j in miss] == ["週報"] and miss[0]["day"] == "2026-09-20", miss
+            assert names(at("2026-09-26 12:00")) == ["週報"], "整週都還補得了（下一次是 9/27）"
+            assert names(at("2026-09-27 09:00")) == [], "下一次那天還沒到點：上一份不再回頭補，等它自己跑"
+            # 補跑產出的報表寫的是【補跑當天】的日期，不是該跑的那天——兩邊都要算數，否則補完還一直列
+            # 補跑寫出來的報表用的是【補跑當天】的日期，不是該跑的那天——兩邊都要算數，否則補完還一直列。
+            # 這一段用「今天」跑：帳本是用真實日期落帳的，寫死日期的話換一天跑就假綠。
+            now_t = time.localtime()
+            if now_t.tm_wday == 6 and now_t.tm_hour < 11:
+                print("  （今天是週日且還沒到 11:00，最近一次週日不在過去，這段跳過）")
+            else:
+                today = time.strftime("%Y-%m-%d", now_t)
+                main.sched_last["週報"] = today + " 09"
+                (Path(tmp) / "office_p19").mkdir()
+                rpt = Path(tmp) / "office_p19" / f"weekly-{today}.md"
+                rpt.write_text("補跑的", encoding="utf-8")
+                assert names(now_t) == [], "補跑過、報表在了就不再列"
+                # 補跑那天帳本收得不乾淨（被中止／出錯），但報表【確實寫出來了】：產出是事實，不要再叫人補一次
+                old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+                main._audit_last.update({"seq": 0, "hash": "", "path": None})
+                try:
+                    main.audit("task.start", "p19", card=1); main.audit("task.stopped", "p19")
+                    assert main.unfinished_today("p19", today) == "stopped", "帳本這一天是被中止收的"
+                    assert names(now_t) == [], "報表在了就不再列，即使帳本收得不乾淨"
+                    rpt.unlink()
+                    assert names(now_t) == ["週報"], "報表不在、又收得不乾淨：要再給一顆補跑"
+                finally:
+                    main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+        finally:
+            main.SCHEDULE_FILE, main.CHANNELS_DIR = old[0], old[1]
+            main.sched_last.clear(); main.sched_last.update(old[2])
+    print("  ✓ 週報補跑：漏掉那天之後仍列得出來、標出是哪一天、補跑完就收掉")
 
 
 def schedule_manual_run() -> None:

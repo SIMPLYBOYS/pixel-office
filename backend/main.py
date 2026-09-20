@@ -3829,13 +3829,16 @@ def inbox_items(limit: int = 60) -> dict:
         todo.append({"id": f"start:{k['id']}", "kind": "ask_start", "agent": KANBAN, "name": agents[KANBAN].name if KANBAN in agents else "看板",
                      "card": k["id"], "text": "板子開好了，主持人在等你說開工", "at": k.get("at", "")})
     now_t = time.localtime()
-    for j in missed_jobs(now_t):   # 今天到點沒跑的班表：橋當時不在。要不要補跑是老闆的決定
-        aid, jname = str(j["agent"]), str(j["name"])
-        todo.append({"id": f"missed:{jname}:{time.strftime('%Y-%m-%d', now_t)}", "kind": "missed", "agent": aid,
+    today_s = time.strftime("%Y-%m-%d", now_t)
+    for j in missed_jobs(now_t):   # 到點沒跑的班表：橋當時不在。要不要補跑是老闆的決定
+        aid, jname, dday = str(j["agent"]), str(j["name"]), str(j.get("day") or today_s)
+        # 哪一天該跑要講出來：週報漏掉的是【上個週日】那份，寫成「今天」會讓人以為是今天的班表
+        when = "今天" if dday == today_s else f"{dday[5:7]}/{dday[8:]}（{WEEKDAYS[time.strptime(dday, '%Y-%m-%d').tm_wday]}）"
+        todo.append({"id": f"missed:{jname}:{dday}", "kind": "missed", "agent": aid,
                      "name": agents[aid].name, "job": jname,
-                     "text": (f"班表「{jname}」今天被中止，沒有產出" if j.get("why") == "stopped"
-                              else f"班表「{jname}」今天沒跑完（中斷或出錯），沒有產出" if j.get("why") == "error"
-                              else f"班表「{jname}」{j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）")})
+                     "text": (f"班表「{jname}」{when}被中止，沒有產出" if j.get("why") == "stopped"
+                              else f"班表「{jname}」{when}沒跑完（中斷或出錯），沒有產出" if j.get("why") == "error"
+                              else f"班表「{jname}」{when} {j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）")})
     recent: list[dict] = []
     for e in audit_recent("", 400):
         if e.get("kind") not in INBOX_KINDS:
@@ -4613,26 +4616,47 @@ def unfinished_today(aid: str, day: str) -> str:
     return last
 
 
+def job_due_day(job: dict, now: time.struct_time) -> str:
+    """這條班表最近一次【該跑】的日期（YYYY-MM-DD）；還沒到點就回空字串。
+
+    每天的班表：今天到點之後就是今天。指定 weekday 的：今天是那天且到點＝今天，否則回【上一次】那個星期幾——
+    週報漏跑一天就再也補不回來（實際回報：9/20 週日 11:00 電腦關著，9/21 收件匣什麼都沒有，那份週報等於憑空消失）。
+    只回頭找最近一次：再往前就跨過下一次該跑的時間了，那時候補的是上上週，不如等下一輪。"""
+    passed = now.tm_hour * 60 + now.tm_min >= job["hour"] * 60 + int(job.get("minute") or 0)
+    wd = job.get("weekday")
+    if wd is None:
+        return time.strftime("%Y-%m-%d", now) if passed else ""
+    if not isinstance(wd, int) or not 0 <= wd <= 6:
+        return ""
+    back = (now.tm_wday - wd) % 7
+    if back == 0 and not passed:
+        return ""      # 今天就是那天、還沒到點：等它自己跑
+    return time.strftime("%Y-%m-%d", time.localtime(time.mktime(now) - back * 86400))
+
+
 def missed_jobs(now: time.struct_time) -> list[dict]:
-    """今天該跑、時間已過、卻沒跑的班表（沒戳記、也沒今天那份報表）——橋在 9:00 沒開著的那個早上。"""
-    day = time.strftime("%Y-%m-%d", now)
+    """該跑、時間已過、卻沒有產出的班表（沒戳記、也沒那天的報表）——橋在 9:00 沒開著的那個早上。
+    每一筆帶 day＝它該跑的那一天，收件匣才講得出是今天的還是週日那份。"""
     out = []
     for job in load_schedule():
-        if not _job_ok(job) or job.get("weekday") not in (None, now.tm_wday):
+        if not _job_ok(job):
             continue
-        if now.tm_hour * 60 + now.tm_min < job["hour"] * 60 + int(job.get("minute") or 0):
+        day = job_due_day(job, now)
+        if not day:
             continue
         name, aid = str(job["name"]), str(job["agent"])
         running = sched_running.get(aid, {}).get("job", {}).get("name") == name   # 正在跑的那條不算漏
-        if report_today(aid, job, day) is not None or running:
+        ran = sched_last.get(name, "")[:10]        # 最後一次到點或補跑的日期
+        # 報表可能落在該跑的那天，也可能落在事後補跑的那天（補跑寫的是補跑當天的日期）
+        if running or any(report_today(aid, job, d) is not None for d in {day, ran} if d):
             continue
-        # 今天到過點（戳記蓋了）卻沒有產出：看帳本這個人今天最後一次是怎麼收的——被老闆中止、或收工時不是 ok
+        # 跑過了（當天到點或事後補跑）卻沒有產出：看帳本那天最後一次是怎麼收的——被老闆中止、或收工時不是 ok
         # （CLI 被砍、橋重啟把它斷掉、出錯）都算「沒跑完」，要再給一顆補跑（實際回報：中止後找不到地方重跑；老徐重跑到一半橋重啟也一樣）。
-        if sched_last.get(name, "").startswith(day):
-            if why := unfinished_today(aid, day):
-                out.append({**job, "why": why})
+        if ran >= day:
+            if why := unfinished_today(aid, ran):
+                out.append({**job, "why": why, "day": day})
         else:
-            out.append(job)
+            out.append({**job, "day": day})
     return out
 
 
