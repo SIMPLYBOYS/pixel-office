@@ -216,6 +216,28 @@
   .cmd .cex { color: var(--dim); font-size: 11px; }
   .cmd.later { opacity: .6; }
   .cmdnotes { color: var(--dim); font-size: 11px; margin-top: 10px; line-height: 1.7; }
+  /* 任務看板（對照 munder-difflin 的 tasks）：全辦公室的任務卡依狀態分四欄。窄欄時兩欄兩列，放大（⛶）後四欄並排 */
+  .tboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; padding: 4px 12px 14px; }
+  .tcol { background: #12161e; border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 0; }
+  .tcolh { display: flex; justify-content: space-between; font-size: 12px; color: var(--text);
+           padding: 2px 4px 6px; margin-bottom: 6px; border-bottom: 2px solid var(--line); }
+  .tcolh small { color: var(--dim); }
+  .tcol.doing .tcolh { border-bottom-color: #f5c451; }
+  .tcol.wait .tcolh { border-bottom-color: #e8904a; }
+  .tcol.done .tcolh { border-bottom-color: #6fc276; }
+  .tcol.fail .tcolh { border-bottom-color: #d05a5a; }
+  .tk { display: block; width: 100%; text-align: left; cursor: pointer; background: var(--card); border: 1px solid var(--line);
+        border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; color: var(--text); font: inherit; font-size: 12px; }
+  .tk:hover { border-color: #3a404c; }
+  .tk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .tkwho { display: flex; justify-content: space-between; gap: 6px; font-weight: 500; }
+  .tkwho small { color: var(--dim); font-weight: 400; }
+  .tktask { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: #b8bec8; margin: 2px 0; }
+  .tkmeta { color: var(--dim); font-size: 11px; }
+  .tkmeta .og { font-style: normal; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: #232833; }
+  .og.boss { color: #f5c451; } .og.sched { color: #7fb8ff; } .og.dele { color: #b39ddb; }
+  .tempty, .tmore { color: var(--dim); font-size: 11px; padding: 4px; }
+  .tcard.flash { outline: 2px solid var(--accent); outline-offset: 2px; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
                   list-style: none; display: flex; gap: 6px; align-items: center; }
   .prof summary::-webkit-details-marker { display: none; }
@@ -543,6 +565,7 @@
     <details class="prof audit" id="audit" hidden></details>
     <details class="prof costs" id="costs" hidden></details>
     <details class="prof cmds" id="cmds" hidden></details>
+    <details class="prof tasks" id="tasks" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
     <div class="composer">
@@ -1080,7 +1103,7 @@ const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
 // ── 右欄分頁 ─────────────────────────────────────────────────────────────
 // 分頁跟著資料走：面板沒資料（hidden）就沒有那一頁，跟面板原本「有資料才出現」同一個原則。
 // 當前頁一定展開——各面板重畫時會照自己記在 localStorage 的開合狀態收起來，觀察者負責再打開。
-const TABS = [['feed', '💬 工作串'], ['ws', '📂 工作區'], ['board', '🗂 任務板'], ['memo', '💡 記憶'],
+const TABS = [['feed', '💬 工作串'], ['tasks', '📋 任務'], ['ws', '📂 工作區'], ['board', '🗂 任務板'], ['memo', '💡 記憶'],
               ['profile', '👤 檔案'], ['audit', '🧾 稽核'], ['costs', '💰 花費'], ['cmds', '⌨️ 指令']];
 let tab = 'feed', feedNew = false;   // feedNew：人在別頁時工作串有新東西，分頁上亮一個點，別讓人漏看
 // 標題列的頭像與職稱：跟名冊同一套頭像（/avatars/<id>.png，沒有就用名字第一個字頂替）
@@ -1134,6 +1157,71 @@ $('cmds').addEventListener('click', e => {
   box.dispatchEvent(new Event('input'));   // 送出鈕的字樣（送出／插話／中止）跟著輸入內容變
 });
 
+// 任務看板：全辦公室的任務卡依狀態分四欄（對照 munder-difflin 的 tasks）。資料是每個人最近 20 張卡——
+// 不是全部歷史，畫面上講明（完整的在稽核帳本）。卡上的來源（老闆／班表／委派）是開卡那一刻記的；推不出來就不標。
+const TASK_COLS = [
+  ['doing', '進行中', c => c.status === 'working' && !c.approval],
+  ['wait', '等審批', c => c.status === 'working' && c.approval],
+  ['done', '完成', c => c.status === 'ok'],
+  ['fail', '失敗・中止', c => ['error', 'stopped', 'lost', 'superseded'].includes(c.status)],
+];
+const TASK_COL_MAX = 30;
+const ORIGIN_CLS = { 老闆: 'boss', 班表: 'sched', 委派: 'dele' };
+const STATUS_MARK = { error: ' ✗ 失敗', stopped: ' 🛑 中止', lost: ' ⚠ 失聯', superseded: ' ↻ 已由續跑接手' };
+let taskScope = 'all';   // all＝全辦公室；me＝只看目前選的這位
+const taskCardHtml = c => `<button type="button" class="tk" data-agent="${esc(c.agent)}" data-card="${esc(String(c.id))}">
+  <span class="tkwho">${esc(c.name)}${c.engine ? `<small>${esc(ENGINE_NAME[c.engine] || c.engine)}</small>` : ''}</span>
+  <span class="tktask">${esc(c.task)}</span>
+  <span class="tkmeta">${esc((c.day || '').slice(5).replace('-', '/'))} ${esc(c.at || '')}${
+    c.origin ? `<i class="og ${ORIGIN_CLS[c.origin] || ''}">${esc(c.origin)}${c.from && agentsData[c.from] ? '・' + esc(agentsData[c.from].name) : ''}</i>` : ''
+  }${STATUS_MARK[c.status] || ''}</span></button>`;
+async function taskboard() {
+  const box = $('tasks');
+  let r;
+  try { r = await (await fetch('/office/tasks')).json(); } catch { return; }
+  if (!r.ok) return;
+  const mine = taskScope === 'me' && selected;
+  const cards = mine ? r.cards.filter(x => x.agent === selected) : r.cards;
+  const sig = JSON.stringify([taskScope, selected, cards.map(x => [x.id, x.status, x.approval, x.origin])]);
+  if (box.dataset.sig === sig) return;           // 沒變就不重畫（五秒輪一次）
+  box.dataset.sig = sig;
+  const who = selected && agentsData[selected] ? agentsData[selected].name : '';
+  box.innerHTML = `<summary>📋 任務看板<small>每人最近 ${r.per_agent} 張・點卡片看工作串</small>${
+      who ? `<span class="wdbtn" data-scope="${mine ? 'all' : 'me'}">${mine ? '看全辦公室' : '只看' + esc(who)}</span>` : ''}</summary>
+    <div class="tboard">${TASK_COLS.map(([cls, title, pick]) => {
+      const list = cards.filter(pick);
+      return `<div class="tcol ${cls}"><div class="tcolh">${title}<small>${list.length}</small></div>
+        ${list.slice(0, TASK_COL_MAX).map(taskCardHtml).join('') || '<div class="tempty">—</div>'}
+        ${list.length > TASK_COL_MAX ? `<div class="tmore">還有 ${list.length - TASK_COL_MAX} 張沒列（完整紀錄在稽核帳本）</div>` : ''}</div>`;
+    }).join('')}</div>`;
+  box.hidden = false;
+}
+// 點卡片：切到那位員工的工作串、展開那張卡並捲到它（換人時工作串是非同步重建的，等它出現）
+async function goToCard(aid, id) {
+  if (selected !== aid) pick(aid);
+  tab = 'feed';
+  paintTabs();
+  for (let i = 0; i < 40; i++) {
+    const el = $('feed').querySelector(`.tcard[data-id="${CSS.escape(id)}"]`);
+    if (el) {
+      for (let d = el; d && $('feed').contains(d); d = d.parentElement && d.parentElement.closest('details'))
+        if (!d.open) { d.open = true; if (d.dataset.id) tog(d.dataset.id, true); }
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1600);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
+$('tasks').addEventListener('click', e => {
+  const sc = e.target.closest('[data-scope]');
+  if (sc) { e.preventDefault(); taskScope = sc.dataset.scope; taskboard(); return; }
+  const k = e.target.closest('.tk');
+  if (k) { e.preventDefault(); goToCard(k.dataset.agent, k.dataset.card); }
+});
+setInterval(() => { if (tab === 'tasks') taskboard(); }, 5000);
+
 function paintTabs() {
   const sec = document.querySelector('body > section'), ib = $('inbox');
   const avail = id => id === 'feed' || !$(id).hidden;
@@ -1159,6 +1247,7 @@ $('tabs').onclick = e => {
   tab = b.dataset.tab;
   paintTabs();
   if (tab === 'feed' && f.dataset.keep) f.scrollTop = +f.dataset.keep;
+  if (tab === 'tasks') taskboard();   // 切進來就拿最新的，不等下一輪
 };
 // 當前頁的標題列（summary）不能把自己收起來——那等於切到一頁空白。上面的按鈕照常可按。
 document.querySelector('body > section').addEventListener('click', e => {
@@ -1172,6 +1261,7 @@ document.querySelector('body > section').addEventListener('click', e => {
   new MutationObserver(() => { if (tab !== 'feed' && !feedNew) { feedNew = true; paintTabs(); } })
     .observe($('feed'), { childList: true, subtree: true });
   paintTabs();
+  taskboard();   // 開機先載一次：任務分頁跟其他頁一樣「有資料才出現」
 }
 
 // 工作串放大／回復。不存 localStorage：放大是「這一刻想看清楚」，重新整理就回到平常的版面。

@@ -1112,6 +1112,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             sub_since[npc] = time.monotonic()
             notify("roster")
             child = report_card(npc, f"支援{agents[parent].name}：{shown}")
+            child["origin"], child["from"] = "委派", parent
             # 開會中就進會議室入座，否則各自回工位。
             # 這一行是「會議室」的全部——投影的差異只有【去哪裡】，因為真實世界的差異也只有這個：
             # 會議階段大家在會議室談，上板之後各自回位子做事。
@@ -1499,6 +1500,10 @@ async def office_event(ev: dict):
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
             # 或 cogito 改寫過任務名時，這行才帶來新資訊。
             note = pending_note.pop(aid, None)
+            # 來源記在卡上（任務看板要用）：寄放的那行知道是誰派的——內容跟標題一樣時它不會寫進卡上，
+            # 所以不能事後掃事件猜；事件也有 150 則上限，長任務最早那幾行會被截掉。
+            card["origin"] = ("班表" if aid in sched_running or (note or "").startswith("🗓 班表任務")
+                              else "老闆" if (note or "").startswith(NOTE_MARK) else card.get("origin", ""))
             if note and note_body(note)[:40] != task.strip()[:40]:
                 log_ev(aid, note)
             if desk := WORK_DESK.get(aid):
@@ -4201,6 +4206,44 @@ OFFICE_COMMANDS = [
     {"cmd": "undo memory", "desc": "列出或撤回 72 小時內自動放行的記憶（帶編號＝撤回那一條）",
      "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
 ]
+
+
+def card_origin(c: dict) -> str:
+    """這張卡是誰派的：開卡時記的欄位為準；更早的卡沒有這個欄位，才從卡上的字推（推不出來就留空，不猜）。"""
+    if c.get("origin"):
+        return str(c["origin"])
+    if str(c.get("task", "")).startswith("支援"):
+        return "委派"
+    for e in c.get("events", [])[:6]:
+        t = str(e.get("text", ""))
+        if t.startswith("📋 支援"):
+            return "委派"
+        if t.startswith("🗓 班表任務") and "開跑" in t:
+            return "班表"
+        if t.startswith(NOTE_MARK):
+            return "老闆"
+    return ""
+
+
+@app.get("/office/tasks")
+def office_tasks():
+    """全辦公室的任務卡摘要（任務看板，對照 munder-difflin 的 tasks 分頁）。
+    不另存一份：直接讀每個人的卡片史——所以範圍就是每人最近 20 張（history 的上限），回應裡講明。"""
+    out = []
+    for aid, cards in history.items():
+        if aid not in agents:
+            continue
+        for c in cards:
+            if c.get("status") == "note":
+                continue   # 雜記卡不是任務
+            out.append({"agent": aid, "name": agents[aid].name, "id": c.get("id"),
+                        "task": str(c.get("task") or "")[:160], "status": c.get("status"),
+                        "day": c.get("day", ""), "at": c.get("at", ""), "end": c.get("end", ""),
+                        "engine": c.get("engine") or "",   # 早期的卡沒記引擎：留空，不猜
+                        "origin": card_origin(c), "from": c.get("from", ""),
+                        "approval": c.get("status") == "working" and aid in pending_approval and last_report.get(aid) is c})
+    out.sort(key=lambda x: (x["day"], x["at"]), reverse=True)
+    return {"ok": True, "cards": out, "per_agent": 20}
 
 
 @app.get("/office/commands")

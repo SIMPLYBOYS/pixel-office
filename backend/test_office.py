@@ -474,6 +474,7 @@ def run() -> None:
     schedule_manual_run()
     weekly_makeup()
     commands_page()
+    task_board()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -999,6 +1000,48 @@ def clear_all() -> None:
             assert len(arch) == 1 and "x" in arch[0].read_text(encoding="utf-8"), "封存檔不見了"
             assert c.request("DELETE", "/office/board").json()["ok"] is False, "沒有板子時要講清楚"
     main.CHANNELS_DIR = None
+
+
+def task_board() -> None:
+    """任務看板（/office/tasks）：全辦公室的卡、標出誰派的。來源在開卡那一刻記——老闆那句跟卡名一樣時
+    不會寫進卡上，事後掃事件會漏；更早的卡沒有這個欄位，才從卡上的字推，推不出來就留空。"""
+    with TestClient(main.app) as c:
+        saved = {a: main.history.pop(a, None) for a in ("p07", "p12")}
+        for a in ("p07", "p12"):
+            main.last_report.pop(a, None)
+        try:
+            task = "盤點一下權限設定"
+            main.pending_note["p07"] = main.NOTE_MARK + task          # 老闆派的，而且跟卡名一模一樣
+            post(c, agent="p07", kind="start", label=task)
+            evs = [e["text"] for e in c.get("/office/report/p07").json()["timeline"]]
+            assert not any(t.startswith(main.NOTE_MARK) for t in evs), "前提：這一行不會寫進卡上（同一句話不記兩次）"
+            post(c, agent="p07", kind="done", label="ok")
+            main.sched_running["p12"] = {"job": {"name": "週報"}, "started": time.time()}
+            main.pending_note["p12"] = "🗓 班表任務「週報」開跑（由班表觸發）"
+            post(c, agent="p12", kind="start", label="整理本週")
+            main.pending_approval["p12"] = "要跑 rm -rf build/"
+            cards = {x["task"]: x for x in c.get("/office/tasks").json()["cards"] if x["agent"] in ("p07", "p12")}
+            assert cards[task]["origin"] == "老闆" and cards[task]["status"] == "ok", cards[task]
+            assert cards["整理本週"]["origin"] == "班表" and cards["整理本週"]["approval"] is True, cards["整理本週"]
+            # 更早的卡沒有 origin 欄位：從卡上的字推；推不出來就留空
+            old = main.report_card("p07", "支援阿海：查 log"); old.pop("origin", None); old["status"] = "ok"
+            bare = main.report_card("p07", "某個 Slack 頻道來的活"); bare["status"] = "error"
+            note = main.report_card("p07", "（雜項）"); note["status"] = "note"
+            got = {x["task"]: x for x in c.get("/office/tasks").json()["cards"] if x["agent"] == "p07"}
+            assert got["支援阿海：查 log"]["origin"] == "委派" and got["某個 Slack 頻道來的活"]["origin"] == "", got
+            assert "（雜項）" not in got, "雜記卡不是任務"
+            r = c.get("/office/tasks").json()
+            assert r["per_agent"] == 20 and r["cards"] == sorted(r["cards"], key=lambda x: (x["day"], x["at"]), reverse=True)
+        finally:
+            main.pending_approval.pop("p12", None); main.sched_running.pop("p12", None)
+            main.busy.difference_update({"p07", "p12"})
+            for a, h in saved.items():
+                main.history.pop(a, None); main.last_report.pop(a, None)
+                if h is not None:
+                    main.history[a] = h
+                    if h:
+                        main.last_report[a] = h[-1]
+    print("  ✓ 任務看板：全辦公室的卡、來源在開卡時記（老闆／班表／委派）、舊卡從卡上的字推、等審批標出來、雜記不列")
 
 
 def note_not_echoed() -> None:
