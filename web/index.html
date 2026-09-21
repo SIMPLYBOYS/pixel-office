@@ -836,7 +836,7 @@ async function roster() {
       <div class="team">${esc(t)}<small>${teams.get(t).length}</small></div>
       ${teams.get(t).map(id => {
         const a = d[id];
-        return `<div class="emp ${id === selected ? 'sel' : ''}" onclick="pick('${id}')">
+        return `<div class="emp ${id === selected ? 'sel' : ''}" data-id="${id}" onclick="pick('${id}')">
           <img class="face" src="/avatars/${id}.png" alt=""
                onerror="this.replaceWith(Object.assign(document.createElement('span'),
                         {className:'face ph', textContent:'${esc(a.name[0])}'}))">
@@ -1273,10 +1273,26 @@ const MAX_ICON = {
 function maxBtn() {
   const on = isMax();
   return `<button type="button" class="maxbtn" onclick="toggleMax()" aria-pressed="${on}"
-    title="${on ? '回復（Esc）' : '放大工作串（蓋滿視窗，輸入區照樣能用）'}" aria-label="${on ? '回復' : '放大工作串'}">`
+    title="${on ? '回復（Esc）・↑↓ 切換員工' : '放大工作串（蓋滿視窗，輸入區照樣能用；放大後 ↑↓ 切換員工）'}" aria-label="${on ? '回復' : '放大工作串'}">`
     + `<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"
          stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${on ? MAX_ICON.shrink : MAX_ICON.expand}</svg></button>`;
 }
+// 放大時名冊被蓋住了，換人得先回復——所以開放 ↑↓ 切換員工（名冊順序，頭尾相接；實際回報）。
+// 焦點在輸入框、選單裡時不攔：那裡的方向鍵是移動游標、換選項。按住不放時節流，別一口氣觸發一串載入。
+let lastSwitch = 0;
+addEventListener('keydown', e => {
+  if (!isMax() || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+  const ids = [...document.querySelectorAll('#roster .emp[data-id]')].map(x => x.dataset.id);
+  if (!ids.length) return;
+  e.preventDefault();                                 // 不然方向鍵會順便捲動工作串
+  if (performance.now() - lastSwitch < 150) return;
+  lastSwitch = performance.now();
+  const i = ids.indexOf(selected), step = e.key === 'ArrowDown' ? 1 : -1;
+  const next = ids[i < 0 ? 0 : (i + step + ids.length) % ids.length];
+  if (next !== selected) pick(next);
+});
+
 function toggleMax() {
   const f = $('feed'), atBottom = f.scrollHeight - f.scrollTop - f.clientHeight < 40;   // 貼底就維持貼底
   document.querySelector('body > section').classList.toggle('max');
