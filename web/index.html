@@ -178,6 +178,24 @@
   .memo .say.busy { opacity: .7; }
   .prof { border-bottom: 1px solid var(--line); }
   .prof[hidden] { display: none; }
+  /* 右欄分頁（對照 munder-difflin 的 terminal／tasks／memory 分頁）：原本工作區、任務板、記憶、檔案、稽核、花費、
+     收件匣七塊摺疊面板疊在工作串上方，工作串被擠到剩一小截（實際回報：版面太擠）。改成一次只看一頁，
+     工作串是預設頁。面板本身的畫法一行沒動，只是換成「是不是當前頁」決定顯示。 */
+  .tabs { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); flex: none;
+          overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: none; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim);
+         font: inherit; font-size: 12px; padding: 7px 8px 5px; cursor: pointer; white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .tab.new::after { content: '●'; color: var(--accent); font-size: 8px; margin-left: 4px; vertical-align: 2px; }
+  .tab.inboxtab { margin-left: auto; }            /* 收件匣是全辦公室的待辦，靠右當徽章，不跟這位員工的頁混在一起 */
+  .tab.inboxtab.hot { color: var(--accent); }
+  section[data-tab] > details.prof:not(.page) { display: none; }
+  section[data-tab]:not([data-tab="feed"]) > .feed { display: none; }
+  section > details.prof.page { flex: 1; min-height: 0; overflow-y: auto; border-bottom: 0; }
+  section > details.prof.page > summary { cursor: default; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
                   list-style: none; display: flex; gap: 6px; align-items: center; }
   .prof summary::-webkit-details-marker { display: none; }
@@ -493,6 +511,7 @@
   <div class="grip" id="gripR" title="拖曳調整寬度（雙擊還原）"></div>
   <section>
     <div class="head" id="head"><div class="empty">點左側員工查看工作串</div></div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="右欄分頁"></nav>
     <!-- 三塊都預設 hidden：還沒選人時它們是空的，沒有 summary 的 <details> 會被瀏覽器
          畫成預設字樣「詳細資料」，右上角就浮出三條沒有意義的列。各自的 render 函式
          抓到資料才會取消 hidden。 -->
@@ -1028,6 +1047,52 @@ function updateComposer() {
 // 設定收起來時，不能讓人不知道這次會用什麼跑：引擎、模型、repo 一律寫在按鈕上；
 // 任何一排有警告（⚠：cogito 沒開、Codex 要登入、repo 名字打錯…）就在按鈕前面帶 ⚠，不藏進面板裡。
 const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
+
+// ── 右欄分頁 ─────────────────────────────────────────────────────────────
+// 分頁跟著資料走：面板沒資料（hidden）就沒有那一頁，跟面板原本「有資料才出現」同一個原則。
+// 當前頁一定展開——各面板重畫時會照自己記在 localStorage 的開合狀態收起來，觀察者負責再打開。
+const TABS = [['feed', '💬 工作串'], ['ws', '📂 工作區'], ['board', '🗂 任務板'], ['memo', '💡 記憶'],
+              ['profile', '👤 檔案'], ['audit', '🧾 稽核'], ['costs', '💰 花費']];
+let tab = 'feed', feedNew = false;   // feedNew：人在別頁時工作串有新東西，分頁上亮一個點，別讓人漏看
+function paintTabs() {
+  const sec = document.querySelector('body > section'), ib = $('inbox');
+  const avail = id => id === 'feed' || !$(id).hidden;
+  if (!avail(tab)) tab = 'feed';      // 那一頁沒資料了（換人、面板收掉）：回工作串
+  sec.dataset.tab = tab;
+  for (const [id] of TABS.slice(1).concat([['inbox']])) $(id).classList.toggle('page', id === tab);
+  if (tab === 'feed') feedNew = false;
+  const todo = +(ib.dataset.todo || 0), unread = +(ib.dataset.unread || 0);
+  const btn = (id, label, cls = '', title = '') =>
+    `<button type="button" role="tab" class="tab${cls}${id === tab ? ' on' : ''}" aria-selected="${id === tab}" data-tab="${id}"${title ? ` title="${title}"` : ''}>${label}</button>`;
+  const html = TABS.filter(([id]) => avail(id)).map(([id, label]) => btn(id, label, id === 'feed' && feedNew ? ' new' : '')).join('')
+    + (ib.hidden ? '' : btn('inbox', `📥 ${todo || unread || ''}`.trim(), ' inboxtab' + (todo ? ' hot' : ''),
+                            `收件匣：待處理 ${todo}、未讀 ${unread}`));
+  const nav = $('tabs');
+  if (nav.dataset.sig !== html) { nav.innerHTML = html; nav.dataset.sig = html; }
+  if (tab !== 'feed' && !$(tab).open) $(tab).open = true;
+}
+$('tabs').onclick = e => {
+  const b = e.target.closest('[data-tab]');
+  if (!b || b.dataset.tab === tab) return;
+  const f = $('feed'), wasFeed = tab === 'feed';
+  if (wasFeed) f.dataset.keep = f.scrollTop;          // 回工作串時捲回原位，不要被切頁打斷
+  tab = b.dataset.tab;
+  paintTabs();
+  if (tab === 'feed' && f.dataset.keep) f.scrollTop = +f.dataset.keep;
+};
+// 當前頁的標題列（summary）不能把自己收起來——那等於切到一頁空白。上面的按鈕照常可按。
+document.querySelector('body > section').addEventListener('click', e => {
+  if (e.target.closest('details.prof.page > summary') && !e.target.closest('button, a, input, select, .rl, .wdbtn'))
+    e.preventDefault();
+}, true);
+{
+  const mo = new MutationObserver(paintTabs);
+  for (const [id] of TABS.slice(1).concat([['inbox']]))
+    mo.observe($(id), { attributes: true, attributeFilter: ['hidden', 'open', 'data-todo', 'data-unread'] });
+  new MutationObserver(() => { if (tab !== 'feed' && !feedNew) { feedNew = true; paintTabs(); } })
+    .observe($('feed'), { childList: true, subtree: true });
+  paintTabs();
+}
 
 // 工作串放大／回復。不存 localStorage：放大是「這一刻想看清楚」，重新整理就回到平常的版面。
 const isMax = () => document.querySelector('body > section').classList.contains('max');
@@ -1626,6 +1691,7 @@ async function inboxcard() {
   const dismissed = new Set((localStorage.inboxDismiss || '').split(',').filter(Boolean));
   r.todo = r.todo.filter(t => !(t.kind === 'missed' && dismissed.has(t.id)));
   const unread = r.recent.filter(x => x.seq > inboxRead()).length;
+  box.dataset.todo = r.todo.length; box.dataset.unread = unread;   // 分頁列的 📥 徽章讀這兩個數字
   const sig = JSON.stringify([r.todo.map(t => t.id), r.recent.slice(0, 40).map(x => x.id), unread]);
   if (box.dataset.sig === sig) { tickInbox(); return; }   // 沒變就不重畫（跟能力面板同一個做法）
   box.dataset.sig = sig;
