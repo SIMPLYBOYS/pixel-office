@@ -111,6 +111,7 @@ def run() -> None:
     main.BUBBLE_GAP = 0.01     # 測試不等真實泡泡節奏
     main.GIFT_HOLD = 0         # 遞交停留是演出節奏，合約只驗指令有沒有出
     main.HURT_HOLD = 0
+    main.ONESHOT_HOLD = 0      # 丟出演完才走回座位：節奏不驗，驗指令有沒有出、順序對不對
     main.WATCH_TICK = 0.2      # watchdog 巡快一點
     main.WORK_TIMEOUT = 1e9    # 主流程不觸發失聯（最後一段才調小）
     with TestClient(main.app) as c:
@@ -475,6 +476,7 @@ def run() -> None:
     weekly_makeup()
     commands_page()
     task_board()
+    limezu_gestures()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -1000,6 +1002,96 @@ def clear_all() -> None:
             assert len(arch) == 1 and "x" in arch[0].read_text(encoding="utf-8"), "封存檔不見了"
             assert c.request("DELETE", "/office/board").json()["ok"] is False, "沒有板子時要講清楚"
     main.CHANNELS_DIR = None
+
+
+def limezu_gestures() -> None:
+    """LimeZu 動作接上真實事件：舉起＋信封＝報表真的送到、丟出＝老闆親手駁回、撿起＝寫了記憶檔、zZ＝趴著睡。
+    每一個都要對得上真的發生的事——送不到不舉、逾時自動拒不丟、首次盤點的舊檔不撿。"""
+    import tempfile
+    sent: list[tuple[str, str]] = []
+    real_send = main.send_cmd
+
+    async def fake_send(cmd: dict) -> None:
+        if cmd.get("action") == "use":
+            sent.append((cmd["agent_id"], cmd["target"]))
+    main.send_cmd = fake_send
+    saved = (main.TELEGRAM_BOT_TOKEN, main.DELIVER_TO, main.send_telegram, main.CHANNELS_DIR)
+    try:
+        # zZ：趴著睡就掛；更急的（學到東西沒人收）排在它前面
+        main.sleeping.add("p05"); main.memo_pending.pop("p05", None)
+        assert main.want_emote("p05") == "zzz", main.want_emote("p05")
+        main.memo_pending["p05"] = 2
+        assert main.want_emote("p05") == "idea", "學到的東西沒人收比睡著急"
+        main.memo_pending.pop("p05", None); main.sleeping.discard("p05")
+        assert main.want_emote("p05") == ""
+
+        # 交付：送到才舉起、掛信封；送不到就不演
+        with tempfile.TemporaryDirectory() as tmp:
+            main.CHANNELS_DIR = Path(tmp)
+            (Path(tmp) / "office_p05").mkdir()
+            main.TELEGRAM_BOT_TOKEN, main.DELIVER_TO = "tg-token", "telegram:123"
+            job = {"name": "日報", "agent": "p05", "hour": 9, "deliver": {"file": "r-{date}.md"}}
+            started = time.time() - 5
+            (Path(tmp) / "office_p05" / f"r-{time.strftime('%Y-%m-%d', time.localtime(started))}.md").write_text("x")
+
+            async def boom(*a, **k): raise RuntimeError("telegram 掛了")
+            main.send_telegram = boom
+            main.delivered_at.pop("p05", None); sent.clear()
+            asyncio.run(main.deliver_job("p05", job, "ok", started))
+            assert not any(t.startswith("lift") for _, t in sent) and main.want_emote("p05") != "mail", "送不到還舉起來＝說謊"
+
+            async def ok(*a, **k): return None
+            main.send_telegram = ok
+            sent.clear()
+            asyncio.run(main.deliver_job("p05", job, "ok", started))
+            assert ("p05", main.oneshot_of("p05", "lift")) in sent and main.want_emote("p05") == "mail", sent
+            main.delivered_at["p05"] = time.monotonic() - main.MAIL_HOLD - 1
+            assert main.want_emote("p05") == "", "信封過了時間要自己下來"
+
+        # 駁回：老闆親手駁回才丟出，而且丟完才回座位；核准不丟
+        async def decide(allowed: bool) -> None:
+            fut = asyncio.get_running_loop().create_future()
+            main.cli_permission["p07"] = fut
+            main.pending_approval["p07"] = "要跑 rm -rf build/"
+            await main.resolve_cli_permission("p07", allowed, "不要刪")
+            await asyncio.sleep(0.05)       # 丟出在背景跑
+        real_goto, moves = main.goto, []
+
+        async def fake_goto(aid, spot): moves.append((aid, spot)); sent.append((aid, "→" + spot))
+        main.goto = fake_goto
+        try:
+            sent.clear(); asyncio.run(decide(False))
+            i_throw = sent.index(("p07", "throw_down"))
+            assert any(t.startswith("→") for _, t in sent[i_throw + 1:]), f"丟完才走回座位：{sent}"
+            sent.clear(); asyncio.run(decide(True))
+            assert ("p07", "throw_down") not in sent, "核准不丟"
+        finally:
+            main.goto = real_goto
+            main.cli_permission.pop("p07", None); main.clear_approval("p07")
+
+        # 寫記憶：撿起；首次盤點（quiet）的舊檔不演
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "記得的事.md"; f.write_text("x")
+
+            async def write(quiet: bool) -> None:
+                main.memory_seen.pop(str(f), None)
+                main.record_memory("p05", f, "hook", quiet=quiet)
+                await asyncio.sleep(0.02)
+            old_dir, main.AUDIT_DIR = main.AUDIT_DIR, Path(tmp) / "audit"
+            main._audit_last.update({"seq": 0, "hash": "", "path": None})
+            try:
+                sent.clear(); asyncio.run(write(True))
+                assert not sent, "首次盤點的舊檔是以前寫的，不演"
+                asyncio.run(write(False))
+                assert sent == [("p05", main.oneshot_of("p05", "pick_up"))], sent
+            finally:
+                main.AUDIT_DIR = old_dir; main._audit_last.update({"seq": 0, "hash": "", "path": None})
+                main.memory_seen.pop(str(f), None)
+    finally:
+        main.send_cmd = real_send
+        main.TELEGRAM_BOT_TOKEN, main.DELIVER_TO, main.send_telegram, main.CHANNELS_DIR = saved
+        main.delivered_at.clear(); main.sleeping.discard("p05")
+    print("  ✓ LimeZu 動作：送到才舉起＋信封、老闆駁回才丟出（丟完才回座位）、寫記憶才撿起、趴睡掛 zZ")
 
 
 def task_board() -> None:

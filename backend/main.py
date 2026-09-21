@@ -282,6 +282,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
                     if desk else [{"action": "use", "target": "sleep"}]
                 sleeping.add(a.id)
+                await sync_emote(a.id)   # zZ 跟著上去
             elif stays_put(a.id):   # 崗位固定：不走位，偶爾接個電話點綴，其餘時間就是在櫃檯辦公
                 actions = [{"action": "use", "target": random.choice([SIT_AT.get(a.id, "face_down")] * 3 + ["phone"])}]
             else:  # 零成本 idle：不打 API，偶爾走動點綴
@@ -387,9 +388,25 @@ HURT_HOLD = 1.0   # 支援者失敗後、被叫回座位前停留（move_to 會�
 SUB_RE = re.compile(r"^\[Subagent(?::([^\]]+))?\]\s*")  # cogito 子 agent 事件前綴
 
 
+def oneshot_of(aid: str, name: str) -> str:
+    """一次性動作的方向＝他坐著（或站著）面向的方向（sit_up → _up、sit_left → _left、face_down → _down）。
+    受傷、舉起（交付）、撿起（寫記憶）都在自己座位上演，所以共用這一個。"""
+    return f"{name}_" + SIT_AT.get(aid, "sit_up").removeprefix("sit_").removeprefix("face_")
+
+
 def hurt_of(aid: str) -> str:
-    """出錯時的受傷方向＝他坐著（或站著）面向的方向（sit_up → hurt_up、sit_left → hurt_left、face_down → hurt_down）。"""
-    return "hurt_" + SIT_AT.get(aid, "sit_up").removeprefix("sit_").removeprefix("face_")
+    """出錯時的受傷方向（見 oneshot_of）。"""
+    return oneshot_of(aid, "hurt")
+
+
+# LimeZu 動作接上真實事件（2026-09-21）：每一個都對得上一件真的發生的事，不為了熱鬧演。
+#   舉起＋頭上金色信封＝班表報表真的送到 Telegram／Slack（送不到就不演）
+#   丟出＝老闆親手駁回審批（逾時自動拒、無人值守拒不算——那不是老闆的決定）
+#   撿起＝員工寫了一個記憶檔（記憶落帳記到的那一筆）
+#   zZ＝趴著睡（sleeping），跟趴睡姿勢同一個狀態
+ONESHOT_HOLD = 1.8   # 丟出 14 幀 8fps≈1.75s：演完才走回座位（走位會清掉一次性動作）；測試設 0
+MAIL_HOLD = 8.0      # 金色信封掛多久：交付是一瞬間的事，掛太久就變成「一直有信」
+delivered_at: dict[str, float] = {}   # aid -> 最近一次報表送達的 monotonic 時間（信封徽章用）
 
 
 def say(aid: str, text: str) -> dict:
@@ -540,12 +557,16 @@ def want_emote(aid: str) -> str:
         return f"timer_{step}" if step is not None else "wait"
     if r := rate_state.get(aid):
         return r            # alert 紅驚嘆號／warn 黃驚嘆號
+    if time.monotonic() - delivered_at.get(aid, -1e9) < MAIL_HOLD:
+        return "mail"       # 金色信封：報表剛送出去（暫時的，過了 MAIL_HOLD 自己下來）
     if aid in watering:
         return "think"      # 空白思考泡：卡住空轉中（人已經走去飲水機了）
     if memo_pending.get(aid, 0):
         # 黃寶石：他學到的東西還擺在那沒人收。放最後——這件事不急，
         # 壓過「有人在等你決定」或「額度被擋」就是排錯輕重。
         return "idea"
+    if aid in sleeping:
+        return "zzz"        # 趴著睡：跟姿勢同一個狀態；最不急，放最後
     return ""
 
 
@@ -3484,6 +3505,10 @@ def record_memory(aid: str, path: Path, via: str, quiet: bool = False) -> bool:
           at_file=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mt)))
     if aid and not quiet:
         log_ev(aid, f"🧠 寫了記憶檔 {path.name}")
+        try:                                   # 撿起：把一件事收進記憶（呼叫端都在事件迴圈裡；不在就只落帳）
+            asyncio.get_running_loop().create_task(pose(aid, oneshot_of(aid, "pick_up")))
+        except RuntimeError:
+            pass
     return True
 
 
@@ -3579,9 +3604,20 @@ async def resolve_cli_permission(aid: str, allowed: bool, why: str) -> bool:
     notify("agent", aid, alert="done")
     await bubble(aid, "✓ 放行" if allowed else "⚠ 駁回")
     log_ev(aid, f"🧑‍💼 老闆{'核准' if allowed else '駁回'}了這個操作" + (f"：{why}" if why and not allowed else ""))
-    if desk := WORK_DESK.get(aid):
+    if not allowed:
+        asyncio.create_task(show_rejected(aid))   # 丟出、演完才回座位
+    elif desk := WORK_DESK.get(aid):
         await goto(aid, desk)
     return True
+
+
+async def show_rejected(aid: str) -> None:
+    """老闆駁回：在審批的地方（面向鏡頭、剛才在講手機）把被駁回的東西丟掉，演完才走回座位。
+    背景做：按駁回的那一下不必等這一秒多才有回應。"""
+    await pose(aid, "throw_down")
+    await asyncio.sleep(ONESHOT_HOLD)
+    if desk := WORK_DESK.get(aid):
+        await goto(aid, desk)
 
 
 async def cli_send(aid: str, text: str) -> bool:
@@ -4412,8 +4448,7 @@ async def office_dispatch(d: dict):
         notify("agent", aid, alert="done")
         await bubble(aid, "⚠ 駁回")
         log_ev(aid, f"🧑‍💼 老闆駁回了這個操作{how}")
-        if desk := WORK_DESK.get(aid):       # 審批完回工位繼續
-            await goto(aid, desk)
+        asyncio.create_task(show_rejected(aid))   # 丟出，演完才回工位繼續
         return {"ok": True, "delivered": not how}
 
     if codex_mode and verb in ("approve", "reject", "/steer"):
@@ -4668,6 +4703,7 @@ async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
             f"{'完成' if label == 'ok' else '中斷'}")
     if path is None and why:
         text += f"\n⚠ {why}"
+    delivered = False
     async with httpx.AsyncClient(timeout=30) as cl:
         for plat, ident in targets:
             token = TELEGRAM_BOT_TOKEN if plat == "telegram" else SLACK_BOT_TOKEN
@@ -4682,6 +4718,21 @@ async def deliver_job(aid: str, job: dict, label: str, started: float) -> None:
                 continue
             log_ev(aid, f"📤 {'報表 ' + path.name if path else '收工訊息'}已送到 {plat}:{ident}" + (f"（{why}）" if why else ""))
             audit("delivery.sent", aid, target=f"{plat}:{ident}", file=path.name if path else "", note=why, job=job.get("name"))
+            delivered = True
+    if delivered:   # 真的送到了才演：送不到還舉起來，就是在說謊
+        await show_delivered(aid)
+
+
+async def show_delivered(aid: str) -> None:
+    """報表送出去的那一下：在座位上舉起，頭上掛金色信封幾秒後自己下來。"""
+    delivered_at[aid] = time.monotonic()
+    await sync_emote(aid)
+    await pose(aid, oneshot_of(aid, "lift"))
+
+    async def later() -> None:
+        await asyncio.sleep(MAIL_HOLD + 0.1)
+        await sync_emote(aid)
+    asyncio.create_task(later())
 
 
 SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
