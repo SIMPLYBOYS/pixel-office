@@ -2657,7 +2657,53 @@ def commands_page() -> None:
         finally:
             main.busy.discard("p05")
             main.codex_available, main.codex_blocked = old_avail, old_blocked
-    print("  ✓ 指令頁：各引擎只列真的收的指令（Codex 只有中止、cogito 多自己的指令、開工只給看板），跟分流一致")
+    # 下半：這個引擎裝了什麼。Claude Code 用它開工時自己回報的清單；技能說明從磁碟上的 SKILL.md 補
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        prof = Path(tmp) / "claude-office"
+        (prof / "skills" / "synced" / "x" / "docx").mkdir(parents=True)
+        (prof / "skills" / "synced" / "x" / "docx" / "SKILL.md").write_text(
+            "---\nname: docx\ndescription: >\n  處理 Word 文件\n  含表格\n---\n內文", encoding="utf-8")
+        chome = Path(tmp) / "codex-office"
+        (chome / "skills" / ".system" / "imagegen").mkdir(parents=True)
+        (chome / "skills" / ".system" / "imagegen" / "SKILL.md").write_text(
+            '---\nname: "imagegen"\ndescription: "產生或編輯圖片"\n---\n', encoding="utf-8")
+        (prof / ".claude.json").write_text(json.dumps({"mcpServers": {"jobspy": {"command": "node"}, "other": {"command": "x"}}}), encoding="utf-8")
+        (prof / "settings.json").write_text(json.dumps({"permissions": {"allow": ["mcp__jobspy"]}}), encoding="utf-8")
+        saved_caps = dict(main.cli_caps); old_cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+        old_home = main.CODEX_HOME_DEFAULT
+        os.environ["CLAUDE_CONFIG_DIR"] = str(prof); main.CODEX_HOME_DEFAULT = chome
+        try:
+            main.cli_caps.clear()
+            assert "還沒有員工用 Claude Code 跑過" in main.engine_caps("cli")["note"], "沒跑過就講明，不假裝知道"
+            main.cli_caps.update({"at": "10:00", "agent": "p05", "tools": [{"name": "Bash", "description": ""}],
+                                  "skills": [{"name": "mytool", "description": ""}, {"name": "anthropic-skills:docx", "description": ""}],
+                                  "slash": ["mytool", "anthropic-skills:docx", "compact", "doctor", "__remote-workflow"],
+                                  "terminal_only": ["doctor"], "agents": ["Explore"], "plugins": ["agents-md"],
+                                  "mcp": [{"name": "jobspy", "description": "狀態：connected"}]})
+            cc = main.engine_caps("cli")
+            sk = {x["name"]: x["description"] for x in cc["skills"]}
+            assert sk["anthropic-skills:docx"] == "處理 Word 文件 含表格" and sk["mytool"] == "", sk
+            assert cc["slash"] == ["compact"], f"內建指令不含技能本身、只在終端機有的、底線開頭的內部指令：{cc['slash']}"
+            assert cc["terminal_only"] == ["doctor"] and cc["agents"] == ["Explore"] and cc["plugins"] == ["agents-md"]
+            assert "阿海" in cc["source"], cc["source"]
+            cx = main.engine_caps("codex")
+            assert cx["skills"] == [{"name": "imagegen", "description": "產生或編輯圖片"}], cx["skills"]
+            mcp = {x["name"]: x["description"] for x in cx["mcp"]}
+            assert "自動核准" in mcp["jobspy"] and "會被擋" in mcp["other"], mcp
+            fake = dict(main.cli_caps)
+            with TestClient(main.app) as c:
+                # 啟動時會 load_state()，把存檔裡的能力清單載回來蓋掉剛塞的——所以開了之後再塞一次
+                main.cli_caps.clear(); main.cli_caps.update(fake)
+                assert c.get("/office/commands?agent=p05&engine=cli").json()["caps"]["slash"] == ["compact"]
+        finally:
+            main.cli_caps.clear(); main.cli_caps.update(saved_caps); main.CODEX_HOME_DEFAULT = old_home
+            if old_cfg is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
+    print("  ✓ 指令頁：各引擎只列真的收的指令（Codex 只有中止、cogito 多自己的指令、開工只給看板），跟分流一致；"
+          "下半列技能（說明從 SKILL.md 補）、CLI 內建指令、子 agent、MCP")
 
 
 def weekly_makeup() -> None:

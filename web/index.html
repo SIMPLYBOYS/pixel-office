@@ -216,6 +216,20 @@
   .cmd .cex { color: var(--dim); font-size: 11px; }
   .cmd.later { opacity: .6; }
   .cmdnotes { color: var(--dim); font-size: 11px; margin-top: 10px; line-height: 1.7; }
+  /* 指令頁下半：這個引擎裝了什麼（技能、CLI 內建指令、子 agent、MCP、外掛） */
+  .capsh { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
+  .capsh small { color: #5f6570; }
+  .capsec { margin-top: 8px; }
+  .capsec > summary { cursor: pointer; font-size: 12px; color: var(--text); list-style: none; padding: 3px 0; }
+  .capsec > summary::-webkit-details-marker { display: none; }
+  .capsec > summary::before { content: '▸ '; color: var(--dim); }
+  .capsec[open] > summary::before { content: '▾ '; }
+  .capsec > summary small { color: var(--dim); margin-left: 6px; }
+  .capitem { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; font-size: 12px; background: #12161e; }
+  .capitem code { color: var(--text); }
+  .capitem .cdesc { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 0 6px; }
+  .chip { font-size: 11px; color: var(--dim); background: #12161e; border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
   /* 任務看板（對照 munder-difflin 的 tasks）：全辦公室的任務卡依狀態分四欄。窄欄時兩欄兩列，放大（⛶）後四欄並排 */
   .tboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; padding: 4px 12px 14px; }
   .tcol { background: #12161e; border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 0; }
@@ -1116,22 +1130,23 @@ const headRole = id => (agentsData[id] || {}).role ? `<div class="role">${esc(ag
 // Codex 不收插話，這裡就不能出現插話。點一下帶進輸入框，要改、要送都還是你決定。
 const ENGINE_NAME = { cli: 'Claude Code', cogito: 'cogito', codex: 'Codex' };
 const CMD_WHEN = { busy: '工作中才有效', approval: '有待審批時才有效', idle: '閒置時才有效' };
-const cmdsCache = {};
+const cmdsCache = {};   // key → {r, t}：一分鐘有效（引擎裝了什麼會隨員工開工更新）
 async function cmdscard() {
   const box = $('cmds');
   if (!selected) { box.hidden = true; return; }
   const eng = $('engineRow').hidden ? '' : $('engineSel').value;   // 設定面板裡選了哪個引擎，就列那個引擎的
   const key = selected + '|' + eng;
-  let r = cmdsCache[key];
+  let r = cmdsCache[key] && Date.now() - cmdsCache[key].t < 60000 ? cmdsCache[key].r : null;
   if (!r) {
     try { r = await (await fetch(`/office/commands?agent=${encodeURIComponent(selected)}&engine=${encodeURIComponent(eng)}`)).json(); }
     catch { return; }
     if (!r.ok) { box.hidden = true; return; }
-    cmdsCache[key] = r;
+    cmdsCache[key] = { r, t: Date.now() };
   }
   const a = agentsData[selected] || {};
   const now = { busy: !!a.busy, approval: !!a.approval, idle: !a.busy };
-  const sig = JSON.stringify([key, now]);
+  const cp = r.caps || {};
+  const sig = JSON.stringify([key, now, cp.source || cp.note || '', (cp.skills || []).length, (cp.slash || []).length]);
   if (box.dataset.sig === sig) return;           // 沒變就不重畫（updateComposer 每輪都會叫到這裡）
   box.dataset.sig = sig;
   const groups = [...new Set(r.items.map(x => x.group))];
@@ -1141,8 +1156,29 @@ async function cmdscard() {
         <code>${esc(x.cmd.trim())}</code>${now[x.when] ? '' : `<span class="when">${CMD_WHEN[x.when] || ''}</span>`}
         <span class="cdesc">${esc(x.desc)}</span>${x.example ? `<span class="cex">例：${esc(x.example)}</span>` : ''}
       </button>`).join('')).join('')}
-      <div class="cmdnotes">${r.notes.map(n => `<div>${esc(n)}</div>`).join('')}</div></div>`;
+      <div class="cmdnotes">${r.notes.map(n => `<div>${esc(n)}</div>`).join('')}</div>${capsHtml(cp, r.engine, now)}</div>`;
   box.hidden = false;
+}
+// 這個引擎裝了什麼。Claude Code 的技能可以點（帶「/技能名 」進輸入框，閒置時就是一件用那個技能的任務）；
+// 其他都是給你看的清單——內建 slash 指令多半是互動介面用的，辦公室一件任務就是一次 claude -p。
+function capsHtml(cp, eng, now) {
+  if (!cp || !Object.keys(cp).length) return '';
+  const sec = (title, n, body, open) => n ? `<details class="capsec"${open ? ' open' : ''}><summary>${title}<small>${n}</small></summary>${body}</details>` : '';
+  const items = xs => (xs || []).map(x => `<div class="capitem"><code>${esc(x.name)}</code>${x.description ? `<span class="cdesc">${esc(x.description)}</span>` : ''}</div>`).join('');
+  const chips = (xs, pre = '') => `<div class="chips">${(xs || []).map(x => `<code class="chip">${pre}${esc(x)}</code>`).join('')}</div>`;
+  const skills = eng === 'cli'
+    ? (cp.skills || []).map(x => `<button type="button" class="cmd${now.idle ? '' : ' later'}" data-cmd="/${esc(x.name)} ">
+        <code>/${esc(x.name)}</code>${now.idle ? '' : '<span class="when">閒置時才有效</span>'}
+        ${x.description ? `<span class="cdesc">${esc(x.description)}</span>` : ''}</button>`).join('')
+    : items(cp.skills);
+  return `<div class="cmdgroup capsh">這個引擎裝了什麼${cp.source ? `<small>${esc(cp.source)}</small>` : ''}</div>
+    ${cp.note ? `<div class="cmdnotes">${esc(cp.note)}</div>` : ''}
+    ${sec('技能', (cp.skills || []).length, skills, true)}
+    ${sec('MCP 伺服器', (cp.mcp || []).length, items(cp.mcp), true)}
+    ${sec('CLI 內建 slash 指令', (cp.slash || []).length, chips(cp.slash, '/'), false)}
+    ${sec('只在互動終端機有', (cp.terminal_only || []).length, chips(cp.terminal_only, '/'), false)}
+    ${sec('子 agent', (cp.agents || []).length, chips(cp.agents), false)}
+    ${sec('外掛', (cp.plugins || []).length, chips(cp.plugins), false)}`;
 }
 // 指令文字不經過 onclick 字串（引號會把屬性截斷，踩過），用事件委派＋data 屬性
 $('cmds').addEventListener('click', e => {

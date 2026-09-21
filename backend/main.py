@@ -2853,6 +2853,11 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                             "mcp": [{"name": str(m2.get("name") or ""),
                                      "description": f"狀態：{m2.get('status') or '未知'}"}
                                     for m2 in (d.get("mcp_servers") or []) if isinstance(m2, dict)],
+                            # 指令頁要列「CLI 支援哪些指令」：init 本來就帶，先前沒收（實際回報：想看員工的 CLI 有什麼）
+                            "slash": [str(x) for x in (d.get("slash_commands") or []) if isinstance(x, str)],
+                            "terminal_only": [str(x) for x in (d.get("terminal_slash_commands") or []) if isinstance(x, str)],
+                            "agents": [str(x) for x in (d.get("agents") or []) if isinstance(x, str)],
+                            "plugins": [str(x.get("name") or "") for x in (d.get("plugins") or []) if isinstance(x, dict)],
                         })
                     continue
                 if d.get("type") == "system" and d.get("subtype") == "background_tasks_changed":
@@ -4246,6 +4251,86 @@ def office_tasks():
     return {"ok": True, "cards": out, "per_agent": 20}
 
 
+def skill_frontmatter(path: Path) -> dict[str, str]:
+    """SKILL.md 開頭 --- 之間的 name／description（description 可能是單行，也可能是 > 或 | 接縮排的多行）。讀不到回空。"""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:60]
+    except OSError:
+        return {}
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    i = 1
+    while i < len(lines) and lines[i].strip() != "---":
+        m = re.match(r"(name|description):\s*(.*)$", lines[i])
+        if m:
+            key, val = m.group(1), m.group(2).strip()
+            if val in (">", "|", ">-", "|-"):
+                buf = []
+                while i + 1 < len(lines) and lines[i + 1].startswith((" ", "\t")):
+                    i += 1
+                    buf.append(lines[i].strip())
+                val = " ".join(buf)
+            out[key] = val.strip().strip('"').strip("'")
+        i += 1
+    return out
+
+
+def skill_dir_descriptions(*roots: Path) -> dict[str, str]:
+    """技能資料夾名稱（＝技能名）→ 說明。只收磁碟上找得到 SKILL.md 的；內建在 CLI 裡的技能沒有檔案，就沒有說明。"""
+    out: dict[str, str] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in root.rglob("SKILL.md"):
+            fm = skill_frontmatter(f)
+            name = fm.get("name") or f.parent.name
+            if fm.get("description"):
+                out.setdefault(name, fm["description"][:200])
+                out.setdefault(f.parent.name, fm["description"][:200])
+    return out
+
+
+MCP_STATUS_WORDS = {"connected": "已連上", "pending": "開工當下還在連線（Claude Code 回報時還沒連完，不代表連不上）",
+                    "failed": "連不上", "needs-auth": "要先登入", "disabled": "停用中"}
+
+
+def engine_caps(eng: str) -> dict:
+    """指令頁下半：這個引擎裝了什麼——技能、CLI 指令、子 agent、MCP、外掛。只講看得到證據的：
+    Claude Code 用它開工時自己回報的清單（cli_caps），Codex 讀員工 CODEX_HOME 底下的技能檔與橋帶給它的 MCP。"""
+    if eng == ENGINE_CLI:
+        if not cli_caps.get("tools"):
+            return {"note": "還沒有員工用 Claude Code 跑過任務——跑過一次，這裡才知道它裝了哪些技能與指令"}
+        cfg = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+        desc = skill_dir_descriptions(cfg / "skills", cfg / "plugins")
+        skills = [x["name"] for x in cli_caps.get("skills") or []]
+        skill_set = set(skills) | {n.split(":")[-1] for n in skills}
+        term = set(cli_caps.get("terminal_only") or [])
+        builtin = [x for x in cli_caps.get("slash") or [] if x not in skill_set and x not in term and not x.startswith("_")]
+        who = agents[cli_caps["agent"]].name if cli_caps.get("agent") in agents else cli_caps.get("agent", "")
+        return {"source": f"{who} 於 {cli_caps.get('at', '')} 開工時 Claude Code 自己回報的清單",
+                "skills": [{"name": n, "description": desc.get(n.split(":")[-1], "")} for n in skills],
+                "slash": builtin, "terminal_only": sorted(term), "agents": cli_caps.get("agents") or [],
+                "plugins": cli_caps.get("plugins") or [],
+                # init 在 MCP 連完之前就送出，所以多半是 pending——那不是壞掉，照字面顯示會讓人以為連不上
+                "mcp": [{"name": m["name"], "description": MCP_STATUS_WORDS.get(str(m.get("description", "")).removeprefix("狀態："),
+                                                                                m.get("description", ""))}
+                        for m in cli_caps.get("mcp") or []],
+                "note": "每件任務是一次 claude -p：技能點一下就能帶進輸入框當任務用；內建 slash 指令多半是互動介面用的，列出來給你參考。"}
+    if eng == ENGINE_CODEX:
+        home = codex_home()
+        skills = []
+        for f in sorted((home / "skills").rglob("SKILL.md")) if (home / "skills").is_dir() else []:
+            fm = skill_frontmatter(f)
+            skills.append({"name": fm.get("name") or f.parent.name, "description": fm.get("description", "")[:200]})
+        allowed = office_mcp_allowed()
+        return {"source": f"{home}/skills（Codex 員工自己的設定目錄）", "skills": skills,
+                "mcp": [{"name": n, "description": "自動核准（員工 profile 有放行）" if n in allowed else "要核准——exec 模式沒人能按，會被擋"}
+                        for n in office_mcp_servers()],
+                "note": "Codex 會自己判斷要不要用技能；它的 slash 指令只在互動介面有，辦公室走 codex exec 用不到。你本人的 ~/.agents/skills 不給 Codex 員工。"}
+    return {}
+
+
 @app.get("/office/commands")
 def office_commands(agent: str = "", engine: str = ""):
     """這位員工、這個引擎能打的指令。engine 沒帶就用他現在生效的引擎（外殼會帶設定面板裡選的那個）。"""
@@ -4257,7 +4342,7 @@ def office_commands(agent: str = "", engine: str = ""):
     notes = ["閒置時，其他任何文字都是派一件新任務。", "換引擎、模型、工作 repo：輸入框下方的 ⚙ 設定。"]
     if eng == ENGINE_CODEX:
         notes.append("Codex 引擎目前不支援插話與審批：要補充就等它收工再派，或中止重派。")
-    return {"ok": True, "engine": eng, "items": items, "notes": notes}
+    return {"ok": True, "engine": eng, "items": items, "notes": notes, "caps": engine_caps(eng)}
 
 
 @app.post("/office/dispatch")
