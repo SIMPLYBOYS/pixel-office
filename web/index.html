@@ -103,6 +103,13 @@
                 border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
   .head .wipe:hover { opacity: 1; color: #e07070; border-color: #5a3a3a; }
   .head .task { color: var(--dim); font-size: 13px; margin-top: 4px; }
+  /* 工作串放大：整欄（標題、工作串、輸入區）蓋滿視窗，長報告與寬表格才讀得下——對照 munder-difflin 的
+     終端機視窗（實際回報）。只是換個大小看，輸入區照樣在，放大時一樣能派工、插話。Esc 或再按一次回復。 */
+  section.max { position: fixed; inset: 0; z-index: 40; border-left: 0; }
+  .head .maxbtn { float: right; cursor: pointer; margin-left: 6px; color: var(--dim); line-height: 0;
+                  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; background: none; }
+  .head .maxbtn:hover { color: var(--text); border-color: #3a404c; }
+  .head .maxbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #2a2f3a; margin-left: 8px; }
   .badge.working { color: var(--accent); }
   .badge.ok { color: var(--ok); }
@@ -1021,6 +1028,28 @@ function updateComposer() {
 // 設定收起來時，不能讓人不知道這次會用什麼跑：引擎、模型、repo 一律寫在按鈕上；
 // 任何一排有警告（⚠：cogito 沒開、Codex 要登入、repo 名字打錯…）就在按鈕前面帶 ⚠，不藏進面板裡。
 const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
+
+// 工作串放大／回復。不存 localStorage：放大是「這一刻想看清楚」，重新整理就回到平常的版面。
+const isMax = () => document.querySelector('body > section').classList.contains('max');
+const MAX_ICON = {
+  expand: '<path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/>',
+  shrink: '<path d="M6 2v4H2M14 6h-4V2M10 14v-4h4M2 10h4v4"/>',
+};
+function maxBtn() {
+  const on = isMax();
+  return `<button type="button" class="maxbtn" onclick="toggleMax()" aria-pressed="${on}"
+    title="${on ? '回復（Esc）' : '放大工作串（蓋滿視窗，輸入區照樣能用）'}" aria-label="${on ? '回復' : '放大工作串'}">`
+    + `<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${on ? MAX_ICON.shrink : MAX_ICON.expand}</svg></button>`;
+}
+function toggleMax() {
+  const f = $('feed'), atBottom = f.scrollHeight - f.scrollTop - f.clientHeight < 40;   // 貼底就維持貼底
+  document.querySelector('body > section').classList.toggle('max');
+  const b = document.querySelector('.head .maxbtn');
+  if (b) b.outerHTML = maxBtn();                 // 標題列下一輪輪詢才重畫，圖示先換好
+  if (atBottom) f.scrollTop = f.scrollHeight;
+  document.querySelector('.head .maxbtn')?.focus();
+}
 function paintCfgSummary() {
   const btn = $('cfgBtn'), shown = CFG_ROWS.map($).filter(r => !r.hidden);
   btn.hidden = !shown.length;
@@ -1862,7 +1891,8 @@ function jumpWs() {
 addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   if (!$('cfgPanel').hidden) { openCfg(false); $('cfgBtn').focus(); return; }   // 設定面板開著：Esc 只關它
-  cancelSend();
+  if (cancelSend()) return;                      // 反悔窗有時效，比回復版面急
+  if (isMax()) toggleMax();                      // 放大中：Esc 回復
 });
 
 // 模型 id 太長會把時間欄擠爆（claude-opus-5 / claude-haiku-4-5-20251001…），
@@ -2684,7 +2714,7 @@ async function feed() {
     const r = await (await fetch(`/office/report/${selected}`)).json();
     const f = $('feed');
     if (!r.ok) {
-      $('head').innerHTML = `<div class="who">${esc(agentsData[selected]?.name || selected)}</div>
+      $('head').innerHTML = `<div class="who">${maxBtn()}${esc(agentsData[selected]?.name || selected)}</div>
         <div class="task">${esc(r.error)}</div>`;
       f.innerHTML = '';
       f.dataset.agent = '';
@@ -2692,7 +2722,7 @@ async function feed() {
     }
     // 🗑 清全部：反覆測試後一天一天刪太瑣碎。放在標題列而不是每張卡上——這是「整理」
     // 不是「操作某張卡」，混進卡片動線只會讓人誤按。
-    $('head').innerHTML = `<div class="who">${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
+    $('head').innerHTML = `<div class="who">${maxBtn()}${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
         <span class="wipe" title="清掉這位的全部工作紀錄（進行中的會保留）"
               onclick="clearAll()">🗑 清空紀錄</span></div>
       <div class="task">最新任務 · ${r.at}　${esc(r.task)}</div>`;
