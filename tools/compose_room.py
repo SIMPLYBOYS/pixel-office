@@ -274,6 +274,11 @@ def main():
         T = (max(map(proj, comp)) - min(map(proj, comp)) + 1) * CELL
         thick = 6 if h else 7
         off = (T - thick) // 2 if neg and pos else (0 if neg else T - thick)
+        # 直的隔牆（兩側都是房間）貼齊【西側】的地板交界，不置中：西側的櫃檯房換過地板花色，
+        # 置中會在格紋地板與牆之間夾一條 4px 的淺色縫，看起來牆沒有把兩區隔開（實際回報）。
+        # 牆這一格原本的地板跟東側會議室同色，縫留在東側就併進會議室，看不出來。
+        if not h and neg and pos:
+            off = 0
 
         for r, c in comp:
             x, y = c * CELL, r * CELL
