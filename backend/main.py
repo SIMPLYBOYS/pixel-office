@@ -4173,6 +4173,50 @@ async def office_models():
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
 
+# ── 指令頁：辦公室的輸入框能打哪些指令（對照 munder-difflin 的 commands 分頁）──────────────
+# 跟 office_dispatch 是同一份事實，所以寫在分流旁邊：改了分流規則（例如 Codex 接上插話），這張表一起改。
+# when：什麼時候有效——busy（工作中）、approval（有待審批）、idle（閒置；閒置時其餘文字都是新任務）。
+# cogito 那幾條是它自己的聊天指令，原樣轉給 cogito（定義在 cogito-agent internal/chatbot/core.go 的 helpText）。
+# 刻意不列：model（換模型走輸入框下方的設定，直接打會讓橋記的模型跟 cogito 對不上）、pair（授權，只給管理員）、
+# get（把檔案傳回聊天，辦公室這條平台沒實測過）。
+COGITO_CMD_GROUP = "cogito 指令（原樣轉給 cogito）"
+OFFICE_COMMANDS = [
+    {"cmd": "/stop", "desc": "中止這件事，不管做到哪", "when": "busy", "engines": ("cli", "cogito", "codex"), "group": "任務進行中"},
+    {"cmd": "/steer ", "desc": "插話：不中止，補一句話糾正方向（下一回合生效）", "example": "/steer 先別改測試，專心修 bug",
+     "when": "busy", "engines": ("cli", "cogito"), "group": "任務進行中"},
+    {"cmd": "approve", "desc": "核准待審的操作", "when": "approval", "engines": ("cli", "cogito"), "group": "審批"},
+    {"cmd": "reject ", "desc": "駁回，後面可以接理由（會轉給員工）", "example": "reject 不要刪檔，改成移到 archive/",
+     "when": "approval", "engines": ("cli", "cogito"), "group": "審批"},
+    {"cmd": "開工。照板子推進，先做相依都滿足的票，最多 3 人並行。", "desc": "板子開好後，叫主持人開始分工",
+     "when": "idle", "engines": ("cli", "cogito"), "group": "看板", "agents": (KANBAN,)},
+    {"cmd": "status", "desc": "這個頻道的花費、token、歷史長度與模型", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "compress", "desc": "手動摺疊 context，縮短歷史省成本", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "goal ", "desc": "設一個驗收標準，追到判定達成為止（goal status／pause／resume／clear 管理）",
+     "example": "goal 報表每一列都有連結與日期", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "memory list", "desc": "列出待審的記憶提案（含編號）", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "apply memory ", "desc": "放行記憶提案；不帶編號＝全部", "example": "apply memory 1 3",
+     "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "reject memory ", "desc": "丟棄記憶提案；不帶編號＝全部", "example": "reject memory 2",
+     "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+    {"cmd": "undo memory", "desc": "列出或撤回 72 小時內自動放行的記憶（帶編號＝撤回那一條）",
+     "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
+]
+
+
+@app.get("/office/commands")
+def office_commands(agent: str = "", engine: str = ""):
+    """這位員工、這個引擎能打的指令。engine 沒帶就用他現在生效的引擎（外殼會帶設定面板裡選的那個）。"""
+    if agent not in agents:
+        return {"ok": False, "error": "沒有這位員工"}
+    eng = engine if engine in (ENGINE_CLI, ENGINE_COGITO, ENGINE_CODEX) else engine_of(agent)
+    items = [{k: v for k, v in c.items() if k not in ("engines", "agents")} for c in OFFICE_COMMANDS
+             if eng in c["engines"] and agent in c.get("agents", (agent,))]
+    notes = ["閒置時，其他任何文字都是派一件新任務。", "換引擎、模型、工作 repo：輸入框下方的 ⚙ 設定。"]
+    if eng == ENGINE_CODEX:
+        notes.append("Codex 引擎目前不支援插話與審批：要補充就等它收工再派，或中止重派。")
+    return {"ok": True, "engine": eng, "items": items, "notes": notes}
+
+
 @app.post("/office/dispatch")
 async def office_dispatch(d: dict):
     """Web 外殼派工/審批 → 轉發 cogito HTTP 入口（token 在橋端，瀏覽器拿不到）。"""

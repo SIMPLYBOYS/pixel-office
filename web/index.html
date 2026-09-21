@@ -196,6 +196,26 @@
   section[data-tab]:not([data-tab="feed"]) > .feed { display: none; }
   section > details.prof.page { flex: 1; min-height: 0; overflow-y: auto; border-bottom: 0; }
   section > details.prof.page > summary { cursor: default; }
+  /* 標題列：頭像＋名字＋職稱（對照 munder-difflin 的「MICHAEL · COMMAND CENTER／runs the floor」） */
+  .headrow { display: flex; gap: 10px; align-items: center; }
+  .headrow > .headmain { flex: 1; min-width: 0; }
+  .face.lg { width: 40px; height: 40px; border-radius: 8px; }
+  .face.lg.ph { font-size: 18px; }
+  .head .role { color: var(--dim); font-size: 12px; margin-top: 1px; }
+  /* 指令頁：點一下帶進輸入框（不直接送出）。現在不能用的（例如沒在工作時的「中止」）淡一點、寫明什麼時候才有效 */
+  .cmdlist { padding: 2px 16px 14px; }
+  .cmdgroup { font-size: 11px; color: var(--dim); margin: 10px 0 5px; }
+  .cmd { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; width: 100%; text-align: left; cursor: pointer;
+         background: #12161e; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; margin-bottom: 6px;
+         color: var(--text); font: inherit; font-size: 12px; }
+  .cmd:hover { border-color: #6d5a2a; }
+  .cmd:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .cmd code { color: var(--accent); font-size: 12px; }
+  .cmd .when { justify-self: end; font-size: 11px; color: var(--dim); }
+  .cmd .cdesc, .cmd .cex { grid-column: 1 / -1; }
+  .cmd .cex { color: var(--dim); font-size: 11px; }
+  .cmd.later { opacity: .6; }
+  .cmdnotes { color: var(--dim); font-size: 11px; margin-top: 10px; line-height: 1.7; }
   .prof summary { cursor: pointer; padding: 8px 16px; font-size: 12px; color: var(--dim);
                   list-style: none; display: flex; gap: 6px; align-items: center; }
   .prof summary::-webkit-details-marker { display: none; }
@@ -522,6 +542,7 @@
     <details class="prof" id="profile" hidden></details>
     <details class="prof audit" id="audit" hidden></details>
     <details class="prof costs" id="costs" hidden></details>
+    <details class="prof cmds" id="cmds" hidden></details>
     <div class="feed" id="feed"></div>
     <div class="hgrip" id="gripB" title="拖曳調整輸入區高度（雙擊還原）"></div>
     <div class="composer">
@@ -979,18 +1000,25 @@ function updateComposer() {
   const btn = $('send'), box = $('box');
   box.disabled = false;
   btn.disabled = false;
+  // 工作中打的字預設是插話；但打的是辦公室指令（指令頁會帶進來）就照指令送——
+  // 先前一律包成 /steer：打 approve 變成一句插話、打 /steer xxx 變成 /steer /steer xxx。
+  const verbOf = t => (t.split(/\s/)[0] || '').toLowerCase();
+  const AS_IS = { '/stop': '中止', approve: '核准', reject: '駁回' };
   const paint = () => {
-    const steering = workingNow && box.value.trim();
-    btn.textContent = workingNow ? (steering ? '📨 插話' : '中止') : '送出';
-    btn.classList.toggle('stop', workingNow && !steering);
+    const t = box.value.trim(), v = verbOf(t);
+    btn.textContent = !workingNow ? '送出' : !t ? '中止' : AS_IS[v] || '📨 插話';
+    btn.classList.toggle('stop', workingNow && (!t || v === '/stop'));
   };
   paint();
   box.oninput = paint;
   // 中止與插話都立刻生效（中止是反悔、插話搶的就是時機），只有派工走反悔窗
   btn.onclick = () => {
-    const t = box.value.trim();
+    const t = box.value.trim(), v = verbOf(t);
     if (!workingNow) return queueSend(box.value);
-    return t ? steer(t) : dispatch('/stop');
+    if (!t) return dispatch('/stop');
+    if (v === '/steer') return t.slice(6).trim() ? steer(t.slice(6).trim()) : undefined;   // 已經帶前綴：別再包一次
+    if (AS_IS[v]) return dispatch(t);   // 成功它自己會清空輸入框；失敗留著原文好重送
+    return steer(t);
   };
   // 看板不是人，措辭不能沿用派工那套：「派給這位員工」會讓人以為只有一個人在做，
   // 實際上它會開一場全隊會議、產出 spec、再分工。說清楚它會做什麼，比說它是誰重要。
@@ -1042,6 +1070,7 @@ function updateComposer() {
   paintModelRow(a, workingNow);
   paintEngineRow(a, workingNow);
   paintCfgSummary();
+  cmdscard();
 }
 
 // 設定收起來時，不能讓人不知道這次會用什麼跑：引擎、模型、repo 一律寫在按鈕上；
@@ -1052,8 +1081,59 @@ const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
 // 分頁跟著資料走：面板沒資料（hidden）就沒有那一頁，跟面板原本「有資料才出現」同一個原則。
 // 當前頁一定展開——各面板重畫時會照自己記在 localStorage 的開合狀態收起來，觀察者負責再打開。
 const TABS = [['feed', '💬 工作串'], ['ws', '📂 工作區'], ['board', '🗂 任務板'], ['memo', '💡 記憶'],
-              ['profile', '👤 檔案'], ['audit', '🧾 稽核'], ['costs', '💰 花費']];
+              ['profile', '👤 檔案'], ['audit', '🧾 稽核'], ['costs', '💰 花費'], ['cmds', '⌨️ 指令']];
 let tab = 'feed', feedNew = false;   // feedNew：人在別頁時工作串有新東西，分頁上亮一個點，別讓人漏看
+// 標題列的頭像與職稱：跟名冊同一套頭像（/avatars/<id>.png，沒有就用名字第一個字頂替）
+const headFace = id => `<img class="face lg" src="/avatars/${id}.png" alt=""
+  onerror="this.replaceWith(Object.assign(document.createElement('span'),
+           {className:'face lg ph', textContent:'${esc(((agentsData[id] || {}).name || id)[0])}'}))">`;
+const headRole = id => (agentsData[id] || {}).role ? `<div class="role">${esc(agentsData[id].role)}</div>` : '';
+
+// 指令頁：這位員工、這個引擎能打的指令。清單來自橋（/office/commands，跟分流寫在一起），外殼不自己列——
+// Codex 不收插話，這裡就不能出現插話。點一下帶進輸入框，要改、要送都還是你決定。
+const ENGINE_NAME = { cli: 'Claude Code', cogito: 'cogito', codex: 'Codex' };
+const CMD_WHEN = { busy: '工作中才有效', approval: '有待審批時才有效', idle: '閒置時才有效' };
+const cmdsCache = {};
+async function cmdscard() {
+  const box = $('cmds');
+  if (!selected) { box.hidden = true; return; }
+  const eng = $('engineRow').hidden ? '' : $('engineSel').value;   // 設定面板裡選了哪個引擎，就列那個引擎的
+  const key = selected + '|' + eng;
+  let r = cmdsCache[key];
+  if (!r) {
+    try { r = await (await fetch(`/office/commands?agent=${encodeURIComponent(selected)}&engine=${encodeURIComponent(eng)}`)).json(); }
+    catch { return; }
+    if (!r.ok) { box.hidden = true; return; }
+    cmdsCache[key] = r;
+  }
+  const a = agentsData[selected] || {};
+  const now = { busy: !!a.busy, approval: !!a.approval, idle: !a.busy };
+  const sig = JSON.stringify([key, now]);
+  if (box.dataset.sig === sig) return;           // 沒變就不重畫（updateComposer 每輪都會叫到這裡）
+  box.dataset.sig = sig;
+  const groups = [...new Set(r.items.map(x => x.group))];
+  box.innerHTML = `<summary>⌨️ 指令<small>${esc(ENGINE_NAME[r.engine] || r.engine)}・點一下帶進輸入框</small></summary>
+    <div class="cmdlist">${groups.map(g => `<div class="cmdgroup">${esc(g)}</div>` + r.items.filter(x => x.group === g).map(x => `
+      <button type="button" class="cmd${now[x.when] ? '' : ' later'}" data-cmd="${esc(x.cmd)}">
+        <code>${esc(x.cmd.trim())}</code>${now[x.when] ? '' : `<span class="when">${CMD_WHEN[x.when] || ''}</span>`}
+        <span class="cdesc">${esc(x.desc)}</span>${x.example ? `<span class="cex">例：${esc(x.example)}</span>` : ''}
+      </button>`).join('')).join('')}
+      <div class="cmdnotes">${r.notes.map(n => `<div>${esc(n)}</div>`).join('')}</div></div>`;
+  box.hidden = false;
+}
+// 指令文字不經過 onclick 字串（引號會把屬性截斷，踩過），用事件委派＋data 屬性
+$('cmds').addEventListener('click', e => {
+  const b = e.target.closest('.cmd');
+  if (!b) return;
+  e.preventDefault();
+  const box = $('box');
+  if (box.disabled) return;
+  box.value = b.dataset.cmd;
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+  box.dispatchEvent(new Event('input'));   // 送出鈕的字樣（送出／插話／中止）跟著輸入內容變
+});
+
 function paintTabs() {
   const sec = document.querySelector('body > section'), ib = $('inbox');
   const avail = id => id === 'feed' || !$(id).hidden;
@@ -2780,7 +2860,8 @@ async function feed() {
     const r = await (await fetch(`/office/report/${selected}`)).json();
     const f = $('feed');
     if (!r.ok) {
-      $('head').innerHTML = `<div class="who">${maxBtn()}${esc(agentsData[selected]?.name || selected)}</div>
+      $('head').innerHTML = `<div class="headrow">${headFace(selected)}<div class="headmain">
+        <div class="who">${maxBtn()}${esc(agentsData[selected]?.name || selected)}</div>${headRole(selected)}</div></div>
         <div class="task">${esc(r.error)}</div>`;
       f.innerHTML = '';
       f.dataset.agent = '';
@@ -2788,9 +2869,10 @@ async function feed() {
     }
     // 🗑 清全部：反覆測試後一天一天刪太瑣碎。放在標題列而不是每張卡上——這是「整理」
     // 不是「操作某張卡」，混進卡片動線只會讓人誤按。
-    $('head').innerHTML = `<div class="who">${maxBtn()}${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
+    $('head').innerHTML = `<div class="headrow">${headFace(selected)}<div class="headmain">
+      <div class="who">${maxBtn()}${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
         <span class="wipe" title="清掉這位的全部工作紀錄（進行中的會保留）"
-              onclick="clearAll()">🗑 清空紀錄</span></div>
+              onclick="clearAll()">🗑 清空紀錄</span></div>${headRole(selected)}</div></div>
       <div class="task">最新任務 · ${r.at}　${esc(r.task)}</div>`;
     const initial = f.dataset.agent !== selected;   // 換人＝整串重建，歷史一次補齊
     if (initial) {

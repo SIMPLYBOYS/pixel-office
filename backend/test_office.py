@@ -473,6 +473,7 @@ def run() -> None:
     schedule_visible()
     schedule_manual_run()
     weekly_makeup()
+    commands_page()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -2582,6 +2583,38 @@ def schedule_file_valid() -> None:
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
                 assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
+
+
+def commands_page() -> None:
+    """指令頁：列出來的必須是【這個引擎真的收】的指令。表跟 office_dispatch 同一份事實——
+    Codex 列了插話、按下去卻被拒，就是一頁在說謊的說明書。"""
+    with TestClient(main.app) as c:
+        cmds = lambda aid, eng: {x["cmd"].strip() for x in c.get(f"/office/commands?agent={aid}&engine={eng}").json()["items"]}
+        office = {"/stop", "/steer", "approve", "reject"}
+        assert cmds("p05", "codex") == {"/stop"}, "Codex 不支援插話與審批：只能中止"
+        assert cmds("p05", "cli") == office, cmds("p05", "cli")
+        cog = cmds("p05", "cogito")
+        assert office <= cog and {"status", "apply memory", "reject memory", "memory list"} <= cog, cog
+        assert "model" not in cog and not any(x.startswith("pair") for x in cog), "換模型走設定、授權只給管理員：不列"
+        assert not any("開工" in x for x in cmds("p05", "cogito")) and any("開工" in x for x in cmds(main.KANBAN, "cogito")), "開工只給看板"
+        r = c.get("/office/commands?agent=p05&engine=codex").json()
+        assert r["engine"] == "codex" and any("不支援插話" in n for n in r["notes"]), r
+        assert c.get("/office/commands?agent=沒這個人").json()["ok"] is False
+        # 對照分流：Codex 沒列的辦公室指令，送出去確實被拒；有列的 /stop 不會被當成「不支援」擋掉
+        # （Codex 要先「可用」，否則被拒的原因是沒登入，不是不支援——那樣驗不到這張表）
+        old_avail, old_blocked = main.codex_available, main.codex_blocked
+        main.codex_available, main.codex_blocked = (lambda: True), (lambda: "")
+        main.busy.add("p05")
+        try:
+            for verb in ("/steer 換個方向", "approve", "reject 不行"):
+                r = asyncio.run(main.office_dispatch({"agent": "p05", "text": verb, "engine": "codex"}))
+                assert r["ok"] is False and ("不支援" in r["error"] or "沒有審批" in r["error"]), (verb, r)
+            r = asyncio.run(main.office_dispatch({"agent": "p05", "text": "/stop", "engine": "codex"}))
+            assert not any(w in str(r.get("error", "")) for w in ("不支援", "沒有審批")), f"列了 /stop 就不能被當成不支援擋掉：{r}"
+        finally:
+            main.busy.discard("p05")
+            main.codex_available, main.codex_blocked = old_avail, old_blocked
+    print("  ✓ 指令頁：各引擎只列真的收的指令（Codex 只有中止、cogito 多自己的指令、開工只給看板），跟分流一致")
 
 
 def weekly_makeup() -> None:
