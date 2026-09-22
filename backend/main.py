@@ -20,6 +20,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import uuid
@@ -931,6 +932,42 @@ def in_meeting(parent: str) -> bool:
     return started is not None and f.stat().st_mtime < started
 
 
+def kill_tree(pid: int) -> int:
+    """SIGKILL 這個行程連同它所有子孫，回報子孫有幾個。員工 CLI／Codex 的中止、逾時、橋關閉都走這條。
+
+    只砍 pid 不夠（2026-09-23 查核「/stop 停不乾淨」）：MCP 伺服器、背景指令、Codex 跑的 shell 都是它的子孫，
+    父行程一死它們被 launchd 收養、照樣跑。killpg 也不行——Claude Code 的 Bash 工具自成行程群組（實測 pgid 不同）。
+    ponytail: 行程表只拍一次快照（ps），拍完之後才生的、或早就被收養的孫行程收不到；要根除得讓員工跑在自己的 cgroup／容器裡。"""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""   # 拿不到行程表：至少把本體砍掉（跟先前一樣）
+    kids: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    tree, todo = [], [pid]
+    while todo:   # 先父後子：本體先死，就不會再生新的
+        p = todo.pop(0)
+        tree.append(p)
+        todo += kids.get(p, [])
+    for p in tree:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return len(tree) - 1
+
+
+def last_tool_call(aid: str) -> str:
+    """卡上最後一個工具呼叫——中止紀錄要留「停下時它在做什麼」。
+    ponytail: 取最後一行 ▸；同一輪平行呼叫好幾個工具時，它不一定是還沒回來的那個。"""
+    card = last_report.get(aid) or {}
+    return next((str(e.get("text", ""))[:160] for e in reversed(card.get("events", []))
+                 if str(e.get("text", "")).startswith("▸")), "")
+
+
 async def force_stop(aid: str, how: str) -> None:
     """使用者按了中止 → 投影這邊【一定】收乾淨，不管上游停不停得下來。
 
@@ -1547,22 +1584,34 @@ async def office_event(ev: dict):
         # 常不知道下一步怎麼操作）。card["report"] 只留最後一則，中間輪次的全文只有這裡。
         log_ev(aid, label)
     elif kind == "done":  # 收工：釋放主 agent＋名下委派卡，回歸 idle
-        # 使用者剛按過中止：卡已經收好了。這裡再走一次會把報告蓋成「CLI 異常結束
-        # （退出碼 -9）」——那個 -9 是【我們自己砍的】，把它寫成異常等於自己騙自己，
-        # 而且會再叮一聲、再記一行「任務中斷」，跟上一行自相矛盾。
-        if aid in stopped:
-            stopped.discard(aid)
-            sched_running.pop(aid, None)   # 老闆中止的班表任務不交付——沒有東西可交
-            release_work(aid)
-            return {"ok": True}
-        if chatting and (desk := WORK_DESK.get(aid)):
-            await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
-        chat_mode.discard(aid)
         # cost 是 cogito 算好的【真實】花費（協定：0/未知不送）。只認正數——
         # 沒有數字就什麼都不顯示，寧可空白也不畫 $0.0000 假裝免費。
         cost = ev.get("cost")
         if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
             cost = None
+        if label == "stopped" and aid not in stopped:
+            # 在 cogito 頻道按的 /stop：橋到收工這一刻才聽說。先前它被當成一筆「context canceled」失敗，
+            # 帳本沒有中止紀錄（2026-09-23 查核）。照網頁按的一樣收卡、落帳，再走下面的停妥。
+            audit("task.stopped", aid, by="cogito", engine=ENGINE_COGITO, note=str(ev.get("detail") or "")[:200],
+                  last_tool=last_tool_call(aid))
+            await force_stop(aid, "（在 cogito 頻道按的）")
+        # 使用者按過中止：卡已經收好了。這裡再走一次會把報告蓋成「CLI 異常結束
+        # （退出碼 -9）」——那個 -9 是【我們自己砍的】，把它寫成異常等於自己騙自己，
+        # 而且會再叮一聲、再記一行「任務中斷」，跟上一行自相矛盾。
+        # 但這一筆本身要留痕：按下中止≠真的停了（cogito 要等當下那一步跑完、CLI 行程要真的死透），
+        # 先前它被整筆吞掉，工作串與帳本都看不出到底停了沒、停之前燒了多少。
+        if aid in stopped:
+            stopped.discard(aid)
+            sched_running.pop(aid, None)   # 老闆中止的班表任務不交付——沒有東西可交
+            release_work(aid)
+            detail = str(ev.get("detail") or "")
+            log_ev(aid, "■ 已停妥" + (f"：{detail}" if detail else "") + (f"（${cost:.4f}）" if cost else ""))
+            c0 = last_report.get(aid) or {}
+            audit("task.done", aid, card=c0.get("id"), label="stopped", cost=cost, detail=detail[:300], engine=c0.get("engine"))
+            return {"ok": True}
+        if chatting and (desk := WORK_DESK.get(aid)):
+            await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
+        chat_mode.discard(aid)
         if not chatting:  # 閒聊不改任務卡狀態（那張卡早就完成了）
             close_card(aid, "ok" if label == "ok" else "error")
             card = last_report.get(aid)
@@ -2918,12 +2967,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
-        proc.kill()
+        kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                             "detail": f"CLI 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
-        proc.kill()                      # 老闆按了中止——或橋正在關閉、把還在跑的任務一起取消
+        kill_tree(proc.pid)              # 老闆按了中止——或橋正在關閉、把還在跑的任務一起取消
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                             "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，CLI 行程被中斷（不是老闆按的）"})
         done_sent = True
@@ -2940,8 +2989,9 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
             err = ""
             if proc.stderr is not None:
                 err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
+            what = "CLI 行程已結束" if aid in stopped else "CLI 異常結束"   # 中止後的 -9 是我們自己砍的，不是異常
             await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
-                                "detail": f"CLI 異常結束（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
+                                "detail": f"{what}（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
 
 
 # ── Codex CLI：第三個引擎（OpenAI Codex，ChatGPT 訂閱登入）────────────────────────────
@@ -3346,12 +3396,12 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
-        proc.kill()
+        kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                             "detail": f"Codex 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
-        proc.kill()
+        kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
                             "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，Codex 行程被中斷（不是老闆按的）"})
         done_sent = True
@@ -3362,8 +3412,9 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
             err = ""
             if proc.stderr is not None:
                 err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
+            what = "Codex 行程已結束" if aid in stopped else "Codex 異常結束"
             await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
-                                "detail": f"Codex 異常結束（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
+                                "detail": f"{what}（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
 
 
 def trace_codex(session: str, t0: float, t1: float) -> tuple[list[dict], str]:
@@ -3887,8 +3938,8 @@ def inbox_items(limit: int = 60) -> dict:
                               else f"班表「{jname}」{when} {j['hour']:02d}:{int(j.get('minute') or 0):02d} 到點時沒跑（橋當時沒開？）")})
     recent: list[dict] = []
     for e in audit_recent("", 400):
-        if e.get("kind") not in INBOX_KINDS:
-            continue
+        if e.get("kind") not in INBOX_KINDS or (e["kind"] == "task.done" and e.get("label") == "stopped"):
+            continue   # 停妥那筆：同一次中止已經有「⏹ 老闆中止」那一列
         aid = e.get("agent", "")
         kind = e["kind"]
         if kind == "task.done":
@@ -4420,17 +4471,17 @@ async def office_dispatch(d: dict):
         if aid not in busy and not (card and card["status"] == "working"):
             return {"ok": False, "error": f"{agents[aid].name} 沒有進行中的任務"}
         if proc := cli_procs.get(aid):
-            proc.kill()      # CLI 沒有優雅中止的入口，砍掉就是砍掉——done 由 finally 補
+            n = kill_tree(proc.pid)   # CLI 沒有優雅中止的入口，砍掉就是砍掉——連子孫一起；done 由 finally 補
             if (fut := cli_permission.get(aid)) and not fut.done():
                 fut.set_result((False, "老闆中止了任務"))
-            how = ""
+            how = f"——砍掉了 {'Codex' if codex_mode else 'CLI'} 行程" + (f"與 {n} 個子行程（MCP 伺服器、背景指令⋯）" if n else "")
         elif cli_mode or codex_mode:
             how = f"（沒有進行中的 {'Codex' if codex_mode else 'CLI'} 行程——直接收掉這張卡）"
         elif COGITO_HTTP:
             how = await tell_cogito_stop(aid)
         else:
             how = "（未設 COGITO_HTTP——畫面收掉了，但沒叫停任何東西）"
-        audit("task.stopped", aid, by="office-web", engine=eng_now, note=how[:200])
+        audit("task.stopped", aid, by="office-web", engine=eng_now, note=how[:200], last_tool=last_tool_call(aid))
         await force_stop(aid, how)
         return {"ok": True, "stopped": True}
     # 駁回跟中止同一個道理：它是使用者的【決定】，不是對上游的請求。所以先收卡再轉發，
@@ -4835,7 +4886,8 @@ def unfinished_today(aid: str, day: str) -> str:
     for e in reversed(audit_recent(aid, 60)):   # audit_recent 最新在前，反過來就是時間序
         if str(e.get("at", ""))[:10] != day or e.get("kind") not in ("task.start", "task.stopped", "task.done"):
             continue
-        last = "stopped" if e["kind"] == "task.stopped" else ("" if e["kind"] == "task.start" or e.get("label") == "ok" else "error")
+        last = ("stopped" if e["kind"] == "task.stopped" or e.get("label") == "stopped"
+                else "" if e["kind"] == "task.start" or e.get("label") == "ok" else "error")
     return last
 
 

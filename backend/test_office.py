@@ -501,6 +501,7 @@ def run() -> None:
     note_not_echoed()
     stop_clears_approval()
     stop_always_works()
+    stop_leaves_record()
     dup_msg()
     sub_by_name()
     kanban()
@@ -1214,13 +1215,17 @@ def stop_always_works() -> None:
         # 誠實：沒有行程可砍就要講出來，不能讓人以為真的叫停了什麼
         assert any("沒有進行中的 CLI 行程" in t for t in evs), evs
 
-        # ② 中止之後才到的收尾事件不該自相矛盾（砍掉行程的退出碼 -9 是我們自己造成的）
-        post(c, agent="p05", kind="done", label="error", detail="CLI 異常結束（退出碼 -9）")
+        # ② 中止之後才到的收尾事件不該自相矛盾（砍掉行程的退出碼 -9 是我們自己造成的），
+        # 但它本身要留痕：那是「真的停了」的那一刻（先前整筆被吞掉，看不出到底停了沒）
+        post(c, agent="p05", kind="done", label="error", detail="CLI 行程已結束（退出碼 -9）")
         card = card_of(c, "p05")
         assert card["status"] == "stopped", f"收尾事件把中止蓋掉了：{card['status']}"
-        assert "異常結束" not in (card.get("report") or ""), card.get("report")
+        assert "已結束" not in (card.get("report") or ""), card.get("report")
         evs2 = [e["text"] for e in card["timeline"]]
         assert not any("任務中斷" in t for t in evs2), f"中止之後又喊一次中斷：{evs2}"
+        assert any(t.startswith("■ 已停妥：CLI 行程已結束") for t in evs2), f"停妥那一刻沒留在工作串：{evs2}"
+        done = next(e for e in main.audit_recent("p05", 5) if e["kind"] == "task.done")
+        assert done["label"] == "stopped", f"停妥要記成中止，不是出錯：{done}"
 
         # ③ cogito 引擎、cogito 連不上：照樣停得掉，但要說清楚沒叫停它
         main.engine_sent.pop("p05", None)
@@ -1267,6 +1272,93 @@ def stop_always_works() -> None:
         for aid in ("p05", "p12", "p07", "p08", "p01"):
             main.busy.discard(aid)
         main.engine_sent.clear()
+        main.stopped.clear()
+        main.save_state()
+
+
+def stop_leaves_record() -> None:
+    """/stop 要停得乾淨、停了要留紀錄（2026-09-23 小美查核）。
+
+    ① CLI／Codex：先前只 proc.kill() 砍本體，MCP 伺服器、背景指令、shell 這些子孫被 launchd 收養照樣跑；
+       帳本的中止紀錄也沒寫砍了什麼、停下時在做什麼。
+    ② cogito 頻道按的 /stop：辦公室先前收到的是一筆「context canceled」失敗，帳本沒有中止紀錄。
+    """
+    import signal as _sig
+    import subprocess as _sp
+
+    def card_of(c, aid):
+        return c.get(f"/office/report/{aid}").json()
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    with TestClient(main.app) as c:
+        # ① 真的一棵行程樹：sh 底下兩個 sleep（替身：CLI 底下的 MCP 伺服器、背景指令）
+        ps_ok = _sp.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).returncode == 0
+        if not ps_ok:
+            print("  ⚠ ps 不能跑（沙箱？），跳過行程樹那一段")
+        else:
+            root = _sp.Popen(["sh", "-c", "sleep 60 & sleep 60 & wait"])
+            kids: list[int] = []
+            for _ in range(100):
+                out = _sp.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
+                kids = [int(a) for a, b in (ln.split() for ln in out.splitlines() if len(ln.split()) == 2) if int(b) == root.pid]
+                if len(kids) == 2:
+                    break
+                time.sleep(0.02)
+            assert len(kids) == 2, f"替身行程樹沒起來：{kids}"
+            try:
+                main.busy.discard("p05")
+                main.engine_sent["p05"] = main.ENGINE_CLI
+                main.cli_procs["p05"] = root   # /stop 只用得到 .pid
+                post(c, agent="p05", kind="start", label="會留孫行程的任務")
+                post(c, agent="p05", kind="tool", label="Bash", detail="python -m http.server")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "/stop"}).json()
+                assert r["ok"], r
+                root.wait(timeout=5)
+                for _ in range(100):
+                    if not any(alive(k) for k in kids):
+                        break
+                    time.sleep(0.02)
+                assert not any(alive(k) for k in kids), "砍了本體，子孫還活著——停不乾淨"
+                st = next(e for e in main.audit_recent("p05", 5) if e["kind"] == "task.stopped")
+                assert "與 2 個子行程" in st.get("note", ""), f"中止紀錄要寫砍了什麼：{st}"
+                assert "Bash" in st.get("last_tool", ""), f"中止紀錄要寫停下時在做什麼：{st}"
+            finally:
+                main.cli_procs.pop("p05", None)
+                for k in kids:
+                    if alive(k):
+                        os.kill(k, _sig.SIGKILL)
+                if root.poll() is None:
+                    root.kill()
+                main.engine_sent.pop("p05", None)
+                main.stopped.discard("p05")
+                main.busy.discard("p05")
+
+        # ② cogito 頻道按的 /stop：橋到收工才聽說
+        main.busy.discard("p07")
+        post(c, agent="p07", kind="start", label="在頻道被停的任務")
+        post(c, agent="p07", kind="tool", label="web_fetch", detail="https://example.com")
+        post(c, agent="p07", kind="done", label="stopped", detail="slack 送來的 /stop；一併收掉 1 個背景子 agent", cost=0.12)
+        card = card_of(c, "p07")
+        assert card["status"] == "stopped", f"頻道中止要收成【已中止】，不是失敗：{card['status']}"
+        assert "p07" not in main.busy
+        evs = [e["text"] for e in card["timeline"]]
+        assert any("在 cogito 頻道按的" in t for t in evs), evs
+        assert any(t.startswith("■ 已停妥：slack 送來的 /stop") and "$0.1200" in t for t in evs), evs
+        recent = main.audit_recent("p07", 5)
+        st = next(e for e in recent if e["kind"] == "task.stopped")
+        assert st["by"] == "cogito" and "web_fetch" in st.get("last_tool", ""), st
+        done = next(e for e in recent if e["kind"] == "task.done")
+        assert done["label"] == "stopped" and done["cost"] == 0.12, done
+        assert main.unfinished_today("p07", time.strftime("%Y-%m-%d")) == "stopped", "停妥那筆被算成出錯"
+        rows = [x for x in c.get("/office/inbox").json()["recent"] if x["agent"] == "p07" and x["seq"] >= st["seq"]]
+        assert len(rows) == 1 and rows[0]["kind"] == "task.stopped", f"一次中止只該列一行：{rows}"
+        main.busy.discard("p07")
         main.stopped.clear()
         main.save_state()
 
