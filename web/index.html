@@ -192,6 +192,13 @@
   .tab.new::after { content: '●'; color: var(--accent); font-size: 8px; margin-left: 4px; vertical-align: 2px; }
   .tab.inboxtab { margin-left: auto; }            /* 收件匣是全辦公室的待辦，靠右當徽章，不跟這位員工的頁混在一起 */
   .tab.inboxtab.hot { color: var(--accent); }
+  /* 漏跑的班表要講出來：收件匣改成分頁後只剩右上角一個小徽章，實際回報「開了外殼卻沒看到補跑的提示」 */
+  .missedbar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12px;
+               background: #2b2417; border-bottom: 1px solid #6d5a2a; color: var(--accent); }
+  .missedbar[hidden] { display: none; }
+  .missedbar span { flex: 1; min-width: 0; }
+  .missedbar button { flex: none; font: inherit; font-size: 11px; cursor: pointer; border: 1px solid #6d5a2a;
+                      background: #3a2f18; color: var(--accent); border-radius: 6px; padding: 2px 10px; }
   section[data-tab] > details.prof:not(.page) { display: none; }
   section[data-tab]:not([data-tab="feed"]) > .feed { display: none; }
   section > details.prof.page { flex: 1; min-height: 0; overflow-y: auto; border-bottom: 0; }
@@ -568,6 +575,7 @@
   <section>
     <div class="head" id="head"><div class="empty">點左側員工查看工作串</div></div>
     <nav class="tabs" id="tabs" role="tablist" aria-label="右欄分頁"></nav>
+    <div class="missedbar" id="missedBar" role="status" hidden></div>
     <!-- 三塊都預設 hidden：還沒選人時它們是空的，沒有 summary 的 <details> 會被瀏覽器
          畫成預設字樣「詳細資料」，右上角就浮出三條沒有意義的列。各自的 render 函式
          抓到資料才會取消 hidden。 -->
@@ -1273,6 +1281,18 @@ function paintTabs() {
                             `收件匣：待處理 ${todo}、未讀 ${unread}`));
   const nav = $('tabs');
   if (nav.dataset.sig !== html) { nav.innerHTML = html; nav.dataset.sig = html; }
+  // 漏跑的班表：不在收件匣頁時拉一條提示（收件匣是全辦公室的事，換人也要看得到）
+  const missed = ib.hidden ? 0 : +(ib.dataset.missed || 0), bar = $('missedBar');
+  bar.hidden = !missed || tab === 'inbox';
+  const msg = `🗓 有 ${missed} 條班表到點沒跑（橋當時沒開？）`;
+  if (!bar.hidden && bar.dataset.msg !== msg) {
+    bar.dataset.msg = msg;
+    bar.replaceChildren(el('span', msg));
+    const go = el('button', '到收件匣補跑');
+    go.type = 'button';
+    go.onclick = () => { tab = 'inbox'; paintTabs(); };
+    bar.append(go);
+  }
   if (tab !== 'feed' && !$(tab).open) $(tab).open = true;
 }
 $('tabs').onclick = e => {
@@ -1293,7 +1313,7 @@ document.querySelector('body > section').addEventListener('click', e => {
 {
   const mo = new MutationObserver(paintTabs);
   for (const [id] of TABS.slice(1).concat([['inbox']]))
-    mo.observe($(id), { attributes: true, attributeFilter: ['hidden', 'open', 'data-todo', 'data-unread'] });
+    mo.observe($(id), { attributes: true, attributeFilter: ['hidden', 'open', 'data-todo', 'data-unread', 'data-missed'] });
   new MutationObserver(() => { if (tab !== 'feed' && !feedNew) { feedNew = true; paintTabs(); } })
     .observe($('feed'), { childList: true, subtree: true });
   paintTabs();
@@ -1914,6 +1934,7 @@ async function inboxcard() {
   r.todo = r.todo.filter(t => !(t.kind === 'missed' && dismissed.has(t.id)));
   const unread = r.recent.filter(x => x.seq > inboxRead()).length;
   box.dataset.todo = r.todo.length; box.dataset.unread = unread;   // 分頁列的 📥 徽章讀這兩個數字
+  box.dataset.missed = r.todo.filter(t => t.kind === 'missed').length;   // 漏跑的班表另外拉一條提示
   const sig = JSON.stringify([r.todo.map(t => t.id), r.recent.slice(0, 40).map(x => x.id), unread]);
   if (box.dataset.sig === sig) { tickInbox(); return; }   // 沒變就不重畫（跟能力面板同一個做法）
   box.dataset.sig = sig;

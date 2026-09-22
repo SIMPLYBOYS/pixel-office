@@ -4870,8 +4870,10 @@ def missed_jobs(now: time.struct_time) -> list[dict]:
         name, aid = str(job["name"]), str(job["agent"])
         running = sched_running.get(aid, {}).get("job", {}).get("name") == name   # 正在跑的那條不算漏
         ran = sched_last.get(name, "")[:10]        # 最後一次到點或補跑的日期
-        # 報表可能落在該跑的那天，也可能落在事後補跑的那天（補跑寫的是補跑當天的日期）
-        if running or any(report_today(aid, job, d) is not None for d in {day, ran} if d):
+        # 報表可能落在該跑的那天，也可能落在事後補跑的那天（補跑寫的是補跑當天的日期）。
+        # 補跑那天只在【不早於該跑的那天】時才算——每天的班表上次跑是昨天，昨天那份報表在，
+        # 不代表今天跑過（實際回報：9/22 9:00 電腦關著，收件匣一條漏跑都沒有，就是被昨天的報表蓋掉了）。
+        if running or any(report_today(aid, job, d) is not None for d in {day, ran} if d and d >= day):
             continue
         # 跑過了（當天到點或事後補跑）卻沒有產出：看帳本那天最後一次是怎麼收的——被老闆中止、或收工時不是 ok
         # （CLI 被砍、橋重啟把它斷掉、出錯）都算「沒跑完」，要再給一顆補跑（實際回報：中止後找不到地方重跑；老徐重跑到一半橋重啟也一樣）。

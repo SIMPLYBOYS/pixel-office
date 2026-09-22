@@ -2819,6 +2819,21 @@ def weekly_makeup() -> None:
             assert [j["name"] for j in miss] == ["週報"] and miss[0]["day"] == "2026-09-20", miss
             assert names(at("2026-09-26 12:00")) == ["週報"], "整週都還補得了（下一次是 9/27）"
             assert names(at("2026-09-27 09:00")) == [], "下一次那天還沒到點：上一份不再回頭補，等它自己跑"
+            # 每天的班表：上次跑是昨天、昨天的報表也在——今天沒跑就是沒跑，不能被昨天那份蓋掉
+            # （實際回報：9/22 9:00 電腦關著，打開外殼收件匣一條漏跑都沒有）
+            sched.write_text(json.dumps([
+                {"name": "日報", "hour": 9, "engine": "cli", "agent": "p19", "text": "整理", "deliver": {"file": "trend-{date}.md"}}],
+                ensure_ascii=False), encoding="utf-8")
+            (Path(tmp) / "office_p19").mkdir(exist_ok=True)
+            (Path(tmp) / "office_p19" / "trend-2026-09-21.md").write_text("昨天的", encoding="utf-8")
+            main.sched_last["日報"] = "2026-09-21 09"
+            assert names(at("2026-09-22 10:00")) == ["日報"], "昨天的報表不能算成今天跑過"
+            (Path(tmp) / "office_p19" / "trend-2026-09-22.md").write_text("今天的", encoding="utf-8")
+            assert names(at("2026-09-22 10:00")) == [], "今天那份在了才算"
+            main.sched_last.pop("日報", None)
+            sched.write_text(json.dumps([
+                {"name": "週報", "weekday": 6, "hour": 11, "engine": "cli", "agent": "p19",
+                 "text": "整理本週", "deliver": {"file": "weekly-{date}.md"}}], ensure_ascii=False), encoding="utf-8")
             # 補跑產出的報表寫的是【補跑當天】的日期，不是該跑的那天——兩邊都要算數，否則補完還一直列
             # 補跑寫出來的報表用的是【補跑當天】的日期，不是該跑的那天——兩邊都要算數，否則補完還一直列。
             # 這一段用「今天」跑：帳本是用真實日期落帳的，寫死日期的話換一天跑就假綠。
@@ -2828,7 +2843,7 @@ def weekly_makeup() -> None:
             else:
                 today = time.strftime("%Y-%m-%d", now_t)
                 main.sched_last["週報"] = today + " 09"
-                (Path(tmp) / "office_p19").mkdir()
+                (Path(tmp) / "office_p19").mkdir(exist_ok=True)
                 rpt = Path(tmp) / "office_p19" / f"weekly-{today}.md"
                 rpt.write_text("補跑的", encoding="utf-8")
                 assert names(now_t) == [], "補跑過、報表在了就不再列"
