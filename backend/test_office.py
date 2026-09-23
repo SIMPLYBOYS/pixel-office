@@ -1588,7 +1588,7 @@ for o in out:
                     # 來源要標出來：cogito 與 CLI 的工具集完全不同，混著看比沒有更誤導
                     assert "Claude Code CLI" in caps.get("source", ""), caps
                     # 【跨重啟要留著】能力只在跑過 CLI 任務時才拿得到。不持久化的話，
-                    # 每次開 unity_demo 面板都是空的、要先派一次工才看得到（實際回報）。
+                    # 每次開指令頁都是空的、要先派一次工才看得到（實際回報）。
                     main.save_state()
                     snap = json.loads(main.STATE_FILE.read_text(encoding="utf-8"))
                     assert snap.get("cli_caps", {}).get("tools"), "能力沒被存下來"

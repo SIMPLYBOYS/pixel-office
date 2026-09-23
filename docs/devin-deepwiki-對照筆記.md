@@ -49,7 +49,7 @@ security-auditor 人設（SUB_NPC 映射 p07）＋ cogito 現成的 cron（`.cla
 ＝「保全每週巡一次某 repo、報告落工作區」。
 
 **落地**：做成橋端通用班表（`backend/schedule.json`，範例含 p07 週一 09:00 巡
-unity_demo）——掛在橋而不是 cogito 的 cron：走一般派工路徑，走位/工作串/報告卡
+pixel-office）——掛在橋而不是 cogito 的 cron：走一般派工路徑，走位/工作串/報告卡
 全部免費，而且「班表是辦公室的制度，不是大腦的排程」。到點防重（跨重啟持久化）、
 人在忙跳過並留痕（不排隊——排隊會在收工瞬間搶走老闆正要派的活）。可搭 ① 的
 repo 綁定（job 帶 repo 欄位）。

@@ -1,12 +1,18 @@
-# AI 辦公室模擬（Unity × Claude 多 Agent Demo）
+# Pixel Office
 
-像素辦公室裡三個有人設的 NPC，由 Claude 決策過日子：走動、入座、喝水、
-頭上冒中文台詞、互相搭話對談。舞台在 Unity，大腦在 FastAPI 後端，
-兩邊用 WebSocket 傳 JSON 指令（架構詳見 aaron-vault 的架構指南與建置筆記）。
+把 AI agent 的工作投影進一間像素辦公室：誰在做什麼、卡在哪、在等你批准什麼，
+掃一眼就看得出來。員工有人設、有班表、有工作串與稽核帳本；高危操作會停下來等你放行
+（HITL 審批），每個動畫與徽章都對應真實事件——**畫面上看到的都是真的發生過的事**。
+
+三種引擎可以逐件事切換：cogito-agent、Claude Code CLI、Codex CLI。
+舞台在 Unity，橋在 FastAPI，兩邊用 WebSocket 傳 JSON 指令。
+
+（原名 `unity_demo`；架構詳見 aaron-vault 的架構指南與建置筆記。）
 
 ```
 unity/      Unity 6 專案（表現層：場景、NPC、尋路、台詞框）
-backend/    FastAPI 大腦（persona + 記憶 + Claude 決策 + 對話迴圈）
+backend/    FastAPI 橋（人設 + 記憶 + 派工 + 審批 + 班表 + 稽核帳本）
+web/        網頁外殼（名冊、工作串、任務看板、指令頁）
 tools/      素材管線（aseprite 設計圖拆解、角色幀抽取）
 limezu/     LimeZu 授權素材與衍生物（不進 git，見下方「素材重建」）
 ```
@@ -186,3 +192,14 @@ curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
 | NPC 全部站著不動 | 後端 log 看是否有 429/decide 失敗；無 key 模式看是否印出隨機走動 |
 | 編譯錯誤 | 真正的錯誤訊息在 `unity/Logs/Editor.log`（不是 ~/Library 那份）|
 | Hub 開錯資料夾 | 專案是 `unity/`，開到 repo 根會生出一個空專案（gitignore 已防護）|
+
+## 授權
+
+程式碼是 MIT（見 `LICENSE`），**只涵蓋 Pixel Office 自己寫的程式碼**。
+
+像素素材 © [LimeZu](https://limezu.itch.io)（Modern Interiors／Modern Office）。
+素材**不包含在這個 repository 或任何 release 裡**，也不能被 MIT 重新授權——
+要跑辦公室畫面請自行到 itch.io 取得合法副本，再依上面的「素材重建」重生。
+Modern Interiors 的授權要求標示 credit：limezu.itch.io。
+
+第三方來源與授權邊界整理在 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
