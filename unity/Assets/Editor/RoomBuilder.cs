@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
@@ -191,6 +192,19 @@ public static class RoomBuilder
     static IEnumerable<(string name, int cx, int cy)> AllWaypoints() =>
         OfficeWaypoints.Select(w => (w.name, w.cx + OfficeX, w.cy)).Concat(WestWaypoints);
 
+    // 批次模式用（-executeMethod RoomBuilder.BuildAndSave）：開場景 → 建房 → 存檔。
+    // 房間是【場景物件】，不像角色是 prefab 資產——批次模式不會自己存場景，少了這一步，
+    // 建完的房間只活在記憶體裡，隨後的 WebGL 從磁碟讀場景，等於什麼都沒改。
+    public static void BuildAndSave()
+    {
+        const string path = "Assets/Scenes/SampleScene.unity";
+        var scene = EditorSceneManager.OpenScene(path);
+        Build();
+        EditorSceneManager.MarkSceneDirty(scene);
+        EditorSceneManager.SaveScene(scene, path);
+        Debug.Log("RoomBuilder: 場景已存檔 " + path);
+    }
+
     [MenuItem("Tools/Build Room")]
     public static void Build()
     {
@@ -273,7 +287,8 @@ public static class RoomBuilder
         props.transform.SetParent(room.transform, false);
 
         // 兩區的 json 是同一個 schema，差別只有「要不要位移」——所以擺放只寫一份。
-        void PlaceProps(Item[] list, float offsetX)
+        // sitBehind＝這一區裡「人要【真的】坐進去」的座位格（見 SitBehindTiles）。
+        void PlaceProps(Item[] list, float offsetX, HashSet<(int, int)> sitBehind)
         {
             foreach (var it in list)
             {
@@ -284,11 +299,15 @@ public static class RoomBuilder
                 go.transform.localPosition = new Vector3(offsetX + it.x / PPU, -(it.y + it.h) / PPU, 0);
                 var sr = go.AddComponent<SpriteRenderer>();
                 sr.sprite = sprites[it.name];
-                sr.sortingOrder = it.top;
+                // 真坐姿的座位排到角色【後面】(-1)，其餘照舊（0，或 top=1 的桌上小物）。
+                // 為什麼不能交給 Y-sort：椅子的 pivot 在格子【底邊】、坐下的人在格子【中心】，
+                // 椅子永遠比人靠前。桌邊那排 sit_up 的工位正好靠這件事擋住下半身假裝坐著，
+                // 但側面椅高 23px，同一招會把人整個吃掉——畫面上只剩一顆頭浮在椅背上緣（實際回報）。
+                sr.sortingOrder = SitsIn(it, sitBehind) ? -1 : it.top;
                 sr.spriteSortPoint = SpriteSortPoint.Pivot; // pivot=左下 → 以底邊 Y-sort
             }
         }
-        PlaceProps(data.items, OfficeX);
+        PlaceProps(data.items, OfficeX, SitBehindTiles(OfficeWaypoints));
 
         if (westData != null)
         {
@@ -301,7 +320,7 @@ public static class RoomBuilder
             // -21（比辦公區底圖再低一層）：西區底圖刻意往東多畫一格墊在辦公區下面，補它
             // 西緣那段沒畫的透明區。兩張都用 -20 的話誰蓋誰是不定的，接縫會時好時壞。
             wsr.sortingOrder = -21;
-            PlaceProps(westData.items, 0);
+            PlaceProps(westData.items, 0, SitBehindTiles(WestWaypoints));
 
             // 自動門：west.json 裡的 door_0..door_N 是【同一扇門的 N 張幀】，不是 N 件家具。
             // 收成一個掛 AutoDoor 的物件；照名字排序＝關→開，AutoDoor 依有沒有人靠近前後播。
@@ -373,6 +392,23 @@ public static class RoomBuilder
                   + (westData == null ? "西區【無美術】" : $"西區 {westData.items.Length} 件家具 + 底圖 {westData.canvasW}×{westData.artH}px")
                   + $"、{AllWaypoints().Count()} 個 waypoint");
     }
+
+    // 真坐姿（sit_left／sit_right）的座位格。sit_up 不在內——它不是坐姿，是「站著的背影＋椅子
+    // 擋住下半身」，那一招要椅子畫在人【前面】才成立（見 OfficeWaypoints 開頭的說明）。
+    // 不是每個座位都會命中：老闆椅是畫進【底圖】的，底圖 sortingOrder -20，本來就在人後面，
+    // 不需要也不會被這條規則碰到——所以「沒有對應家具」不等於出錯，別在這裡加驗證。
+    // 兩張表分開餵：辦公區的座標是本地的、西區是絕對的，跟 PlaceProps 的 offsetX 同一套規矩。
+    static HashSet<(int, int)> SitBehindTiles((string name, int cx, int cy)[] wps) =>
+        wps.Where(w => w.name.EndsWith("@sit_left") || w.name.EndsWith("@sit_right"))
+           .Select(w => (w.cx, w.cy)).ToHashSet();
+
+    // 這件家具【就是】那張椅子嗎：格心落在它的外框內，而且它只有一格寬。
+    // 寬度這一關是必要的——外框是矩形，旁邊那組 L 形桌子（obj_31，32px 寬）的外框也罩得到
+    // 座位格，少了它會把整組桌子一起排到人後面。椅子一律一格寬，桌子一律不只一格。
+    static bool SitsIn(Item it, HashSet<(int, int)> sitBehind) =>
+        it.w <= PPU
+        && sitBehind.Any(t => it.x <= t.Item1 * PPU + PPU / 2 && t.Item1 * PPU + PPU / 2 < it.x + it.w
+                           && it.y <= t.Item2 * PPU + PPU / 2 && t.Item2 * PPU + PPU / 2 < it.y + it.h);
 
     // 每次 Build 驗證：所有 waypoint 都落在可走格，且從出生點 BFS 可達（孤島直接報錯）
     static void ValidateWaypoints()
