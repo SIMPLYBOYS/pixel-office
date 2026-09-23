@@ -4,6 +4,7 @@
 不碰真 Unity、不叫 Claude API（生活迴圈整個 patch 掉，測試全確定性）。
 """
 import asyncio
+import contextlib
 import json
 import subprocess
 import sys
@@ -62,6 +63,9 @@ def recv(ws, aid: str | None = None, emote: bool = False) -> dict:
 
 def post(c, **ev) -> dict:
     return c.post("/office/event", json=ev).json()
+
+
+REAL_AGENT_LOOP = main.agent_loop   # run() 待會把生活迴圈換成替身，先留一份真的（趴睡投影要測它）
 
 
 async def _no_life(a, tools):  # 生活迴圈替身：測試只看投影指令
@@ -477,6 +481,7 @@ def run() -> None:
     commands_page()
     task_board()
     limezu_gestures()
+    sleep_projection()
     cli_hitl()
     trace_links()
     start_records_engine()
@@ -1093,6 +1098,113 @@ def limezu_gestures() -> None:
         main.TELEGRAM_BOT_TOKEN, main.DELIVER_TO, main.send_telegram, main.CHANNELS_DIR = saved
         main.delivered_at.clear(); main.sleeping.discard("p05")
     print("  ✓ LimeZu 動作：送到才舉起＋信封、老闆駁回才丟出（丟完才回座位）、寫記憶才撿起、趴睡掛 zZ")
+
+
+def sleep_projection() -> None:
+    """趴睡是狀態投影：頭上掛著 zZ 的人不會走路、不會講話。
+
+    先前叫醒只清了 sleeping、沒有同步徽章（office 事件那條），員工之間的閒聊那條連狀態都沒清——
+    畫面上就是一個掛著 zZ 正常走動、正常回話的人（實際回報）。反過來也要成立：趴下之前的那段路
+    不能先掛 zZ（掛了就是「掛著 zZ 在走」，而且走位會被叫醒守衛當成醒著，zZ 反而掛不上）。"""
+    class _Eye:   # 假畫面：真的走 send_cmd，才測得到叫醒守衛
+        def __init__(self) -> None:
+            self.cmds: list[dict] = []
+
+        async def send_text(self, payload: str) -> None:
+            self.cmds.append(json.loads(payload))
+
+        def last(self, action: str, aid: str = "p05") -> str:
+            return next((str(c.get("target") or "") for c in reversed(self.cmds)
+                         if c.get("action") == action and c.get("agent_id") == aid), "<無>")
+
+    eye = _Eye()
+    main.viewers.add(eye)
+    for d in (main.memo_pending, main.rate_state, main.delivered_at, main.emote_now):
+        d.pop("p05", None)
+
+    async def nap() -> None:
+        main.sleeping.add("p05")
+        await main.sync_emote("p05")
+
+    try:
+        # ① 趴著睡：zZ 掛上去
+        asyncio.run(nap())
+        assert eye.last("emote") == "zzz", eye.cmds[-3:]
+
+        # ② 走位＝醒著（同事來搭話、老闆派工、去領獎都走這條）
+        asyncio.run(main.goto("p05", "chair_4"))
+        assert "p05" not in main.sleeping, "走了還掛在睡著名單上"
+        assert eye.last("emote") == "", f"人走了 zZ 還在頭上：{eye.cmds[-3:]}"
+
+        # ③ 說話＝醒著（員工之間的閒聊先前完全沒清睡眠狀態）
+        asyncio.run(nap())
+        asyncio.run(main.send_cmd({"agent_id": "p05", "action": "say", "channel": "public", "text": "嗨"}))
+        assert "p05" not in main.sleeping and eye.last("emote") == "", f"講話了 zZ 還在：{eye.cmds[-3:]}"
+
+        # ④ 趴睡姿勢本身不算醒著（否則 zZ 永遠掛不上去）
+        asyncio.run(nap())
+        asyncio.run(main.pose("p05", "sleep"))
+        assert "p05" in main.sleeping and eye.last("emote") == "zzz", eye.cmds[-3:]
+
+        # ⑤ 接到工作就醒：office 事件那條也要收掉 zZ
+        with TestClient(main.app) as c:
+            post(c, agent="p05", kind="start", label="醒來上工")
+            assert "p05" not in main.sleeping and eye.last("emote") == "", f"上工了還掛著 zZ：{eye.cmds[-3:]}"
+            post(c, agent="p05", kind="done", label="ok")
+        main.busy.discard("p05")
+
+        # ⑥ 生活迴圈去趴下：先走到位子、擺好姿勢，zZ 最後才上
+        class _NoWait:   # 生活迴圈的隨機等待（起步 1–6 秒、idle 間隔）歸零，其餘照舊
+            def __init__(self, real): self._real = real
+            def uniform(self, a, b): return 0.0
+            def __getattr__(self, name): return getattr(self._real, name)
+
+        saved = (main.client, main.PROJECTION, main.IDLE_INTERVAL, main.random)
+        main.client, main.PROJECTION, main.IDLE_INTERVAL = None, True, (0.0, 0.0)
+        main.random = _NoWait(main.random)
+        main.sleeping.discard("p05")
+        main.last_work["p05"] = time.monotonic() - main.IDLE_SLEEP - 1
+        eye.cmds.clear()
+
+        async def one_nap_cycle() -> None:
+            main.arrived["p05"] = asyncio.Event()
+            usher = asyncio.create_task(_keep_arriving(main.arrived["p05"]))
+            loop_task = asyncio.create_task(REAL_AGENT_LOOP(main.agents["p05"], []))
+            for _ in range(200):          # 等它趴好（每輪 10ms）
+                if "p05" in main.sleeping:
+                    break
+                await asyncio.sleep(0.01)
+            main.viewers.clear()          # 沒有畫面＝迴圈收工
+            usher.cancel()
+            loop_task.cancel()
+            for t in (usher, loop_task):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
+
+        try:
+            asyncio.run(one_nap_cycle())
+            assert "p05" in main.sleeping, (f"太久沒工作卻沒趴下｜busy={'p05' in main.busy} "
+                f"viewers={len(main.viewers)} idle={time.monotonic() - main.last_work.get('p05', 0):.0f}/{main.IDLE_SLEEP} "
+                f"cmds={[ (c.get('action'), c.get('target')) for c in eye.cmds][-4:]}")
+            order = [(c.get("action"), c.get("target")) for c in eye.cmds if c.get("agent_id") == "p05"]
+            assert ("use", "sleep") in order, order
+            assert order.index(("emote", "zzz")) > order.index(("use", "sleep")), f"人還在走就先掛 zZ：{order}"
+        finally:
+            main.client, main.PROJECTION, main.IDLE_INTERVAL, main.random = saved
+    finally:
+        main.viewers.discard(eye)
+        main.sleeping.discard("p05")
+        main.emote_now.pop("p05", None)
+        main.last_work.pop("p05", None)
+        main.busy.discard("p05")
+    print("  ✓ 趴睡：走位／說話／換姿勢就醒（zZ 跟著收），趴到位子上才掛 zZ")
+
+
+async def _keep_arriving(ev: asyncio.Event) -> None:
+    """替身畫面不會回報走到了，這裡一直幫它按（agent_loop 走位後會等 30 秒）。"""
+    while True:
+        ev.set()
+        await asyncio.sleep(0.005)
 
 
 def task_board() -> None:

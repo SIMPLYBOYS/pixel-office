@@ -218,9 +218,16 @@ def broadcast_say(speaker: Agent, text: str, target: Agent | None) -> None:
 
 
 async def send_cmd(cmd: dict) -> bool:
-    """廣播給所有畫面；送不出去的當場移除（半開連線不會拖住其他觀眾）。"""
+    """廣播給所有畫面；送不出去的當場移除（半開連線不會拖住其他觀眾）。
+
+    走位／說話／換姿勢之前先把人叫醒：會動、會講話就不是睡著。擋在這個出口而不是各個喚醒點，
+    因為叫醒的理由太多（派工、同事搭話、交付舉信封、寫記憶撿東西），先前只有 office 事件那條
+    記得清 sleeping，而且清了也沒同步徽章——於是頭上掛著 zZ 照樣到處走、照樣回話（實際回報）。"""
     if not viewers:
         return False
+    if cmd.get("agent_id") in sleeping and (cmd.get("action") in ("move_to", "say")
+                                            or (cmd.get("action") == "use" and cmd.get("target") != "sleep")):
+        await wake(str(cmd["agent_id"]))
     payload = json.dumps(cmd, ensure_ascii=False)
     dead = []
     for ws in list(viewers):
@@ -270,6 +277,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
     while viewers:
         while a.id in busy:  # 對話中掛起主迴圈
             await asyncio.sleep(1.0)
+        going_to_sleep = False
 
         try:
             if client is not None and not PROJECTION:
@@ -282,8 +290,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 desk = WORK_DESK.get(a.id)
                 actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
                     if desk else [{"action": "use", "target": "sleep"}]
-                sleeping.add(a.id)
-                await sync_emote(a.id)   # zZ 跟著上去
+                going_to_sleep = True   # 趴下【之後】才算睡著（見迴圈尾）
             elif stays_put(a.id):   # 崗位固定：不走位，偶爾接個電話點綴，其餘時間就是在櫃檯辦公
                 actions = [{"action": "use", "target": random.choice([SIT_AT.get(a.id, "face_down")] * 3 + ["phone"])}]
             else:  # 零成本 idle：不打 API，偶爾走動點綴
@@ -296,6 +303,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
             if not viewers:
                 return
             if a.id in busy:  # 剛被人搭話，放棄剩餘動作
+                going_to_sleep = False
                 break
 
             if act["action"] == "use":
@@ -345,6 +353,12 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
                 # 搭話且對方有空 → 展開對話迴圈
                 if target_agent and target_agent.id not in busy and client is not None:
                     await converse(a, target_agent, text)
+
+        if going_to_sleep:
+            # 人真的趴到位子上了才掛 zZ。先掛的話，去工位那段路就是「掛著 zZ 在走」——
+            # 而且走位指令會被上面的叫醒守衛當成醒著，zZ 反而掛不上去。
+            sleeping.add(a.id)
+            await sync_emote(a.id)
 
         await asyncio.sleep(random.uniform(*(IDLE_INTERVAL if PROJECTION else DECISION_INTERVAL)))
 
@@ -584,6 +598,14 @@ async def emote(aid: str, name: str) -> None:
 async def sync_emote(aid: str) -> None:
     """把徽章對齊真實狀態。冪等，隨便呼叫幾次都行。"""
     await emote(aid, want_emote(aid))
+
+
+async def wake(aid: str) -> None:
+    """叫醒：清掉趴睡狀態，【並且】把頭上的 zZ 收掉。先前這兩件事被拆開——
+    狀態清了、徽章沒收，畫面上就是一個掛著 zZ 正常走動講話的人。"""
+    if aid in sleeping:
+        sleeping.discard(aid)
+        await sync_emote(aid)
 
 
 async def goto_then_pose(aid: str, target: str, action: str) -> None:
@@ -1477,7 +1499,7 @@ async def office_event(ev: dict):
     if kind == "start":
         task_start[aid] = time.time()       # 牆鐘：要跟檔案 mtime 比
     last_work[aid] = time.monotonic()  # 有事件＝這位還在做事，重新計算「閒多久」
-    sleeping.discard(aid)              # 睡著的被叫醒（下一輪就恢復正常走動）
+    await wake(aid)                    # 睡著的被叫醒：狀態與頭上的 zZ 一起收（下一輪恢復正常走動）
     # 額度警示：有實質進展就表示不再卡著額度了，收掉紅燈（warn 留到收工——「快滿了」還是真的）
     if kind in ("tool", "result") and rate_state.get(aid) == "alert":
         rate_state.pop(aid, None)
