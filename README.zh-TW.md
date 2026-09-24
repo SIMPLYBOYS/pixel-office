@@ -87,7 +87,7 @@ Esc 或點空白處關閉）。資料來自橋的 `GET /office/report/{id}`；�
 
 1. Unity 選單 **Tools → Build WebGL (辦公室網頁版)**（一次即可，改場景才需重建；產物在
    `unity/Builds/WebGL`，已 gitignore）
-2. 起後端後瀏覽器開 **http://localhost:8123/shell/** ——左側員工名冊（狀態燈）、中間像素
+2. 起後端後，用終端機印出的「🔑 外殼網址」開（`http://127.0.0.1:8123/shell/#t=…`，每個瀏覽器第一次用；之後直接開 `/shell/` 就好）——左側員工名冊（狀態燈）、中間像素
    辦公室（WebGL）、右側工作串（時間軸即時滾動＋報告全文）
 3. 沒建置 WebGL 也能用：中間顯示提示，名冊和工作串照常運作（資料同源 `/agents`、`/office/report`）
 
@@ -106,7 +106,8 @@ Unity 只是渲染面。
   頻道派的任務自動投影——未知頻道 id 由橋動態指派閒置 NPC（黏性：同頻道固定同員工）。
 
 橋**只接本機**：Host 不是 localhost／127.0.0.1 一律 403，別的網站也打不進來（跨站請求與 `/ws` 都擋，稽核 #4）。
-要從區網其他裝置開外殼，在 `.env` 設 `OFFICE_ALLOWED_HOSTS`——橋沒有登入，加了就等於那個網段的人都能派工與核准。
+要從區網其他裝置開外殼，在 `.env` 設 `OFFICE_ALLOWED_HOSTS`。
+除此之外還要 **token**：存在 `~/.pixel-office/token`（只有你讀得到，第一次啟動產生、之後不變）。外殼用啟動時印的網址換一次 cookie；hook 與 cogito 自動讀那個檔帶上；手打的 curl 要自己帶（見下方「觀察與手動介入」）。不用 token 的只有靜態檔、`/ws`（Unity）與 `GET /office/report`（Unity 的報告卡）。token 外流了就刪掉那個檔、重啟橋，會產一把新的（外殼要用新網址重登一次）。
 
 啟動時若印出「⚠ 未設定 ANTHROPIC_API_KEY」代表 `.env` 沒讀到（見下方一次性設定）——
 此模式 NPC 仍會動，但退化成隨機走動。
@@ -154,13 +155,15 @@ Unity 只是渲染面。
 ## 觀察與手動介入
 
 ```bash
-curl localhost:8123/agents     # 每個人的位置、記憶、是否聊天中
-curl localhost:8123/events     # 最近事件（arrived 等）
+# 橋要 token（稽核 #4）：先讀進變數，每條都帶
+T=$(cat ~/.pixel-office/token)
+curl -H "X-Office-Token: $T" localhost:8123/agents     # 每個人的位置、記憶、是否聊天中
+curl -H "X-Office-Token: $T" localhost:8123/events     # 最近事件（arrived 等）
 # 跳過大腦直接下指令：
-curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
+curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' -H "X-Office-Token: $T" \
      -d '{"agent_id":"p17","action":"move_to","target":"cooler_1"}'
 # 直接擺一個姿勢（驗收動畫最快的方式，不必等 agent 真的跑）：
-curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
+curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' -H "X-Office-Token: $T" \
      -d '{"agent_id":"p05","action":"use","target":"hurt_down"}'
 ```
 

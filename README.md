@@ -103,7 +103,8 @@ for artifacts, open claw-dashboard.
 
 1. Unity menu **Tools → Build WebGL (辦公室網頁版)** (once; rebuild only when the scene changes; output
    goes to `unity/Builds/WebGL`, gitignored)
-2. Start the backend and open **http://localhost:8123/shell/**: employee roster with status lights on
+2. Start the backend and open the 「🔑 外殼網址」 (shell URL) it prints (`http://127.0.0.1:8123/shell/#t=…`; needed once per
+   browser, after that plain `/shell/` works): employee roster with status lights on
    the left, the pixel office (WebGL) in the middle, the work thread on the right (live timeline plus full
    reports)
 3. Works without a WebGL build too: the middle shows a hint, and the roster and work threads keep working
@@ -128,8 +129,11 @@ Two ways to dispatch (usable together):
 
 The bridge **only accepts local requests**: a Host other than localhost / 127.0.0.1 gets a 403, and other websites
 can't get in either (cross-site requests and `/ws` are both blocked; audit #4). To open the shell from another device on
-your LAN, set `OFFICE_ALLOWED_HOSTS` in `.env`. The bridge has no login, so allowing a host means anyone on that network
-can dispatch and approve.
+your LAN, set `OFFICE_ALLOWED_HOSTS` in `.env`.
+On top of that, a **token** is required. It lives in `~/.pixel-office/token` (readable only by you; created on first start and kept
+after that). The shell trades the printed URL for a cookie once; the hooks and cogito read the file automatically; hand-typed curl
+must send it (see "Observing and intervening"). Only static files, `/ws` (Unity) and `GET /office/report` (Unity's report card)
+work without it. If the token leaks, delete that file and restart the bridge to get a new one (log in to the shell again with the new URL).
 
 If startup prints 「⚠ 未設定 ANTHROPIC_API_KEY」 ("ANTHROPIC_API_KEY not set"), `.env` wasn't loaded
 (see one-time setup below). NPCs still move in this mode, but only as random walks.
@@ -185,13 +189,15 @@ conversation loops.
 ## Observing and intervening
 
 ```bash
-curl localhost:8123/agents     # everyone's position, memory, whether they're chatting
-curl localhost:8123/events     # recent events (arrived, etc.)
+# the bridge needs the token (audit #4): read it once, send it on every call
+T=$(cat ~/.pixel-office/token)
+curl -H "X-Office-Token: $T" localhost:8123/agents     # everyone's position, memory, whether they're chatting
+curl -H "X-Office-Token: $T" localhost:8123/events     # recent events (arrived, etc.)
 # bypass the brain and issue a command directly:
-curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
+curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' -H "X-Office-Token: $T" \
      -d '{"agent_id":"p17","action":"move_to","target":"cooler_1"}'
 # strike a pose directly (the fastest way to check an animation, no need to wait for a real agent run):
-curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
+curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' -H "X-Office-Token: $T" \
      -d '{"agent_id":"p05","action":"use","target":"hurt_down"}'
 ```
 

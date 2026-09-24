@@ -13,6 +13,17 @@ import sys
 import urllib.request
 
 
+def office_token() -> str:
+    """橋的 token（稽核 #4）：跟橋同一套來源——OFFICE_TOKEN，否則 ~/.pixel-office/token。hook 跑在員工沙箱外，讀得到。"""
+    if t := os.environ.get("OFFICE_TOKEN", "").strip():
+        return t
+    try:
+        with open(os.environ.get("OFFICE_TOKEN_FILE") or os.path.expanduser("~/.pixel-office/token"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def decide(behavior: str, message: str = "") -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
                                              "decision": {"behavior": behavior, "message": message}}},
@@ -30,7 +41,7 @@ def main() -> None:
                                                "tool_use_id", "permission_mode")}).encode("utf-8")
     wait_s = float(os.environ.get("OFFICE_PERMISSION_WAIT_S", "330"))   # 要比橋的審批逾時（預設 300s）長
     try:
-        r = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        r = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "X-Office-Token": office_token()})
         with urllib.request.urlopen(r, timeout=wait_s) as resp:
             d = json.loads(resp.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001

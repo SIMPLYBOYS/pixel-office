@@ -15,7 +15,7 @@
 | 1 | Critical | jobspy MCP 把 agent 給的參數拼進 shell 字串執行：提示注入即可在沙箱外執行任意指令 | 重現成立（✅ 已修） |
 | 2 | Critical | 員工的 Bash 能連外網、讀得到金鑰檔，而且自動放行不經審批 | 設定＋實際 transcript（✅ 已修） |
 | 3 | High | 員工子行程繼承 Telegram／Slack／cogito 派工與**審批**金鑰 | 程式＋金鑰名稱（✅ 已修） |
-| 4 | High | 橋沒有任何驗證、Host／Origin 檢查：同機程式可核准高危操作；瀏覽器端可經 DNS rebinding 或跨站請求打進來 | 程式＋測試（🟡 部分：瀏覽器那條已擋） |
+| 4 | High | 橋沒有任何驗證、Host／Origin 檢查：同機程式可核准高危操作；瀏覽器端可經 DNS rebinding 或跨站請求打進來 | 程式＋測試（✅ 已修） |
 | 5 | High | 審批畫面與實際核准不一致：一鍵核准會批掉同頻道全部待審；參數被截斷 | 兩個 repo 的程式（✅ 已修） |
 | 6 | High | 偽造 `/office/event` 指定任意工作目錄 → 讀任意白名單副檔名檔案、`open` 任意資料夾 | 程式＋測試（✅ 已修） |
 | 7 | High | 班表交付不檢查路徑：agent 把報告做成指向金鑰的 symlink，橋就把金鑰上傳 Telegram／Slack | 程式＋測試（✅ 已修） |
@@ -47,7 +47,7 @@
 - **2026-09-18 更新**：Codex 員工的 shell 也打開網路（Aaron 選 B 案：Codex 內建網頁搜尋開不了 RSS、GitHub API、LinkedIn 訪客 API，班表任務改用 curl），同樣沒有網域白名單；workspace-write 沙箱可讀整台機器，所以 Codex 員工現在也在這條攻擊路徑上。第二批的網域白名單兩個引擎一起收。
 - **修法**：設 `sandbox.network.allowedDomains`（只放任務需要的站）；`permissions.blockReadsOutsideWorkingDirectories: true`；沙箱檔案層 `denyRead` 涵蓋 `~/.codex`、`~/.claude*`、`~/.aws`、`~/.ssh`、各 repo `.env`；無人值守的員工把 `autoAllowBashIfSandboxed` 關掉，讓 Bash 走審批 hook。
 - **進度（2026-09-24，第二批）**：已修，Aaron 逐項決定：
-  - `~/.claude-office/settings.json`（手動維護，橋只寫 hooks）：`autoAllowBashIfSandboxed: false`——每個 Bash 都走審批 hook，無人值守＝拒；
+  - `~/.claude-office/settings.json`（手動維護，橋只寫 hooks）：`autoAllowBashIfSandboxed: false`——非唯讀的 Bash 都走審批 hook，無人值守＝拒（更正：Claude Code 認得的唯讀指令如 `date`、`ls`、`cat` 照樣不問就跑，實測 `date` 沒開卡；讀金鑰靠下面的 deny 擋，不靠審批）；
     `sandbox.network.allowedDomains: []`＋`strictAllowlist: true`；金鑰與各專案 `.env` 兩層都擋：Bash 走 `sandbox.filesystem.denyRead`，
     Read 工具走 `permissions.deny`（`~/.ssh`、`~/.aws`、`~/.config/gh`、`~/.config/gcloud`、`~/.docker`、`~/.netrc`、`~/.codex`、
     `~/.codex-office/auth.json`、`~/.claude`、`~/.claude.json*`、`~/.claude-office/.claude.json`、`~/.zsh_history`、
@@ -81,6 +81,16 @@
   - 需要 JSON body 的 POST 路由不怕一般 CSRF：FastAPI 0.139 預設只接受 `application/json`，跨站送 JSON 需要預檢，而橋沒有 CORS 設定。
 - **修法**：`TrustedHostMiddleware`（只允許 127.0.0.1、localhost）；啟動時產生 token，外殼與 hook 帶在標頭，所有非靜態路由檢查；`/ws` 檢查 Origin；封存改成需要 body 或自訂標頭。
 - **進度（2026-09-24，第二批之一）**：瀏覽器那條已修。`LocalOnly`（純 ASGI，連 `/ws` 一起管）：Host 不是本機一律 403（擋 DNS rebinding）；帶 Origin 的請求必須是本機同一個 port，否則 HTTP 403、`/ws` 以 1008 關閉（擋跨站請求與 `/ws` 注入，`/office/audit/archive` 這種 simple request 也一併擋掉，不必另改成要 body）。不帶 Origin 的非瀏覽器用戶端照常放行，所以 Unity、hook、cogito、claw-cli 都不用改。區網要用就設 `OFFICE_ALLOWED_HOSTS`。測試 `local_only`（拿掉 middleware 會紅）。**還沒做**：同機程式照樣打得進來、也照樣能核准——要靠 token，但員工的 Bash 現在讀得到任何檔案與環境變數（#2），token 放哪裡都拿得到，所以排在 #2 之後。
+- **進度（2026-09-24，第二批之二）**：token 已上。`~/.pixel-office/token`（0600、目錄 0700，第一次啟動產生、重啟不變；
+  `OFFICE_TOKEN`／`OFFICE_TOKEN_FILE` 可蓋）。`LocalOnly` 在 Host／Origin 之後再驗 token（標頭 `X-Office-Token` 或 cookie，
+  `hmac.compare_digest`），沒有就 401。外殼開一次啟動時印的 `/shell/#t=<token>`，`POST /office/login` 換 HttpOnly＋SameSite=Strict
+  cookie，token 從網址列清掉；圖片、檔案預覽、SSE 都靠 cookie，不必改外殼的網址。hook（permission、memory）與 cogito
+  （`engine.PostOffice`，三個送出點都改走它）讀同一個檔帶標頭。不用 token 的：靜態檔、`/ws`（Unity；瀏覽器已被 Origin 擋）、
+  `GET /office/report`（Unity 報告卡）——Unity 不必改、不必重建。員工沙箱把 `~/.pixel-office` 加進 denyRead 與 Read deny。
+  擋得住的是「打得到 127.0.0.1、讀不到你檔案」的東西：同機其他使用者、被騙去發請求的本機服務（SSRF）、容器。
+  測試 `token_required`（拿掉檢查會紅）、cogito `TestPostOfficeSendsToken`。實機：沒 token／錯 token 401、帶 token 200；
+  員工的審批 hook 帶 token 開卡成功；瀏覽器從空白頁開與「已開著外殼、只貼 #t=」兩條路都登得進去（後者是實測才抓到：
+  只換 hash 瀏覽器不重新載入，改成也聽 hashchange）。
 
 ### 5. 審批畫面與實際核准不一致
 - **一鍵批掉全部**：外殼與收件匣送出的是單純的 `approve`；cogito 收到不帶 ID 的 approve 會執行 `ResolveByChannel`，核准該頻道**所有**待審任務（`internal/chatbot/approval.go`）。橋每位員工只存最新一張卡。agent 一輪並行送出幾個誘餌指令加一個惡意指令時，你看到的可能是誘餌，按下去卻全部核准。

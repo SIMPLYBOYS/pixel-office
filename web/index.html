@@ -553,6 +553,10 @@
 .npc-badge{position:absolute;top:-4px;right:-4px;width:16px;height:16px;border-radius:50%;
   font-size:11px;text-align:center;line-height:16px;}
 .npc-badge.L2{background:#e08a3a;color:#1a1200;}
+  /* 還沒登入（稽核 #4 token）：整條橫在最上面，講清楚怎麼登入——不是一片靜悄悄的空名冊 */
+  .needlogin { position: fixed; top: 0; left: 0; right: 0; z-index: 99; background: #5a2a2a; color: #fff;
+               padding: 10px 16px; font-size: 14px; line-height: 1.6; }
+  .needlogin code { background: #0006; padding: 1px 6px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -644,6 +648,33 @@
     </div>
   </section>
 <script>
+// ═══ 辦公室 token（稽核 #4）═══
+// 開「/shell/#t=<token>」：拿去換 HttpOnly cookie，之後所有請求（fetch、圖片、檔案預覽、SSE）都自動帶。
+// token 從網址列清掉再重新載入——別留在網址列、分頁標題或瀏覽紀錄裡。
+// 同一個分頁已經開著外殼、只把 #t= 貼進網址列時，瀏覽器不會重新載入（只換 hash）——所以也聽 hashchange。
+function tokenLogin() {
+  const m = location.hash.match(/[#&]t=([^&]+)/);
+  if (!m) return;
+  fetch('/office/login', { method: 'POST', headers: { 'X-Office-Token': decodeURIComponent(m[1]) } })
+    .finally(() => { history.replaceState(null, '', location.pathname + location.search); location.reload(); });
+}
+tokenLogin();
+window.addEventListener('hashchange', tokenLogin);
+// 任何請求回 401＝這個瀏覽器還沒登入：掛一條說明在最上面（只掛一次）
+{
+  const _fetch = window.fetch.bind(window);
+  window.fetch = async (...a) => {
+    const r = await _fetch(...a);
+    if (r.status === 401 && !document.getElementById('needLogin')) {
+      const d = document.createElement('div');
+      d.id = 'needLogin'; d.className = 'needlogin';
+      d.innerHTML = '🔑 這個瀏覽器還沒登入辦公室。請用後端啟動時印出的網址開外殼（<code>…/shell/#t=…</code>），'
+        + '或在終端機跑 <code>cat ~/.pixel-office/token</code>，把網址改成 <code>/shell/#t=&lt;token&gt;</code> 再開一次。';
+      document.body.prepend(d);
+    }
+    return r;
+  };
+}
 // ═══ 統一異常狀態模組 (anomaly) — 唯一入口，四種異常同一種語言 ═══
 // 硬約束：零 LLM、只反映真實信號、不給假動作。斷線純自動退避(拍板)。
 const ANOMALY_ICON = { L0:'\u27F3', L1:'\u26A0', L2:'\u25CF', L3:'\u26D4' };

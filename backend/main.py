@@ -23,6 +23,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import hmac
+import secrets
 import uuid
 import time
 from collections import deque
@@ -33,8 +35,8 @@ from urllib.parse import urlsplit
 import anthropic
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent import Agent, build_tools
@@ -50,7 +52,6 @@ app = FastAPI()
 #   Origin，所以 archive 這種不帶 body 的 simple request 也在這裡擋掉，不必每條路由各自設防。
 # 不帶 Origin 的是非瀏覽器用戶端（Unity 編輯器、hook、cogito、claw-cli、curl），照常放行。
 # 比的是「本機 + 同 port」而不是字串相等：WebGL 寫死連 localhost:8123，外殼卻可能從 127.0.0.1 打開。
-# ponytail: 同機其他程式（#2 得手的員工 Bash）仍打得進來——那要 token，而 token 要等 #2 擋住讀檔才有意義。
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"} | {
     h.strip() for h in os.environ.get("OFFICE_ALLOWED_HOSTS", "").split(",") if h.strip()}
 _DEFAULT_PORT = {"http": 80, "ws": 80, "https": 443, "wss": 443}
@@ -74,6 +75,55 @@ def local_request_error(headers: dict[str, str]) -> str | None:
     return None
 
 
+# ── token（稽核 High #4 後半）─────────────────────────────────────────────────
+# Host／Origin 擋得住瀏覽器，擋不住【打得到 127.0.0.1、卻讀不到你檔案】的東西：同一台機器的其他 OS 使用者、
+# 被騙去發請求的本機服務（SSRF）、容器。這些都送不出 token。員工（#2）本來就連不到本機、也讀不到 token 檔。
+#
+# token 存在 ~/.pixel-office/token（0600，第一次啟動產生，重啟不變，網址才不會每次換）；OFFICE_TOKEN 可以蓋掉。
+# 誰怎麼帶：
+#   外殼：開一次「/shell/#t=<token>」換一個 HttpOnly、SameSite=Strict 的 cookie——之後圖片、檔案預覽、SSE 都自動帶，
+#         不必改外殼裡幾十個網址。
+#   hook、cogito、claw-cli：X-Office-Token 標頭（讀同一個檔或環境變數）。
+# 不用 token 的：靜態檔、/ws（Unity；瀏覽器已經被 Origin 擋）、GET /office/report（Unity 的報告卡）——Unity 不必改、不必重建。
+TOKEN_FILE = Path(os.environ.get("OFFICE_TOKEN_FILE") or Path.home() / ".pixel-office" / "token")
+TOKEN_COOKIE = "office_token"
+
+
+def load_office_token() -> str:
+    if t := os.environ.get("OFFICE_TOKEN", "").strip():
+        return t
+    try:
+        if t := TOKEN_FILE.read_text(encoding="utf-8").strip():
+            return t
+    except OSError:
+        pass
+    t = secrets.token_urlsafe(32)
+    TOKEN_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(t + "\n")
+    return t
+
+
+OFFICE_TOKEN = load_office_token()
+
+
+def token_exempt(method: str, path: str) -> bool:
+    return (path.startswith(("/shell", "/unity", "/avatars")) or path in ("/favicon.ico", "/office/login")
+            or (method == "GET" and path.startswith("/office/report/")))
+
+
+def token_ok(headers: dict[str, str]) -> bool:
+    got = headers.get("x-office-token", "")
+    if not got:
+        for part in headers.get("cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == TOKEN_COOKIE:
+                got = v
+                break
+    return bool(got) and hmac.compare_digest(got.encode(), OFFICE_TOKEN.encode())
+
+
 class LocalOnly:
     """純 ASGI：@app.middleware("http") 管不到 WebSocket，/ws 也得一起擋。"""
 
@@ -94,7 +144,26 @@ class LocalOnly:
                             "headers": [(b"content-type", b"application/json; charset=utf-8")]})
                 await send({"type": "http.response.body", "body": body})
                 return
+            if scope["type"] == "http" and not token_exempt(scope["method"], scope["path"]) and \
+                    not token_ok({k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}):
+                body = json.dumps({"ok": False, "login": True, "error": "需要辦公室 token：用後端啟動時印出的網址"
+                                   "（…/shell/#t=…）開外殼；程式請帶 X-Office-Token（~/.pixel-office/token）"},
+                                  ensure_ascii=False).encode()
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+                await send({"type": "http.response.body", "body": body})
+                return
         await self.app(scope, receive, send)
+
+
+@app.post("/office/login")
+async def office_login(request: Request):
+    """外殼拿 token 換 cookie。token 放在標頭送，不放網址（網址會進瀏覽器紀錄與伺服器 log）。"""
+    if not token_ok({"x-office-token": request.headers.get("x-office-token", "")}):
+        return JSONResponse({"ok": False, "error": "token 不對"}, status_code=401)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(TOKEN_COOKIE, OFFICE_TOKEN, max_age=365 * 86400, httponly=True, samesite="strict", path="/")
+    return resp
 
 
 app.add_middleware(LocalOnly)
@@ -5454,6 +5523,8 @@ async def _shutdown() -> None:
 
 
 load_roster()  # 名冊啟動即載：Web 外殼/派工不等 Unity
+print(f"🔑 外殼網址（每個瀏覽器第一次用這個開，之後記得住）："
+      f"http://127.0.0.1:{os.environ.get('OFFICE_PORT', '8123')}/shell/#t={OFFICE_TOKEN}")
 
 
 # ── Web 外殼（§十-5 里程碑）：/shell 是 Pixffice 式佈局頁；/unity 伺服 WebGL build

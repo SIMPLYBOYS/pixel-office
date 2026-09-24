@@ -15,6 +15,17 @@ import sys
 import urllib.request
 
 
+def office_token() -> str:
+    """橋的 token（稽核 #4）：跟橋同一套來源——OFFICE_TOKEN，否則 ~/.pixel-office/token。hook 跑在員工沙箱外，讀得到。"""
+    if t := os.environ.get("OFFICE_TOKEN", "").strip():
+        return t
+    try:
+        with open(os.environ.get("OFFICE_TOKEN_FILE") or os.path.expanduser("~/.pixel-office/token"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
 def main() -> None:
     path = "?"
     try:
@@ -25,7 +36,7 @@ def main() -> None:
         body = json.dumps({"cwd": req.get("cwd"), "session_id": req.get("session_id"),
                            "tool": req.get("tool_name"), "file": path}).encode("utf-8")
         url = os.environ.get("OFFICE_URL", "http://127.0.0.1:8123").rstrip("/") + "/office/memory"
-        r = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        r = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "X-Office-Token": office_token()})
         with urllib.request.urlopen(r, timeout=5):
             pass
     except Exception as e:  # noqa: BLE001 — 記帳失敗不能影響員工工作，但也不能靜悄悄

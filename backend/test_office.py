@@ -12,6 +12,8 @@ import os
 import time
 from pathlib import Path
 
+# 橋的 token（稽核 #4）要在 import main【之前】定：否則 import 時會去讀／建你真正的 ~/.pixel-office/token
+os.environ["OFFICE_TOKEN"] = "test-token"
 import main
 # 稽核帳本是 append-only 的真帳：測試裡的每個派工、審批都會落帳，跑一次全套就往真帳塞幾十筆假的（踩過：
 # 帳本第 1–92 筆全是測試）。整個測試行程改寫到暫存目錄，跟真帳分開。
@@ -36,7 +38,15 @@ main.CLI_SESSION_DIR = _iso / "claude-office" / "projects"
 main.CODEX_HOME_DEFAULT = _iso / "codex-office"
 os.environ.pop("OFFICE_CODEX_HOME", None)
 main.LOCAL_HOSTS.add("testserver")   # TestClient 預設的 Host；橋只接本機（稽核 #4），不加全套都會被 403
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as _TestClient
+
+
+class TestClient(_TestClient):
+    """預設帶著 token（稽核 #4）：幾十個測試都在驗別的事，不該每個都自己記得帶；驗 token 的那條用 _TestClient。"""
+
+    def __init__(self, app, **kw):
+        kw["headers"] = {"X-Office-Token": "test-token", **(kw.get("headers") or {})}
+        super().__init__(app, **kw)
 from starlette.websockets import WebSocketDisconnect
 
 
@@ -522,6 +532,7 @@ def run() -> None:
     local_only()
     schedule_dates()
     approval_binding()
+    token_required()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -4690,6 +4701,50 @@ def approval_binding() -> None:
         main.clear_approval("p01", next_card=False)
         main.busy.discard("p01")
         main.STATE_FILE.unlink(missing_ok=True)
+
+
+def token_required() -> None:
+    """同機程式要有 token 才打得進來（稽核 #4 後半）；外殼用 token 換 cookie；Unity 用的路不受影響。"""
+    import importlib.util
+    import stat
+    import tempfile
+    with _TestClient(main.app) as c:   # 故意不帶 token
+        for method, path in (("post", "/office/dispatch"), ("get", "/agents"), ("post", "/cmd"),
+                             ("post", "/office/audit/archive"), ("get", "/office/stream")):
+            r = getattr(c, method)(path, json={"agent": "p17", "text": "approve"}) if method == "post" else c.get(path)
+            assert r.status_code == 401 and r.json().get("login") is True, f"沒 token 還打得進 {path}：{r.status_code}"
+        assert c.get("/agents", headers={"X-Office-Token": "wrong"}).status_code == 401, "錯的 token 放行了"
+        # Unity 用的路：靜態檔、報告卡、/ws——不必改 Unity、不必重建
+        assert c.get("/shell/").status_code == 200
+        assert c.get("/office/report/p17").status_code == 200, "Unity 的報告卡要能直接讀"
+        with c.websocket_connect("/ws"):
+            pass
+        # 外殼登入：錯的換不到；對的換到 HttpOnly + SameSite=Strict 的 cookie，之後不帶標頭也能用
+        assert c.post("/office/login", headers={"X-Office-Token": "wrong"}).status_code == 401
+        r = c.post("/office/login", headers={"X-Office-Token": "test-token"})
+        ck = r.headers.get("set-cookie", "")
+        assert r.status_code == 200 and "office_token=test-token" in ck and "HttpOnly" in ck and "samesite=strict" in ck.lower(), ck
+        assert c.get("/agents").status_code == 200, "登入後的 cookie 沒被接受"
+    with _TestClient(main.app) as c:
+        assert c.get("/agents", headers={"X-Office-Token": "test-token"}).status_code == 200, "程式帶標頭要放行"
+    # token 檔：第一次產生、只有自己讀得到、重啟不變
+    old_env, old_file = os.environ.pop("OFFICE_TOKEN"), main.TOKEN_FILE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            main.TOKEN_FILE = Path(tmp) / "sub" / "token"
+            t1 = main.load_office_token()
+            assert len(t1) >= 32 and stat.S_IMODE(main.TOKEN_FILE.stat().st_mode) == 0o600, oct(main.TOKEN_FILE.stat().st_mode)
+            assert main.load_office_token() == t1, "重啟換了 token，外殼網址就失效了"
+            # hook 讀同一個檔（員工沙箱外，讀得到）
+            spec = importlib.util.spec_from_file_location("perm_hook", Path(main.__file__).parent / "tools" / "office_permission_hook.py")
+            hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)
+            os.environ["OFFICE_TOKEN_FILE"] = str(main.TOKEN_FILE)
+            assert hook.office_token() == t1, "hook 跟橋讀到的 token 不一樣"
+    finally:
+        os.environ["OFFICE_TOKEN"] = old_env
+        os.environ.pop("OFFICE_TOKEN_FILE", None)
+        main.TOKEN_FILE = old_file
+    main.STATE_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
