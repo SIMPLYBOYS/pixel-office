@@ -126,6 +126,11 @@ Two ways to dispatch (usable together):
   and tasks from its channels are projected automatically. Unknown channel ids get an idle NPC assigned by
   the bridge (sticky: the same channel always maps to the same employee).
 
+The bridge **only accepts local requests**: a Host other than localhost / 127.0.0.1 gets a 403, and other websites
+can't get in either (cross-site requests and `/ws` are both blocked; audit #4). To open the shell from another device on
+your LAN, set `OFFICE_ALLOWED_HOSTS` in `.env`. The bridge has no login, so allowing a host means anyone on that network
+can dispatch and approve.
+
 If startup prints 「⚠ 未設定 ANTHROPIC_API_KEY」 ("ANTHROPIC_API_KEY not set"), `.env` wasn't loaded
 (see one-time setup below). NPCs still move in this mode, but only as random walks.
 

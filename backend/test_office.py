@@ -35,7 +35,9 @@ os.environ["CLAUDE_CONFIG_DIR"] = str(_iso / "claude-office")
 main.CLI_SESSION_DIR = _iso / "claude-office" / "projects"
 main.CODEX_HOME_DEFAULT = _iso / "codex-office"
 os.environ.pop("OFFICE_CODEX_HOME", None)
+main.LOCAL_HOSTS.add("testserver")   # TestClient 預設的 Host；橋只接本機（稽核 #4），不加全套都會被 403
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 
 def recv(ws, aid: str | None = None, emote: bool = False) -> dict:
@@ -517,6 +519,7 @@ def run() -> None:
     sub_release_fallback()
     hurt_projection()
     turn_in_stream()
+    local_only()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -4568,6 +4571,38 @@ def kanban() -> None:
         assert one.read_text(encoding="utf-8") == mine, "手寫的具名 agent 被覆蓋了"
     main.CHANNELS_DIR = None
     assert main.sync_agents() == 0                # 沒設定就整個不啟用
+
+
+
+def local_only() -> None:
+    """橋只接本機（稽核 High #4）：Host 擋 DNS rebinding，Origin 擋跨站請求與 /ws。"""
+    L = "localhost:8123"
+    with TestClient(main.app) as c:
+        # DNS rebinding：網域解析到 127.0.0.1，但瀏覽器送的 Host 還是那個網域
+        assert c.get("/agents", headers={"host": "attacker.example:8123"}).status_code == 403, "rebinding 的 Host 沒擋"
+        assert c.get("/agents", headers={"host": "192.168.1.5:8123"}).status_code == 403, "區網 IP 不在白名單就不收"
+        # 跨站：任何網站都能對本機送 simple request（archive 不帶 body，以前擋不住）
+        before = sorted(main.AUDIT_DIR.glob("*")) if main.AUDIT_DIR.exists() else []
+        r = c.post("/office/audit/archive", headers={"host": L, "origin": "https://evil.example"})
+        assert r.status_code == 403 and r.json()["ok"] is False, r.text
+        assert (sorted(main.AUDIT_DIR.glob("*")) if main.AUDIT_DIR.exists() else []) == before, "被擋的請求還是封存了帳本"
+        assert c.post("/office/dispatch", json={"agent": "p17", "text": "approve"},
+                      headers={"host": L, "origin": "https://evil.example"}).status_code == 403, "跨站核准沒擋"
+        for bad in ("http://localhost:9999", "null", "http://localhost:abc"):   # 別的 port、沙箱 iframe、畸形
+            assert c.get("/agents", headers={"host": L, "origin": bad}).status_code == 403, f"Origin {bad} 沒擋"
+        # 放行：本機同 port 的各種寫法（WebGL 連 localhost、外殼從 127.0.0.1 打開），以及不帶 Origin 的程式
+        assert c.get("/agents", headers={"host": L, "origin": "http://127.0.0.1:8123"}).status_code == 200
+        assert c.get("/agents", headers={"host": "[::1]:8123", "origin": "http://[::1]:8123"}).status_code == 200
+        assert c.get("/agents", headers={"host": "127.0.0.1:8123"}).status_code == 200, "hook／cogito 不帶 Origin 要放行"
+        # /ws：跨站網頁連不上、也就注入不了事件
+        try:
+            with c.websocket_connect("/ws", headers={"origin": "https://evil.example"}):
+                raise AssertionError("跨站網頁連上了 /ws")
+        except WebSocketDisconnect as e:
+            assert e.code == 1008, e.code
+        with c.websocket_connect("/ws"):   # Unity 編輯器不帶 Origin
+            pass
+    main.STATE_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

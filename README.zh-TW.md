@@ -105,6 +105,9 @@ Unity 只是渲染面。
 - **常駐（Slack/Telegram bot）**：cogito bot 啟動時設 `COGITO_OFFICE_URL=http://localhost:8123`，
   頻道派的任務自動投影——未知頻道 id 由橋動態指派閒置 NPC（黏性：同頻道固定同員工）。
 
+橋**只接本機**：Host 不是 localhost／127.0.0.1 一律 403，別的網站也打不進來（跨站請求與 `/ws` 都擋，稽核 #4）。
+要從區網其他裝置開外殼，在 `.env` 設 `OFFICE_ALLOWED_HOSTS`——橋沒有登入，加了就等於那個網段的人都能派工與核准。
+
 啟動時若印出「⚠ 未設定 ANTHROPIC_API_KEY」代表 `.env` 沒讀到（見下方一次性設定）——
 此模式 NPC 仍會動，但退化成隨機走動。
 

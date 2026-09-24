@@ -27,6 +27,7 @@ import uuid
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import anthropic
 import httpx
@@ -40,6 +41,62 @@ from agent import Agent, build_tools
 load_dotenv()  # 讀 backend/.env（ANTHROPIC_API_KEY=...），已 gitignore
 
 app = FastAPI()
+
+# ── 只接本機（稽核 High #4）────────────────────────────────────────────────
+# 橋沒有登入，所以「誰打得進來」只能靠來源擋。兩條：
+#   Host 必須是本機——擋 DNS rebinding（惡意網域解析成 127.0.0.1 之後，瀏覽器送的 Host 還是那個網域）。
+#   有 Origin 就必須是本機【同一個 port】——擋任何網站的跨站請求與 /ws 連線。瀏覽器發 POST／WS 一定帶
+#   Origin，所以 archive 這種不帶 body 的 simple request 也在這裡擋掉，不必每條路由各自設防。
+# 不帶 Origin 的是非瀏覽器用戶端（Unity 編輯器、hook、cogito、claw-cli、curl），照常放行。
+# 比的是「本機 + 同 port」而不是字串相等：WebGL 寫死連 localhost:8123，外殼卻可能從 127.0.0.1 打開。
+# ponytail: 同機其他程式（#2 得手的員工 Bash）仍打得進來——那要 token，而 token 要等 #2 擋住讀檔才有意義。
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"} | {
+    h.strip() for h in os.environ.get("OFFICE_ALLOWED_HOSTS", "").split(",") if h.strip()}
+_DEFAULT_PORT = {"http": 80, "ws": 80, "https": 443, "wss": 443}
+
+
+def local_request_error(headers: dict[str, str]) -> str | None:
+    """不是本機來的就回拒絕原因；None＝放行。"""
+    try:
+        h = urlsplit("//" + headers.get("host", ""))
+        host, port = h.hostname or "", h.port or 80
+        if host not in LOCAL_HOSTS:
+            return f"Host {host or '（空）'} 不是本機"
+        origin = headers.get("origin")
+        if origin is None:
+            return None
+        o = urlsplit(origin)
+        if (o.hostname or "") not in LOCAL_HOSTS or (o.port or _DEFAULT_PORT.get(o.scheme)) != port:
+            return f"Origin {origin} 不是本機同一個 port"
+    except ValueError:   # port 不是數字之類的畸形標頭
+        return "Host／Origin 標頭不合法"
+    return None
+
+
+class LocalOnly:
+    """純 ASGI：@app.middleware("http") 管不到 WebSocket，/ws 也得一起擋。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            why = local_request_error({k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]})
+            if why:
+                print(f"⛔ 擋下非本機請求 {scope['path']}：{why}")
+                if scope["type"] == "websocket":
+                    await receive()                                   # websocket.connect
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                body = json.dumps({"ok": False, "error": why}, ensure_ascii=False).encode()
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(LocalOnly)
 # 多觀眾：桌面 Unity 與任意數量的 WebGL 分頁可同時連線，指令廣播給全部。
 # （單一連線槽會讓分頁互相頂掉——新分頁搶走連線、關掉任一個就整條畫面鏈路歸零。）
 viewers: set[WebSocket] = set()

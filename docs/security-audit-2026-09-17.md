@@ -15,7 +15,7 @@
 | 1 | Critical | jobspy MCP 把 agent 給的參數拼進 shell 字串執行：提示注入即可在沙箱外執行任意指令 | 重現成立（✅ 已修） |
 | 2 | Critical | 員工的 Bash 能連外網、讀得到金鑰檔，而且自動放行不經審批 | 設定＋實際 transcript |
 | 3 | High | 員工子行程繼承 Telegram／Slack／cogito 派工與**審批**金鑰 | 程式＋金鑰名稱（✅ 已修） |
-| 4 | High | 橋沒有任何驗證、Host／Origin 檢查：同機程式可核准高危操作；瀏覽器端可經 DNS rebinding 或跨站請求打進來 | 程式＋測試 |
+| 4 | High | 橋沒有任何驗證、Host／Origin 檢查：同機程式可核准高危操作；瀏覽器端可經 DNS rebinding 或跨站請求打進來 | 程式＋測試（🟡 部分：瀏覽器那條已擋） |
 | 5 | High | 審批畫面與實際核准不一致：一鍵核准會批掉同頻道全部待審；參數被截斷 | 兩個 repo 的程式 |
 | 6 | High | 偽造 `/office/event` 指定任意工作目錄 → 讀任意白名單副檔名檔案、`open` 任意資料夾 | 程式＋測試（✅ 已修） |
 | 7 | High | 班表交付不檢查路徑：agent 把報告做成指向金鑰的 symlink，橋就把金鑰上傳 Telegram／Slack | 程式＋測試（✅ 已修） |
@@ -65,6 +65,7 @@
   - 不需 rebinding 的跨站請求：`POST /office/audit/archive` 不帶 body，是 CORS simple request，任何網站都能觸發封存；`/ws` 不檢查 Origin，任何網站都能連上並注入事件。
   - 需要 JSON body 的 POST 路由不怕一般 CSRF：FastAPI 0.139 預設只接受 `application/json`，跨站送 JSON 需要預檢，而橋沒有 CORS 設定。
 - **修法**：`TrustedHostMiddleware`（只允許 127.0.0.1、localhost）；啟動時產生 token，外殼與 hook 帶在標頭，所有非靜態路由檢查；`/ws` 檢查 Origin；封存改成需要 body 或自訂標頭。
+- **進度（2026-09-24，第二批之一）**：瀏覽器那條已修。`LocalOnly`（純 ASGI，連 `/ws` 一起管）：Host 不是本機一律 403（擋 DNS rebinding）；帶 Origin 的請求必須是本機同一個 port，否則 HTTP 403、`/ws` 以 1008 關閉（擋跨站請求與 `/ws` 注入，`/office/audit/archive` 這種 simple request 也一併擋掉，不必另改成要 body）。不帶 Origin 的非瀏覽器用戶端照常放行，所以 Unity、hook、cogito、claw-cli 都不用改。區網要用就設 `OFFICE_ALLOWED_HOSTS`。測試 `local_only`（拿掉 middleware 會紅）。**還沒做**：同機程式照樣打得進來、也照樣能核准——要靠 token，但員工的 Bash 現在讀得到任何檔案與環境變數（#2），token 放哪裡都拿得到，所以排在 #2 之後。
 
 ### 5. 審批畫面與實際核准不一致
 - **一鍵批掉全部**：外殼與收件匣送出的是單純的 `approve`；cogito 收到不帶 ID 的 approve 會執行 `ResolveByChannel`，核准該頻道**所有**待審任務（`internal/chatbot/approval.go`）。橋每位員工只存最新一張卡。agent 一輪並行送出幾個誘餌指令加一個惡意指令時，你看到的可能是誘餌，按下去卻全部核准。
