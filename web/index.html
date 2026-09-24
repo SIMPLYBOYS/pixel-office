@@ -557,6 +557,64 @@
   .needlogin { position: fixed; top: 0; left: 0; right: 0; z-index: 99; background: #5a2a2a; color: #fff;
                padding: 10px 16px; font-size: 14px; line-height: 1.6; }
   .needlogin code { background: #0006; padding: 1px 6px; border-radius: 4px; }
+  /* ═══ 團隊設定精靈（docs/team-setup.md）═══ */
+  aside h1 .teambtn { float: right; background: none; border: 1px solid var(--line); border-radius: 6px; color: var(--dim);
+                      cursor: pointer; font-size: 12px; padding: 1px 7px; }
+  aside h1 .teambtn:hover { color: var(--text); border-color: #3a404c; }
+  .wiz { position: fixed; inset: 0; z-index: 90; background: rgba(6, 8, 11, .72); display: grid; place-items: center; }
+  .wiz[hidden] { display: none; }
+  .wizbox { width: min(940px, 94vw); max-height: 90vh; display: flex; flex-direction: column; background: var(--panel);
+            border: 1px solid #343a45; border-radius: 14px; box-shadow: 0 20px 60px rgba(0, 0, 0, .6); }
+  .wizhead { padding: 16px 20px 10px; border-bottom: 1px solid var(--line); }
+  .wizhead h2 { font-size: 17px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .wizhead h2 button { margin-left: auto; background: none; border: 0; color: var(--dim); font-size: 18px; cursor: pointer; }
+  .wizsteps { display: flex; gap: 6px; margin-top: 10px; font-size: 12px; }
+  .wizsteps span { padding: 3px 10px; border-radius: 12px; background: #1d212a; color: var(--dim); }
+  .wizsteps span.on { background: #3a3220; color: var(--accent); }
+  .wizsteps span.done { color: var(--ok); }
+  .wizbody { padding: 16px 20px; overflow: auto; flex: 1; }
+  .wizbody .lead { color: var(--dim); font-size: 13px; margin-bottom: 14px; }
+  .wizfoot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+  .wizfoot .msg { font-size: 13px; color: var(--dim); }
+  .wizfoot .msg.err { color: #e07070; }
+  .wizfoot button { border: 0; border-radius: 8px; padding: 7px 18px; font: inherit; cursor: pointer; }
+  .wizfoot .back { margin-left: auto; background: #232833; color: var(--text); }
+  .wizfoot .next { background: var(--accent); color: #221a05; font-weight: 600; }
+  .wizfoot .next:disabled { opacity: .45; cursor: default; }
+  .tplgrid, .slotgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .tpl, .slot { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; background: #12151b; }
+  .tpl:hover, .slot:hover { border-color: #3a404c; }
+  .tpl.sel, .slot.sel { border-color: var(--accent); background: #1f1c14; }
+  .tpl b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .tpl p { font-size: 12px; color: var(--dim); line-height: 1.6; }
+  .tpl .n { font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .slot { display: flex; gap: 10px; align-items: center; }
+  .slot .face { width: 40px; height: 40px; }
+  .slot .sl { font-size: 11px; color: var(--dim); }
+  .slot .sn { font-size: 14px; }
+  .slot .sr { font-size: 12px; color: var(--dim); }
+  .slot input { margin-left: auto; width: 16px; height: 16px; accent-color: var(--accent); }
+  .slot.off .sn { color: var(--dim); }
+  .wizcount { margin-top: 12px; font-size: 13px; color: var(--dim); }
+  .wizppl { display: grid; grid-template-columns: 180px 1fr; gap: 16px; min-height: 360px; }
+  .wiztabs .tab { display: flex; gap: 8px; align-items: center; padding: 7px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .wiztabs .tab:hover { background: #1d212a; }
+  .wiztabs .tab.sel { background: #232936; }
+  .wiztabs .tab .face { width: 28px; height: 28px; }
+  .wiztabs .tab.bad { color: #e07070; }
+  .wizform label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  .wizform label:first-child { margin-top: 0; }
+  .wizform input, .wizform textarea, .wizform select { width: 100%; background: #0f1115; border: 1px solid var(--line);
+        border-radius: 6px; color: var(--text); font: inherit; font-size: 13px; padding: 6px 9px; }
+  .wizform textarea { resize: vertical; min-height: 64px; }
+  .wizform .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .wizform details { margin-top: 12px; }
+  .wizform summary { cursor: pointer; font-size: 12px; color: var(--dim); }
+  .wizform .chk { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text); margin-top: 10px; }
+  .wizform .chk input { width: auto; }
+  .wizsum { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .wizsum th, .wizsum td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  .wizsum th { color: var(--dim); font-weight: 400; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -566,7 +624,7 @@
     <button class="ab-action hidden"></button>
   </div>
   <aside id="rail">
-    <h1>員工<small id="count"></small></h1>
+    <h1>員工<small id="count"></small><button class="teambtn" onclick="openTeamWizard(false)" title="團隊設定：哪幾個工位啟用、坐的是誰">👥 團隊設定</button></h1>
     <div id="status" class="status"></div>
     <div id="roster"></div>
     <!-- 先放一個佔位 summary：capcard() 取完資料才會覆蓋，在那之前空的 <details>
@@ -875,6 +933,8 @@ async function roster() {
     agentsData = d;
     const ids = Object.keys(d);
     $('count').textContent = ids.filter(id => d[id].npc !== false).length || '';   // 看板不是員工，別算人頭
+    // 還沒有團隊（第一次開，或 backend/team/ 是空的）：直接進精靈，只開一次
+    if (!ids.some(id => d[id].npc !== false) && !window.__wizAuto) { window.__wizAuto = true; openTeamWizard(true); }
     // 依 team 分組（persona 的 team 欄位；沒填的歸「未分組」，排最後）
     const teams = new Map();
     for (const id of ids) {
@@ -3210,6 +3270,145 @@ inboxcard();
 setInterval(inboxcard, 30000);
 setInterval(roster, 10000);
 setInterval(feed, 8000);
+
+// ═══ 團隊設定精靈（docs/team-setup.md）═══
+// 辦公室有 8 個固定工位（外觀與座位綁在 Unity 場景裡），這裡決定哪幾個啟用、坐的是誰。
+// 第一次開、還沒有團隊時自動打開且不能關；之後從名冊的「👥 團隊設定」再調。
+const WIZ_STEPS = ['範本', '工位', '人物', '確認'];
+const ENGINES = [['', 'cogito（API）'], ['cli', 'Claude Code（訂閱）'], ['codex', 'Codex']];
+const wiz = { step: 0, slots: [], templates: [], members: {}, on: new Set(), template: '', first: false, cur: '', configured: false };
+const wizFace = id => `<img class="face" src="/avatars/${id}.png" alt="" onerror="this.outerHTML='<span class=&quot;face ph&quot;>?</span>'">`;
+const slotOf = id => wiz.slots.find(s => s.id === id) || { id, label: id };
+const blank = () => ({ name: '', role: '', team: '', personality: '', style: '', habits: '', engine: '', model: '', slug: '', ask: '', readonly: false, sub_roles: [], md: '' });
+
+async function openTeamWizard(first) {
+  const [t, tp] = await Promise.all([fetch('/office/team').then(r => r.json()), fetch('/office/team/templates').then(r => r.json())]);
+  if (!t.ok) return;
+  Object.assign(wiz, { slots: t.slots, templates: tp.templates || [], members: {}, on: new Set(), first,
+                       template: t.template || '', configured: t.configured, step: t.configured ? 1 : 0, cur: '' });
+  for (const s of t.slots) if (s.member) { wiz.members[s.id] = { ...blank(), ...s.member }; wiz.on.add(s.id); }
+  $('wizClose').hidden = first;
+  $('teamWiz').hidden = false;
+  wizRender();
+}
+function closeTeamWizard() { if (!wiz.first) $('teamWiz').hidden = true; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('teamWiz').hidden) closeTeamWizard(); });
+
+function wizUse(key) {
+  if (key === '__blank') { wiz.members = {}; wiz.on = new Set(); wiz.template = ''; }
+  else if (key !== '__current') {
+    const t = wiz.templates.find(x => x.key === key);
+    wiz.members = {}; wiz.on = new Set(); wiz.template = key;
+    for (const [id, m] of Object.entries(t.members)) { wiz.members[id] = { ...blank(), ...m }; wiz.on.add(id); }
+  }
+  wiz.step = 1; wizRender();
+}
+function wizToggle(id) {
+  if (wiz.on.has(id)) wiz.on.delete(id);
+  else { wiz.on.add(id); wiz.members[id] = wiz.members[id] || blank(); }
+  wizRender();
+}
+function wizSet(field, value) { wiz.members[wiz.cur][field] = value; wizMsg(''); wizTabs(); }
+const wizMissing = id => { const m = wiz.members[id]; return !m || !m.name.trim() || !m.role.trim(); };
+const wizOrder = () => wiz.slots.map(s => s.id).filter(id => wiz.on.has(id));
+function wizMsg(t, err) { $('wizMsg').textContent = t; $('wizMsg').classList.toggle('err', !!err); }
+
+function wizGo(d) {
+  if (d > 0 && wiz.step === 1 && !wiz.on.size) return wizMsg('至少要啟用 1 個工位', true);
+  if (d > 0 && wiz.step === 2) {
+    const bad = wizOrder().filter(wizMissing);
+    if (bad.length) { wiz.cur = bad[0]; wizRender(); return wizMsg(`${slotOf(bad[0]).label}：名字與職務必填`, true); }
+  }
+  if (d > 0 && wiz.step === 3) return wizSave();
+  wiz.step = Math.max(0, Math.min(3, wiz.step + d));
+  wizMsg(''); wizRender();
+}
+
+async function wizSave() {
+  $('wizNext').disabled = true; wizMsg('儲存中…');
+  const members = wizOrder().map(id => ({ slot: id, ...wiz.members[id] }));
+  let r;
+  try { r = await (await fetch('/office/team', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify({ template: wiz.template, members }) })).json(); }
+  catch { r = { ok: false, error: '連不上後端' }; }
+  $('wizNext').disabled = false;
+  if (!r.ok) return wizMsg(`⛔ ${r.error}`, true);
+  wiz.first = false; $('teamWiz').hidden = true;
+  location.reload();   // 名冊、分組、看板、所有面板一次換新——比逐一重畫可靠
+}
+
+function wizTabs() {
+  const el = document.getElementById('wizTabList');
+  if (!el) return;
+  el.innerHTML = wizOrder().map(id => {
+    const m = wiz.members[id];
+    return `<div class="tab${id === wiz.cur ? ' sel' : ''}${wizMissing(id) ? ' bad' : ''}" onclick="wiz.cur='${id}'; wizRender()">${wizFace(id)}
+      <div><div>${esc(m.name || '（未命名）')}</div><div class="sl">${esc(slotOf(id).label)}</div></div></div>`;
+  }).join('');
+}
+
+function wizRender() {
+  $('wizSteps').innerHTML = WIZ_STEPS.map((t, i) => `<span class="${i === wiz.step ? 'on' : i < wiz.step ? 'done' : ''}">${i + 1}. ${t}</span>`).join('');
+  $('wizBack').hidden = wiz.step === 0;
+  $('wizNext').textContent = wiz.step === 3 ? '儲存團隊' : '下一步';
+  $('wizNext').hidden = wiz.step === 0;
+  const b = $('wizBody');
+  if (wiz.step === 0) {
+    const cards = wiz.templates.map(t => `<div class="tpl${wiz.template === t.key ? ' sel' : ''}" onclick="wizUse('${t.key}')">
+        <b>${esc(t.title)}</b><p>${esc(t.description)}</p><div class="n">${Object.keys(t.members).length} 個工位</div></div>`);
+    if (wiz.configured) cards.unshift(`<div class="tpl" onclick="wizUse('__current')"><b>目前的團隊</b><p>從現在的設定開始調整。</p><div class="n">${wiz.on.size} 人</div></div>`);
+    cards.push(`<div class="tpl" onclick="wizUse('__blank')"><b>從空白開始</b><p>自己決定每個位子坐誰。</p></div>`);
+    b.innerHTML = `<div class="lead">${wiz.first ? '歡迎來到 Pixel Office！正式開始前，先組一支團隊。' : ''}選一個範本當起點，下一步還能調整。</div>
+      <div class="tplgrid">${cards.join('')}</div>`;
+  } else if (wiz.step === 1) {
+    b.innerHTML = `<div class="lead">辦公室有 ${wiz.slots.length} 個固定工位，外觀與座位都是固定的；勾選要啟用的位子。沒啟用的位子，角色會從畫面上藏起來。</div>
+      <div class="slotgrid">${wiz.slots.map(s => {
+        const on = wiz.on.has(s.id), m = wiz.members[s.id];
+        return `<div class="slot${on ? ' sel' : ' off'}" onclick="wizToggle('${s.id}')">${wizFace(s.id)}
+          <div><div class="sl">${esc(s.label)}${s.fixed ? '・固定崗位' : ''}</div>
+          <div class="sn">${on ? esc((m && m.name) || '（新成員）') : '（空位）'}</div>
+          <div class="sr">${on && m ? esc(m.role || '') : ''}</div></div>
+          <input type="checkbox" ${on ? 'checked' : ''} onclick="event.stopPropagation(); wizToggle('${s.id}')" aria-label="啟用 ${esc(s.label)}"></div>`;
+      }).join('')}</div>
+      <div class="wizcount">已選 ${wiz.on.size} / ${wiz.slots.length} 個工位。第 ${wiz.slots.length + 1} 個人要在 Unity 新增角色與座位，這裡加不了。</div>`;
+  } else if (wiz.step === 2) {
+    if (!wiz.on.has(wiz.cur)) wiz.cur = wizOrder()[0];
+    const m = wiz.members[wiz.cur], s = slotOf(wiz.cur);
+    const field = (k, label, ph = '') => `<label>${label}</label><input value="${esc(m[k] || '')}" placeholder="${esc(ph)}" oninput="wizSet('${k}', this.value)">`;
+    const area = (k, label, ph = '', rows = 3) => `<label>${label}</label><textarea rows="${rows}" placeholder="${esc(ph)}" oninput="wizSet('${k}', this.value)">${esc(m[k] || '')}</textarea>`;
+    b.innerHTML = `<div class="wizppl"><div class="wiztabs" id="wizTabList"></div>
+      <div class="wizform"><div class="lead" style="margin-bottom:8px">${esc(s.label)}${s.fixed ? '（固定崗位：不走位、不進自動指派）' : ''}</div>
+        <div class="row2"><div>${field('name', '名字 *', '例：阿哲')}</div><div>${field('role', '職務 *', '例：後端工程師')}</div></div>
+        ${field('team', '團隊分組（名冊依這個分組）', '例：工程')}
+        ${area('personality', '個性', '例：認真寡言，對程式碼品質有潔癖。')}
+        <details><summary>進階</summary>
+          ${area('style', '說話風格', '', 2)}${area('habits', '習慣', '', 2)}
+          <div class="row2"><div><label>引擎</label><select onchange="wizSet('engine', this.value)">${ENGINES.map(([v, t]) =>
+            `<option value="${v}"${(m.engine || '') === v ? ' selected' : ''}>${t}</option>`).join('')}</select></div>
+            <div>${field('model', '模型（空＝引擎預設）')}</div></div>
+          <div class="row2"><div>${field('slug', 'Claude Code 代號（小寫英文）', '例：azhe')}</div><div>${field('ask', '找他問什麼（看板用）')}</div></div>
+          <label class="chk"><input type="checkbox" ${m.readonly ? 'checked' : ''} onchange="wizSet('readonly', this.checked)"> 決策型：只拿唯讀工具</label>
+          ${area('md', '角色設定（決策偏好、工作方式、NEVER…）', '', 8)}
+        </details></div></div>`;
+    wizTabs();
+  } else {
+    const eng = v => (ENGINES.find(e => e[0] === (v || '')) || ENGINES[0])[1];
+    b.innerHTML = `<div class="lead">確認後就會套用：名冊、看板成員、畫面上的角色都會照這份更新。${wiz.configured ? '拿掉的位子，工作紀錄會保留，再啟用就回來。' : ''}</div>
+      <table class="wizsum"><tr><th>工位</th><th>名字</th><th>職務</th><th>分組</th><th>引擎</th></tr>
+      ${wizOrder().map(id => { const m = wiz.members[id]; return `<tr><td>${esc(slotOf(id).label)}</td><td>${esc(m.name)}</td>
+        <td>${esc(m.role)}</td><td>${esc(m.team || '未分組')}</td><td>${eng(m.engine)}</td></tr>`; }).join('')}</table>`;
+  }
+}
 </script>
+<div class="wiz" id="teamWiz" role="dialog" aria-modal="true" aria-label="團隊設定" hidden>
+  <div class="wizbox">
+    <div class="wizhead"><h2>👥 團隊設定<button id="wizClose" title="關閉（Esc）" onclick="closeTeamWizard()">✕</button></h2>
+      <div class="wizsteps" id="wizSteps"></div></div>
+    <div class="wizbody" id="wizBody"></div>
+    <div class="wizfoot"><span class="msg" id="wizMsg"></span>
+      <button class="back" id="wizBack" onclick="wizGo(-1)">上一步</button>
+      <button class="next" id="wizNext" onclick="wizGo(1)">下一步</button></div>
+  </div>
+</div>
 </body>
 </html>
