@@ -48,6 +48,10 @@ public class NPCAgent : MonoBehaviour
                 if (emote != null) emote.Show(cmd.target);
                 break;
 
+            case "visible": // target = "0" 藏起來、"1" 顯示（團隊設定：沒啟用的工位，docs/team-setup.md）
+                SetVisible(cmd.target != "0");
+                break;
+
             case "say": // 有文字顯示文字框，沒文字退回「...」泡泡
                 var speech = GetComponent<NPCSpeech>();
                 if (speech != null && !string.IsNullOrEmpty(cmd.text))
@@ -59,4 +63,13 @@ public class NPCAgent : MonoBehaviour
     }
 
     public void ClearAction() => sprite.SetAction(null);
+
+    // 關 renderer 與碰撞，不用 SetActive(false)：物件停用後這個元件也停了，就收不到下一個 "visible 1"。
+    // 碰撞一起關——看不見的人不該擋路，也不該被點出報告卡。徽章、文字框都在子物件上，一起收。
+    public void SetVisible(bool on)
+    {
+        foreach (var r in GetComponentsInChildren<Renderer>(true)) r.enabled = on;
+        foreach (var c in GetComponentsInChildren<Collider2D>(true)) c.enabled = on;
+        foreach (var cv in GetComponentsInChildren<Canvas>(true)) cv.enabled = on;
+    }
 }
