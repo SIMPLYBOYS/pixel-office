@@ -175,11 +175,11 @@ def main():
 
     # 櫃檯房照 Design_1 上排房間的原型換裝（Aaron 給的截圖）：整室深色格紋地板、
     # 北牆牆身換成磚面。樣本直接取自 D1 底圖——同一位作者的像素，不會有色差。
-    # 磚面只鋪 cols 1-5（櫃檯房自己的範圍），到隔間就停：D1 本來就是一房一種面。
+    # 磚面只鋪 cols 1-6（櫃檯房自己的範圍），到隔間就停：D1 本來就是一房一種面。
     d1bg = read_png(f"{D1}/bg_base.png")
     checker = sub(d1bg, 64, 48, CELL, CELL)
     for r in range(2, 5):
-        for c in range(1, 6):
+        for c in range(1, 7):
             blit(canvas, checker, c * CELL, r * CELL)
     # ⚠ 磚牆面在【'=' 牆畫完之後】才鋪（見下面 walls 迴圈後）——先鋪會被北牆的立面蓋掉。
 
@@ -312,22 +312,32 @@ def main():
         # 隔牆的南端要看得到牆面：牆到這裡就斷了，只有頂面的話像一條白線斷在地板中間。
         # 這個視角下，朝南的牆面本來就看得到（橫牆的立面就是這樣畫的），所以端點沿用同一套
         # 素材：白頂 6px（線本來就有）＋牆身 ~9px＋腳線＋陰影，寬度跟牆一樣，不做成粗柱子。
+        post = set()
         if not h and neg and pos:
             r_end = max(r for r, _ in comp)
             c_end = next(c for r, c in comp if r == r_end)
             if room(r_end + 1, c_end):
                 # 端點做成【整格寬】的門框柱：跟牆同寬（7px）時像一截細白棒，整格寬才讀得出
                 # 「牆到這裡結束、旁邊是門口」（2026-09-20 Aaron 選的做法：補門框柱、不動走廊寬度）。
-                x0, y0 = c_end * CELL, r_end * CELL
-                for j in range(CELL):
-                    src = wall_cap[j] if j < len(wall_cap) else wall_body[j - len(wall_cap)]
+                # 照辦公區 bg_base 會議室東側那道隔牆（x13）的畫法：牆面蓋滿隔牆在房間裡的
+                # 【整段】，頂面那條線只在北牆立面上（從 bg_base 同位置取樣，逐像素一致）。
+                # 只在南端做一格柱、上面留一條線鋪在地板上的話，看起來像一片平躺的牆（實際回報）。
+                n = sum(1 for _, c in comp if c == c_end)
+                post = {(r_end - k, c_end) for k in range(n)}
+                x0, y0 = c_end * CELL, (r_end - n + 1) * CELL
+                # 跟 x13 那道【鏡像】：那道的線貼東緣（辦公區側），這道貼西緣（櫃檯側）。
+                blit(canvas, sub(bg, 9, 0, 7, y0), x0, 0)
+                for j in range(n * CELL):
+                    src = wall_cap[j] if j < len(wall_cap) else wall_body[(j - len(wall_cap)) % CELL]
                     for i in range(CELL):
                         canvas[y0 + j][x0 + i] = src[i]
                 for i in range(CELL):
-                    canvas[y0 + CELL - 1][x0 + i] = wall_foot[0][i]
+                    canvas[y0 + n * CELL - 1][x0 + i] = wall_foot[0][i]
+                for j in range(n * CELL):                  # 西緣收邊（x13 那道收在東緣，鏡像）
+                    canvas[y0 + j][x0] = wall_edge
                 for j in range(len(shadow)):
                     for i in range(CELL):
-                        canvas[y0 + CELL + j][x0 + i] = shadow[j][i]
+                        canvas[y0 + n * CELL + j][x0 + i] = shadow[j][i]
 
         # 兩側都是房間的隔牆要有地面陰影，否則那條白線看起來像貼在地上的膠帶，不像牆
         # （實際回報：櫃檯與會議室之間那道）。官方素材的直牆都是【外牆】——另一側是建築物
@@ -336,6 +346,8 @@ def main():
         # 落在哪一側跟橫牆一致：橫牆的陰影在南側，所以直牆的在東側（同一個光源）。
         if neg and pos:
             for r, c in comp:
+                if (r, c) in post:             # 柱面是牆的正面，不是地板——壓暗會變成半邊黑
+                    continue
                 x, y = c * CELL, r * CELL
                 for j in range(CELL):          # 沿著牆的方向
                     for i in range(SHADOW_W):  # 垂直於牆、往陰影那側
@@ -350,7 +362,7 @@ def main():
     # 櫃檯房的北牆牆身換磚面（D1 上排房間的樣式）。蓋掉立面的淡紫牆身 y6-30，
     # 保留上緣的白色頂線（y0-5）與下緣的深藍腳線（y31）——D1 的磚牆本來就這樣收邊。
     brick = sub(d1bg, 48, 6, CELL, 25)
-    for c in range(1, 6):
+    for c in range(1, 7):
         blit(canvas, brick, c * CELL, 6)
 
     # 墊底欄：把最東欄整欄複製過去。橫牆沿著 x 是均勻的，複製就等於把線延長到接縫底下，
@@ -416,7 +428,10 @@ def main():
         return [img[j][:L] + band[j] * need + img[j][L:] for j in range(len(img))]
 
     top3, legs3 = widen(tabletop, 3), widen(tablelegs, 3)
-    mid3 = [top3[10][:]] * CELL
+    # 桌面拉到【整整三列高】（第 2 列頂到第 4 列底），跟兩側三排椅子齊頭。只補一格時桌子
+    # 從第一排椅子的中段才開始，看起來桌子比座位短一截（實際回報）。
+    h0 = len(crop_opaque([r[:] for r in top3] + [r[:] for r in legs3])[0])
+    mid3 = [top3[10][:]] * (3 * CELL - h0)
     table = [r[:] for r in top3[:12]] + mid3 + [r[:] for r in top3[12:]] \
         + [r[:] for r in legs3]
 
@@ -502,11 +517,11 @@ def main():
     d1_px("obj_02", 48, 4); NO_BLOCK.add("d1_obj_02"); TOPS.add("d1_obj_02")
     d1("obj_06", 5, 2)
 
-    # 會議室（門內右側，獨立一間）：長桌 x8-9 佔第 2~4 列，兩側各三張椅子朝內
-    place("w_table", table, 8, 4)
+    # 會議室（門內右側，獨立一間）：長桌 x9-11 佔第 2~4 列，兩側各三張椅子朝內
+    place("w_table", table, 9, 4)
     for i, cy in enumerate((2, 3, 4)):
-        place(f"w_chair_a{i+1}", chair_r, 7, cy)
-        place(f"w_chair_b{i+1}", chair_l, 11, cy)
+        place(f"w_chair_a{i+1}", chair_r, 8, cy)
+        place(f"w_chair_b{i+1}", chair_l, 12, cy)
 
     # 門【外】的公共區：大廳 + 靠牆的自助角 + 訪客等候
     wall_art("obj_09", 2, 8)   # 彩色掛畫：掛回大門立面（第 7-8 列）的牆身上
