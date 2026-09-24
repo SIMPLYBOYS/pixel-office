@@ -12,18 +12,12 @@
 
 | cogito 名字（agent_type） | Claude Code 代號（subagent_type） | 角色 | 找他問什麼 |
 |---|---|---|---|
-| `小美` | `xiaomei` | 產品經理 | 需求、範圍、優先順序、什麼不做 |
-| `小樺` | `xiaohua` | 市場研究員 | 市場現況、競品、使用者訪談、資料佐證（她只給材料，決策仍是小美的） |
-| `老徐` | `laoxu` | CTO | 架構取捨、技術風險、要不要做 |
-| `阿哲` | `azhe` | 後端工程師 | 資料模型、API、後端可行性 |
-| `小葵` | `xiaokui` | 前端工程師 | 介面實作、狀態管理、前端成本 |
-| `老王` | `laowang` | UI 設計師 | 版面、資訊層次、使用者怎麼讀 |
-| `阿海` | `ahai` | DevOps 工程師 | 部署、監控、掛了怎麼辦、怎麼退回去 |
+{{team_table}}
 
 ⚠️ **不要用 `implementer`、`planner`、`code-reviewer` 這類角色名當 `agent_type`。**
 那些檔案不存在，載入會失敗、退回一個【沒有人設】的探路者——你以為派給了專員，實際上
-派給了誰都不是。實測踩過：老闆指名「小美和阿哲」，我用 `implementer` 派了兩次，
-結果一次落到小美（碰巧）、一次落到小葵，阿哲從頭到尾沒被找過，六份人設一個都沒用上。
+派給了誰都不是。實測踩過：老闆指名兩位成員，我用 `implementer` 派了兩次，
+結果一次碰巧落到其中一位、一次落到第三個人，另一位從頭到尾沒被找過，人設一個都沒用上。
 
 **要指定人，就寫那個人的名字。** 沒有特別要找誰時，才省略 `agent_type` 用預設探路者。
 
@@ -94,8 +88,8 @@ spec 的「任務拆解」表寫完後，**立刻**把它落成工作區根目�
   "task": "<這次協作的題目，一句話>",
   "tasks": [
     {"id": "api", "title": "後端端點", "deps": [],           "status": "todo", "owner": null, "out": null},
-    {"id": "ui",  "title": "面板",     "deps": ["api"],      "status": "doing", "owner": "小葵", "out": null},
-    {"id": "test","title": "驗收",     "deps": ["api","ui"], "status": "done",  "owner": "阿哲", "out": "report.md"}
+    {"id": "ui",  "title": "面板",     "deps": ["api"],      "status": "doing", "owner": "{{member_1}}", "out": null},
+    {"id": "test","title": "驗收",     "deps": ["api","ui"], "status": "done",  "owner": "{{member_2}}", "out": "report.md"}
   ]
 }
 ```
@@ -103,7 +97,7 @@ spec 的「任務拆解」表寫完後，**立刻**把它落成工作區根目�
 - `status` **只有三種**：`todo` / `doing` / `done`。
   **不要**自己標「等待中」——面板會依 `deps` 自己算：相依還沒全部 done 的就是等待中。
   你少維護一個狀態，就少一種標錯的可能。
-- `owner` 寫**成員的名字**（小美／老徐／阿哲／小葵／老王／阿海），沒人接就 `null`。
+- `owner` 寫**成員的名字**（{{team_names}}），沒人接就 `null`。
 - `out` 是產出的檔名（相對工作區），還沒有就 `null`。
 - `id` 短、英數、當相依用；`title` 給人看。
 - 檔名 `board.json`，或照主題取 `board-<主題>.json`（跟 `meeting-*.md` 同一套，一個主題一塊板）。

@@ -60,3 +60,6 @@ backend/audit/
 
 # /brag 宣傳影片產物（含 LimeZu 素材截圖與衍生物，授權不可散布）
 brag-output/
+
+# 使用者的團隊設定（人設、班表）：精靈寫在這裡，不進 git——git pull 不衝突（docs/team-setup.md）
+backend/team/

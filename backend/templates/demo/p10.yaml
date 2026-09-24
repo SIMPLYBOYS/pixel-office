@@ -8,7 +8,4 @@ style: 條列、附連結與時間、先講結論再列證據；不確定的地�
 habits: 守著櫃檯不離崗，來電先接；空檔就把老闆交代的清單再核對一遍。
 # Claude Code 子 agent 的 subagent_type（只准小寫英文與連字號）
 slug: xiaoan
-# 不進動態指派池：Slack／Telegram 頻道自動指派、會議代打都不找她——她的崗位在櫃檯，活只由老闆直接派
-pool: false
-# 崗位固定：她站的那格被櫃檯四面圍住、沒有走得出去的口——橋不送走位，每個狀態都在櫃檯上演（backend stays_put）
-post: fixed
+# 「崗位固定、不進動態指派池」是櫃檯這個位子的性質，寫在 backend/slots.yaml，不在人設裡

@@ -14,6 +14,12 @@ from pathlib import Path
 
 # 橋的 token（稽核 #4）要在 import main【之前】定：否則 import 時會去讀／建你真正的 ~/.pixel-office/token
 os.environ["OFFICE_TOKEN"] = "test-token"
+# 團隊（docs/team-setup.md）：測試用示範團隊的【暫存副本】，不碰使用者真的 backend/team/——團隊設定的測試會寫它
+import shutil as _shutil
+import tempfile as _tf0
+_TEAM = Path(_tf0.mkdtemp(prefix="office-team-test-")) / "team"
+_shutil.copytree(Path(__file__).parent / "templates" / "demo", _TEAM, ignore=_shutil.ignore_patterns("template.yaml"))
+os.environ["OFFICE_TEAM_DIR"] = str(_TEAM)
 import main
 # 稽核帳本是 append-only 的真帳：測試裡的每個派工、審批都會落帳，跑一次全套就往真帳塞幾十筆假的（踩過：
 # 帳本第 1–92 筆全是測試）。整個測試行程改寫到暫存目錄，跟真帳分開。
@@ -62,6 +68,9 @@ def recv(ws, aid: str | None = None, emote: bool = False) -> dict:
         # 鏡頭指令（focus）不是對某個 NPC 的投影，是對【相機】下的——一律跳過。
         # 它會插在任何位置（出錯時鏡頭先過去、再冒泡），拿它去比對「下一則」必然錯。
         if cmd.get("action") == "focus":
+            continue
+        # 顯示／隱藏角色（團隊設定，握手與存檔時送）：不是工作投影，一律跳過
+        if cmd.get("action") == "visible":
             continue
         # 狀態徽章同理：它是背景頻道（等審批、額度、空轉），跟著狀態變化插在任何位置，
         # 拿它去比對「下一則」一樣會撞。要驗徽章的測試自己帶 emote=True。
@@ -533,6 +542,7 @@ def run() -> None:
     schedule_dates()
     approval_binding()
     token_required()
+    team_setup()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -2924,8 +2934,8 @@ def schedule_dates() -> None:
     h = main.job_dates("2026-03-01")
     assert "今天 2026-03-01，昨天 2026-02-28" in h, h
     assert "2026-02-23、2026-02-24、2026-02-25、2026-02-26、2026-02-27、2026-02-28、2026-03-01" in h, h
-    for f in ("schedule.json", "schedule.json.example"):
-        path = Path(main.__file__).parent / f
+    for path in (Path(main.__file__).parent / "team" / "schedule.json", Path(main.__file__).parent / "schedule.json.example"):
+        f = path.name
         if path.exists():
             assert "Bash 跑 date" not in path.read_text(encoding="utf-8").replace("不要用 Bash 跑 date", ""), \
                 f"{f} 還在叫員工用 Bash 跑 date——無人值守下 Bash 一律被拒（稽核 #2）"
@@ -2934,8 +2944,8 @@ def schedule_dates() -> None:
 def schedule_file_valid() -> None:
     """真的那份 schedule.json（與 example）每條 job 都得站得住：欄位齊、員工存在、引擎認得、交付檔名帶 {date}。
     這些錯在 09:00 才浮出來太晚——例：人名打錯成不存在的員工，班表會靜默略過。"""
-    for f in ("schedule.json", "schedule.json.example"):
-        path = Path(main.__file__).parent / f
+    for path in (Path(main.__file__).parent / "team" / "schedule.json", Path(main.__file__).parent / "schedule.json.example"):
+        f = path.name
         if not path.exists():
             continue
         jobs = json.loads(path.read_text(encoding="utf-8"))
@@ -2945,7 +2955,7 @@ def schedule_file_valid() -> None:
         for j in jobs:
             tag = f"{f}／{j.get('name')}"
             assert j.get("name") and str(j.get("text", "")).strip(), f"{tag}：缺 name 或 text"
-            assert j.get("agent") in main.agents, f"{tag}：員工 {j.get('agent')!r} 不存在（名冊：{sorted(main.agents)}）"
+            assert j.get("agent") in main.SLOTS, f"{tag}：工位 {j.get('agent')!r} 不存在（工位：{sorted(main.SLOTS)}）"
             assert isinstance(j.get("hour"), int) and 0 <= j["hour"] <= 23, f"{tag}：hour 要 0–23"
             assert j.get("weekday") is None or (isinstance(j["weekday"], int) and 0 <= j["weekday"] <= 6), f"{tag}：weekday 要 0–6 或省略"
             assert j.get("minute") is None or (isinstance(j["minute"], int) and 0 <= j["minute"] <= 59), f"{tag}：minute 要 0–59 或省略"
@@ -4134,9 +4144,11 @@ def slug_table_matches_personas() -> None:
     """看板守則那張「cogito 名字／Claude Code 代號」表，每一列都要對到同名人設的 slug。
     錯一個就是派錯人：實際發生過 p07（老王）的 slug 寫成 azhe，主持人點 azhe 要後端阿哲，來的是 UI 設計師老王。"""
     import re
-    md = (Path(main.__file__).parent / "personas" / "kanban.md").read_text(encoding="utf-8")
+    # 成員表是照現在的名冊產生的（團隊設定，docs/team-setup.md）——驗的是【產生出來的】那份，而且不能留下沒填的空格
+    md = main.persona_body(main.KANBAN)
+    assert "{{" not in md, "看板守則裡還有沒填的 {{…}}"
     rows = re.findall(r"^\| `([^`]+)` \| `([a-z-]+)` \|", md, re.M)
-    assert len(rows) >= 7, rows
+    assert len(rows) == len([a for a in main.npcs() if main.in_pool(a)]) >= 1, rows
     by_name = {a.name: a for a in main.npcs().values()}
     for name, slug in rows:
         assert name in by_name, f"守則表裡的 {name} 不在名冊"
@@ -4744,6 +4756,71 @@ def token_required() -> None:
         os.environ["OFFICE_TOKEN"] = old_env
         os.environ.pop("OFFICE_TOKEN_FILE", None)
         main.TOKEN_FILE = old_file
+    main.STATE_FILE.unlink(missing_ok=True)
+
+
+def team_setup() -> None:
+    """團隊設定（docs/team-setup.md）：工位固定、坐誰是設定；存檔就重載名冊、推導對照表、看板成員表、顯示／隱藏角色。"""
+    snapshot = {f.name: f.read_bytes() for f in main.TEAM_DIR.iterdir() if f.is_file()}
+    sent: list = []
+    real_send = main.send_cmd
+
+    async def rec(cmd):
+        sent.append(cmd)
+        return True
+    main.send_cmd = rec
+    main.unity_ids[:] = list(main.SLOTS)          # 假裝 Unity 回報了場景裡的 8 個角色
+    main.busy.clear()                              # 前面的測試留下的「工作中」會被存檔的守門擋住
+    for aid in list(main.pending_approval):
+        main.clear_approval(aid, next_card=False)
+    try:
+        with TestClient(main.app) as c:
+            t = c.get("/office/team").json()
+            assert t["configured"] and len(t["slots"]) == len(main.SLOTS) == 8, t
+            recep = next(x for x in t["slots"] if x["id"] == "p10")
+            assert recep["fixed"] and not recep["pool"], "櫃檯的固定崗位、不進指派池是位子的性質（slots.yaml）"
+            tpl = {x["key"]: x for x in c.get("/office/team/templates").json()["templates"]}
+            assert {"demo", "software"} <= set(tpl) and len(tpl["software"]["members"]) == 8, list(tpl)
+
+            def save(members, **kw):
+                return c.post("/office/team", json={"members": members, **kw}).json()
+            sw = tpl["software"]["members"]
+            pick = [{"slot": sid, **sw[sid]} for sid in ("p17", "p01", "p19")]
+            # 驗證：每一條錯都要擋、而且講人話
+            assert "至少" in save([])["error"]
+            assert "名字" in save([{**pick[0], "name": ""}])["error"]
+            assert "重複" in save([pick[0], {**pick[1], "name": pick[0]["name"]}])["error"]
+            assert "代號" in save([{**pick[0], "slug": "Chen Li"}])["error"]
+            assert "工位" in save([{**pick[0], "slot": "p99"}])["error"]
+            assert "引擎" in save([{**pick[0], "engine": "gpt"}])["error"]
+            main.busy.add("p05")
+            assert "工作中" in save(pick)["error"], "有人在工作中還能改名冊"
+            main.busy.discard("p05")
+            # 存：3 個人
+            r = save(pick, template="software")
+            assert r["ok"] and r["count"] == 3, r
+            assert set(main.npcs()) == {"p17", "p01", "p19"}, set(main.npcs())
+            assert not (main.TEAM_DIR / "p05.yaml").exists(), "停用的工位檔案沒收掉"
+            assert main.WORK_DESK == {"p17": "chair_1", "p01": "chair_2", "p19": "boss_seat"}, main.WORK_DESK
+            assert main.READONLY_ROLES == {"p01", "p19"}, main.READONLY_ROLES   # 軟體團隊：產品經理、技術主管
+            assert main.SUB_NPC.get("planner") in ("p01", "p19") and main.SUB_NPC.get("correctness") == "p17", main.SUB_NPC
+            md = main.persona_body(main.KANBAN)
+            assert pick[0]["name"] in md and "阿哲" not in md and "{{" not in md, "看板成員表沒跟著新團隊"
+            names = [a["name"] for a in c.get("/agents").json().values() if a.get("npc") is not False]
+            assert sorted(names) == sorted(m["name"] for m in pick), names
+            vis = {x["agent_id"]: x["target"] for x in sent if x.get("action") == "visible"}
+            assert vis.get("p17") == "1" and vis.get("p05") == "0" and vis.get("p10") == "0", vis
+            assert c.get("/office/team").json()["template"] == "software"
+    finally:
+        main.send_cmd = real_send
+        main.unity_ids.clear()
+        for f in main.TEAM_DIR.iterdir():
+            if f.is_file():
+                f.unlink()
+        for name, b in snapshot.items():
+            (main.TEAM_DIR / name).write_bytes(b)
+        main.load_roster()
+    assert set(main.npcs()) == {"p01", "p05", "p07", "p08", "p10", "p12", "p17", "p19"}
     main.STATE_FILE.unlink(missing_ok=True)
 
 

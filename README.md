@@ -68,9 +68,12 @@ The mode comes from `OFFICE_MODE` in `backend/.env` (loaded automatically by `lo
 - How to tell it took effect: once Unity connects, the log prints 「啟動 N 個 agent（純投影…）」
   ("starting N agents (projection only…)"). Restart uvicorn after changing `.env`.
 
-**Employees and personas**: each person is two files: `backend/personas/pXX.yaml` (name / role / team /
-personality) and `pXX.md` (character sheet, visible from the shell's roster). To add someone, add those two
-files, add one spawn point line in `CharacterBuilder.cs`, then run Unity **Tools → Build Characters**.
+**Team and personas**: the office has 8 fixed workstations (`backend/slots.yaml`: look, seat, pose); the team setup decides
+which are active and who sits there. The first time you open the shell you get the **team setup wizard** (pick a template →
+pick workstations → set up each person); later, adjust it from 「👥 團隊設定」 (team setup) on the roster.
+The result lives in `backend/team/` (not in git): one `pXX.yaml` (name / role / team / personality…) and one `pXX.md`
+(character sheet) per workstation. Templates are in `backend/templates/` (demo team, software team). Spec:
+[`docs/team-setup.md`](docs/team-setup.md). A 9th person needs a new character and seat in Unity; the web can't add one.
 
 When `COGITO_CHANNELS=<cogito>/workspace/channels` is set, the bridge syncs each `pXX.md` on startup into
 that channel's `AGENTS.md` **and** `CLAUDE.md`, with identical content: cogito's PromptComposer reads the
@@ -80,7 +83,7 @@ The CLI **does not read AGENTS.md** (tested 2026-09-07), so both filenames are r
 `<!-- office-persona:` marker. Hand-written files are always kept and a warning is printed. To maintain a
 channel's file yourself, delete those two marker lines.
 
-**Schedule and delivery**: `backend/schedule.json` holds the office's recurring jobs (format in
+**Schedule and delivery**: `backend/team/schedule.json` (not in git) holds the office's recurring jobs (format in
 `schedule.json.example`): `hour` is required, omitting `weekday` means every day, `engine` picks cogito or cli
 per job, and `repo` binds a working repo. When a job is due it goes through the normal dispatch path, so
 movement, work thread and report card all behave as usual. A job with `"deliver": {"file": "trend-{date}.md"}`
@@ -249,7 +252,7 @@ The backend can be turned on and off at any time; the fake and real brains hot-s
 
 - Pace: `DECISION_INTERVAL` in `backend/main.py` (decision interval)
 - Cost: `MODEL` in `backend/agent.py` (switching to `claude-haiku-4-5` saves 80%)
-- Personas: `backend/personas/*.yaml` (takes effect after restarting the backend)
+- Personas: 「👥 團隊設定」 in the shell, or edit `backend/team/*.yaml` directly (direct edits need a backend restart)
 - Conversation cap: `MAX_ROUNDS` in `main.py`
 
 ## Troubleshooting

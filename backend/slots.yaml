@@ -1,0 +1,21 @@
+# 工位定義：辦公室的 8 個位子是固定的（Unity 場景裡預烘了 8 個角色，各有固定外觀與位子），
+# 團隊設定只決定「哪幾個位子啟用、坐的是什麼角色」。見 docs/team-setup.md。
+#
+# id      角色外觀代號＝LimeZu 預製角色編號（tools/make_character.py N → pNN），也是工作紀錄、頻道資料夾
+#         （office_<id>）、班表的鍵——所以永遠不改。
+# label   精靈上給人看的位子名稱。
+# desk    上工時坐的 waypoint（RoomBuilder.cs）。沒有＝沒有固定座位（櫃檯另外處理）。
+# side    別人委派他時，委派者站在他桌邊的 waypoint。
+# sit     回座後的姿勢；省略＝sit_up（背對鏡頭入座）。
+# gift    交件時遞出去的方向；省略＝gift_right（從桌子往站位那側遞）。
+# fixed   崗位固定、不走位（櫃檯被四面圍住，沒有走得出去的口）——以前寫在小安的人設裡，其實是位子的性質。
+# pool    false＝不進動態指派池（頻道自動配人、會議代打都不找這個位子）。
+slots:
+  - {id: p17, label: 上排工位 1, desk: chair_1, side: side_1}
+  - {id: p01, label: 上排工位 2, desk: chair_2, side: side_2}
+  - {id: p07, label: 上排工位 3, desk: chair_3, side: side_3}
+  - {id: p05, label: 下排工位 1, desk: chair_4, side: side_4, gift: gift_left}
+  - {id: p12, label: 下排工位 2, desk: chair_5, side: side_5, gift: gift_left}
+  - {id: p08, label: 下排工位 3, desk: chair_6, side: side_6}
+  - {id: p19, label: 老闆房, desk: boss_seat, side: boss_1, sit: sit_left, gift: gift_left}
+  - {id: p10, label: 櫃檯, sit: face_down, gift: gift_down, fixed: true, pool: false}

@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 import anthropic
 import httpx
+import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -186,6 +187,7 @@ def npcs() -> dict[str, Agent]:
     """真的有身體的那些。生活迴圈、同事名單、頻道自動指派都只看這個。"""
     return {aid: a for aid, a in agents.items() if aid != KANBAN}
 arrived: dict[str, asyncio.Event] = {}
+unity_ids: list[str] = []   # Unity 握手回報的角色（場景裡預烘的那 8 個）
 loops: list[asyncio.Task] = []
 waypoint_list: list[str] = []
 occupied: dict[str, str] = {}   # agent_id -> 佔用的 waypoint（防兩人擠同一點）
@@ -250,6 +252,7 @@ async def handle_event(evt: dict) -> None:
         # 否則重整分頁之後所有徽章都不見（去重會擋住重送）。
         emote_now.clear()
         start_agents(evt.get("agents", []), evt.get("list", []))
+        await sync_visibility()   # 沒啟用的工位：角色藏起來
     elif kind == "arrived":
         aid = evt.get("agent_id", "")
         if aid in agents:
@@ -260,18 +263,78 @@ async def handle_event(evt: dict) -> None:
         print("事件:", evt)
 
 
+# ── 團隊：工位是固定的，坐誰是設定的（docs/team-setup.md）──────────────────────────
+# 工位（backend/slots.yaml，進 git）＝Unity 場景裡預烘的 8 個角色：外觀、座位、站位、坐姿都綁在工位上。
+# 團隊（backend/team/，不進 git）＝使用者設定的人：每個啟用的工位一份 <工位>.yaml＋<工位>.md。
+# 範本（backend/templates/<key>/）＝精靈裡可選的起點。系統檔（看板、共通守則、Codex 對照）留在 personas/。
+BACKEND = Path(__file__).parent
+PERSONA_DIR = BACKEND / "personas"
+TEMPLATES_DIR = BACKEND / "templates"
+SLOTS_FILE = BACKEND / "slots.yaml"
+TEAM_DIR = Path(os.environ.get("OFFICE_TEAM_DIR") or BACKEND / "team")
+SLOTS: dict[str, dict] = {}   # 工位 id -> {label, desk, side, sit, gift, fixed, pool}，照 slots.yaml 的順序
+
+
+def load_slots() -> None:
+    SLOTS.clear()
+    for s in (yaml.safe_load(SLOTS_FILE.read_text(encoding="utf-8")) or {}).get("slots", []):
+        SLOTS[str(s["id"])] = s
+
+
+def persona_md(aid: str) -> Path:
+    return (PERSONA_DIR if aid == KANBAN else TEAM_DIR) / f"{aid}.md"
+
+
+def persona_body(aid: str) -> str:
+    """人設本文。看板的成員表與名字清單是【依現在的名冊】填的——以前寫死 7 個名字，換了團隊主持人就派給不存在的人。"""
+    f = persona_md(aid)
+    body = f.read_text(encoding="utf-8") if f.exists() else ""
+    if aid != KANBAN:
+        return body
+    members = [a for aid2, a in npcs().items() if in_pool(aid2)]
+    table = "\n".join(f"| `{a.name}` | `{a.persona.get('slug', '')}` | {a.persona.get('role', '')} | {a.persona.get('ask', '')} |"
+                      for a in members) or "| （目前沒有可協作的成員） | | | |"
+    m1 = members[0].name if members else "成員甲"
+    m2 = members[1].name if len(members) > 1 else m1
+    return (body.replace("{{team_table}}", table).replace("{{team_names}}", "／".join(a.name for a in members) or "目前沒有成員")
+                .replace("{{member_1}}", m1).replace("{{member_2}}", m2))
+
+
 def load_roster() -> None:
-    """名冊啟動即載（脫鉤 Unity）：Web 外殼/Slack 派工不需要 Unity 在線；Unity 只是渲染面。"""
-    persona_dir = Path(__file__).parent / "personas"
-    for f in sorted(persona_dir.glob("p*.yaml")):
-        agents[f.stem] = Agent(f.stem, persona_dir)
-        arrived[f.stem] = asyncio.Event()
+    """名冊啟動即載（脫鉤 Unity）：Web 外殼/Slack 派工不需要 Unity 在線；Unity 只是渲染面。
+    團隊設定存檔後也走這裡重載——所以是【就地】更新 agents，不是整個換掉（別處拿著同一個 dict）。"""
+    load_slots()
+    # 名冊照 id 排（跟以前讀 p*.yaml 的順序一樣）：頻道自動指派「第一個閒著的人」靠這個順序，工位順序只給精靈排版用
+    wanted = sorted(sid for sid in SLOTS if (TEAM_DIR / f"{sid}.yaml").exists())
+    for aid in [a for a in agents if a not in wanted]:
+        agents.pop(aid)
+        arrived.pop(aid, None)
+    for aid in wanted:
+        agents[aid] = Agent(aid, TEAM_DIR)
+        arrived.setdefault(aid, asyncio.Event())
         # 閒置計時從【現在】起算：預設 0.0 的話，「從沒接過任務」會被算成「閒了很久」，
         # 於是一開機全員直接回工位趴著，再也不會走動（實測到的）。
-        last_work[f.stem] = time.monotonic()
-    print(f"名冊載入 {len(agents)} 位員工：{'、'.join(a.name for a in agents.values())}")
+        last_work.setdefault(aid, time.monotonic())
+    # 從工位與人設推導的對照表（以前寫死在各處，綁 p17、p01 這些 id）
+    for d in (WORK_DESK, DESK_SIDE, SIT_AT, GIFT_TOWARD, SUB_NPC):
+        d.clear()
+    READONLY_ROLES.clear()
+    for aid in wanted:
+        slot, p = SLOTS[aid], agents[aid].persona
+        for d, key in ((WORK_DESK, "desk"), (DESK_SIDE, "side"), (SIT_AT, "sit"), (GIFT_TOWARD, "gift")):
+            if slot.get(key):
+                d[aid] = slot[key]
+        if p.get("readonly"):
+            READONLY_ROLES.add(aid)
+        for r in p.get("sub_roles") or []:
+            SUB_NPC.setdefault(str(r), aid)
+    if wanted:
+        print(f"名冊載入 {len(wanted)} 位員工：{'、'.join(agents[a].name for a in wanted)}")
+    else:
+        print(f"ℹ 還沒設定團隊（{TEAM_DIR} 沒有成員）——開外殼走團隊設定精靈")
     # 看板放在名冊【之後】才加：上面那行的人數才不會把它算成員工。
-    agents[KANBAN] = Agent(KANBAN, persona_dir)
+    agents.pop(KANBAN, None)
+    agents[KANBAN] = Agent(KANBAN, PERSONA_DIR)
 
 
 def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
@@ -283,6 +346,7 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         return
     stop_agents()
     waypoint_list = waypoints
+    unity_ids[:] = agent_ids
     present = set(agent_ids) or set(npcs())   # 舊版畫面沒回報名單就當全員都在
     for aid, a in npcs().items():   # 看板沒有身體，不進生活迴圈也不算同事
         if aid not in present:   # 名冊有、畫面沒有的人：不開迴圈——他的每個 move_to 都會等到逾時、還把畫面誤判成凍結
@@ -499,9 +563,7 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
 #   turn→只寫【工作串】不冒泡：泡泡只有 8 字寬又有節流，多一則是噪音；但少了它，
 #   兩次工具呼叫之間的長考在時間軸上是一段全空白，看起來像 agent 掛了。
 # 真工作中 agent 進 busy（生活模擬掛起）——工作永遠蓋過生活閒逛。
-WORK_DESK = {"p17": "chair_1", "p01": "chair_2", "p07": "chair_3",   # 上工的固定工位
-             "p05": "chair_4", "p12": "chair_5", "p08": "chair_6",
-             "p19": "boss_seat"}   # CTO 的位子在老闆房裡（persona 就寫他多半待在那），坐著辦公
+WORK_DESK: dict[str, str] = {}   # 上工的固定工位：load_roster 從 slots.yaml 的 desk 推導
 BOSS_DOOR = "boss_1"  # 老闆房走道：等 HITL 審批時站這裡（面向老闆桌）
 BOARD = "board_1"     # 白板前：規劃類子 agent 站這裡，不佔工位
 # 會議室的六個座位。先前是白板前的四個站位——那時的理由是「16×17 已經飽和，沒有空地
@@ -513,16 +575,15 @@ MEET_SPOTS = ["meet_a1", "meet_b1", "meet_a2", "meet_b2", "meet_a3", "meet_b3"]
 COOLER = "cooler_1"   # 飲水機：卡住太久的人去接杯水（think 空轉的投影）
 # 各工位【旁邊】的站位：委派時主 agent 走過去，面向坐著的同事——
 # 「兩個人在同一張桌子旁」是唯一看得出「他們在協作」的畫面語言。
-DESK_SIDE = {"p17": "side_1", "p01": "side_2", "p07": "side_3",
-             "p05": "side_4", "p12": "side_5", "p08": "side_6", "p19": BOSS_DOOR}
+DESK_SIDE: dict[str, str] = {}   # 委派者站在支援者桌邊的位子：slots.yaml 的 side
 # 閱讀投影：連續讀檔/查資料 → 低頭看書。cogito 的工具名開頭就分得出讀寫，不必列舉全名。
 READ_RE = re.compile(r"^(read|grep|glob|list|search|cat|head|tail|find|fetch|browse|web|get_)", re.I)
 reading: set[str] = set()   # 正在「看書」的人——同狀態不重發指令（工具事件很密）
-SIT_AT = {"p19": "sit_left", "p10": "face_down"}   # 放下書要坐回去的姿勢；其餘工位都是 sit_up（背對鏡頭入座）；總機面向櫃檯前
+SIT_AT: dict[str, str] = {}   # 放下書要坐回去的姿勢（slots.yaml 的 sit）；沒寫的都是 sit_up（背對鏡頭入座）
 # 遞交投影：委派收件成功時，支援者【當場】面向站在自己桌邊的主 agent 把成果遞出去
 # （委派起手式就是主 agent 走到支援者桌邊的 DESK_SIDE，人本來就站在那）。方向＝
 # 從支援者工位看向那個站位：chair_1-3 的站位在東、chair_4/5 在西、老闆房門在西。
-GIFT_TOWARD = {"p05": "gift_left", "p12": "gift_left", "p19": "gift_left", "p10": "gift_down"}   # 其餘 gift_right；總機隔著櫃檯往前遞
+GIFT_TOWARD: dict[str, str] = {}   # 交件方向（slots.yaml 的 gift）；沒寫的是 gift_right
 GIFT_HOLD = 1.3   # 遞交停留秒數（10 幀 8fps 一輪 1.25s，演一輪整）；測試設 0
 # 受傷投影：出錯的那一下整身閃紅（LimeZu hurt 列，3 幀）。Unity 端當一次性動作疊在目前姿勢上、
 # 自己退掉——橋只負責「哪一下」，不管時間、不還原。方向跟坐姿走：背對鏡頭坐的人就從背後閃紅。
@@ -972,10 +1033,7 @@ def office_bubble(kind: str, label: str) -> str | None:
 # 阿哲委派 code-reviewer，小美就起身入座開工；內部事件泡泡掛到她頭上，收工冒回報泡。
 # 沒人有空時退回舊行為（主 agent 頭上帶小名冒泡）。cogito / Unity 零改動。
 # 慣用人選：具名子 agent 派給職務對得上的人（沒空就退回任一閒置者）
-SUB_NPC = {"code-reviewer": "p01", "planner": "p01", "security-auditor": "p07",
-           "implementer": "p12", "performance": "p05", "correctness": "p17",
-           # 市場調查類：小樺（產品 Team 的研究員，輔佐 PM）
-           "researcher": "p08", "market-research": "p08", "analyst": "p08"}
+SUB_NPC: dict[str, str] = {}   # cogito 子 agent 的角色名 -> 優先上場的工位：人設的 sub_roles 推導
 SPAWN_RE = re.compile(r"^spawn_subagent(?::(\S+))?")
 # background=true 的 spawn 會【立刻】回一句回執，那不是成果：
 #   「🌀 已在背景啟動子 agent [老徐]（ID: bg-1）。要等它交件就用 subagent_await…」
@@ -998,15 +1056,14 @@ def stays_put(aid: str) -> bool:
     """崗位固定的人（總機小安）：不走位，走位一律換成姿勢。理由在 Unity 端：她站的那格被櫃檯叢集四面圍住，
     美術上沒有走得出去的口——與其讓她穿過櫃檯，不如讓每個狀態都在崗位上演（接電話、看書、趴睡、遞交、受傷）。
     來源是人設的 post: fixed，不是寫死的名單。"""
-    a = agents.get(aid)
-    return bool(a) and a.persona.get("post") == "fixed"
+    return SLOTS.get(aid, {}).get("fixed") is True   # 位子的性質（櫃檯），寫在 slots.yaml
 
 
 def in_pool(aid: str) -> bool:
     """能不能被【動態】指派：頻道自動配人、會議代打。人設 pool: false 的人（秘書小安，崗位在櫃檯）只接老闆直接派的活——
     否則 Slack 一個新頻道進來就可能把秘書抓去寫週報，會議缺人也拿她代打。"""
     a = agents.get(aid)
-    return bool(a) and a.persona.get("pool", True) is not False
+    return bool(a) and SLOTS.get(aid, {}).get("pool", True) is not False and a.persona.get("pool", True) is not False
 
 
 def npc_by_name(name: str) -> str | None:
@@ -2146,11 +2203,151 @@ def office_profile(aid: str):
     a = agents.get(aid)
     if a is None:
         return {"ok": False, "error": "查無此員工"}
-    soul = Path(__file__).parent / "personas" / f"{aid}.md"
+    soul = persona_md(aid)
     return {"ok": True, "id": aid, **{k: a.persona.get(k, "") for k in
             ("name", "role", "team", "personality", "style", "habits")},
             "soul": soul.read_text(encoding="utf-8") if soul.exists() else "",
             "schedule": schedule_of(aid)}   # 班表是這個人的一部分：誰有例行工作、什麼時候、送去哪
+
+
+# ── 團隊設定 API（docs/team-setup.md）─────────────────────────────────────────
+TEAM_FIELDS = ("name", "team", "role", "personality", "style", "habits", "engine", "model", "slug", "ask")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def member_payload(p: dict, body: str) -> dict:
+    return {**{k: str(p.get(k) or "") for k in TEAM_FIELDS}, "readonly": bool(p.get("readonly")),
+            "sub_roles": [str(r) for r in p.get("sub_roles") or []], "md": body}
+
+
+def team_meta() -> dict:
+    try:
+        return yaml.safe_load((TEAM_DIR / "team.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+
+
+@app.get("/office/team")
+def office_team():
+    """精靈與「團隊設定」讀這個：8 個工位、每個坐了誰（沒坐人＝未啟用）。"""
+    return {"ok": True, "configured": bool(npcs()), "template": team_meta().get("template"),
+            "slots": [{"id": sid, "label": s.get("label", sid), "fixed": bool(s.get("fixed")),
+                       "pool": s.get("pool", True) is not False,
+                       "member": member_payload(agents[sid].persona, persona_body(sid)) if sid in npcs() else None}
+                      for sid, s in SLOTS.items()]}
+
+
+@app.get("/office/team/templates")
+def office_team_templates():
+    out = []
+    for d in sorted(p for p in TEMPLATES_DIR.iterdir() if p.is_dir()) if TEMPLATES_DIR.exists() else []:
+        meta = yaml.safe_load((d / "template.yaml").read_text(encoding="utf-8")) if (d / "template.yaml").exists() else {}
+        members = {}
+        for f in sorted(d.glob("p*.yaml")):
+            if f.stem in SLOTS:
+                md = d / f"{f.stem}.md"
+                members[f.stem] = member_payload(yaml.safe_load(f.read_text(encoding="utf-8")) or {},
+                                                 md.read_text(encoding="utf-8") if md.exists() else "")
+        out.append({"key": d.name, "title": (meta or {}).get("title", d.name),
+                    "description": (meta or {}).get("description", ""), "members": members})
+    return {"ok": True, "templates": out}
+
+
+def team_error(members) -> str | None:
+    """存檔前的驗證：回錯誤原因（給人看的），None＝可以存。"""
+    if not isinstance(members, list) or not members:
+        return "至少要有 1 個人"
+    if len(members) > len(SLOTS):
+        return f"這間辦公室只有 {len(SLOTS)} 個位子"
+    seen_slot, seen_name, seen_slug = set(), set(), set()
+    for m in members:
+        if not isinstance(m, dict):
+            return "成員格式不對"
+        sid, name = str(m.get("slot") or ""), str(m.get("name") or "").strip()
+        if sid not in SLOTS:
+            return f"沒有這個工位：{sid or '（空）'}"
+        if sid in seen_slot:
+            return f"工位 {SLOTS[sid].get('label', sid)} 重複了"
+        if not name or len(name) > 20:
+            return f"{SLOTS[sid].get('label', sid)}：名字必填，最多 20 個字"
+        if name in seen_name or name == agents[KANBAN].name:
+            return f"名字「{name}」重複了（名字也是 cogito 具名 agent 的檔名，不能撞）"
+        if not str(m.get("role") or "").strip():
+            return f"{name}：職務必填"
+        slug = str(m.get("slug") or "").strip()
+        if slug and not SLUG_RE.match(slug):
+            return f"{name}：代號只能用小寫英文、數字、連字號（Claude Code 的規定）"
+        if slug and slug in seen_slug:
+            return f"代號「{slug}」重複了"
+        if str(m.get("engine") or "") not in ("", "cogito", ENGINE_CLI, ENGINE_CODEX):
+            return f"{name}：不認識的引擎 {m.get('engine')}"
+        if any(len(str(m.get(k) or "")) > 500 for k in TEAM_FIELDS) or len(str(m.get("md") or "")) > 8000:
+            return f"{name}：欄位太長了"
+        seen_slot.add(sid); seen_name.add(name); seen_slug.add(slug)
+    return None
+
+
+@app.post("/office/team")
+async def office_team_save(d: dict):
+    """存團隊：寫 backend/team/ → 重載名冊（不用重啟）→ 同步人設到各引擎 → 重開畫面上的生活迴圈。"""
+    members = d.get("members")
+    if why := team_error(members):
+        return {"ok": False, "error": why}
+    if working := [agents[a].name for a in npcs() if a in busy or a in pending_approval]:
+        return {"ok": False, "error": f"{'、'.join(working)} 正在工作中——收工後再調整團隊（改名冊會讓進行中的任務找不到人）"}
+    TEAM_DIR.mkdir(parents=True, exist_ok=True)
+    keep = {str(m["slot"]) for m in members}
+    for sid in SLOTS:
+        if sid not in keep:
+            for ext in ("yaml", "md"):
+                (TEAM_DIR / f"{sid}.{ext}").unlink(missing_ok=True)   # 工作紀錄、頻道資料夾都留著：再啟用就回來
+    for m in members:
+        sid = str(m["slot"])
+        p = {k: str(m.get(k) or "").strip() for k in TEAM_FIELDS if str(m.get(k) or "").strip()}
+        if p.get("engine") == "cogito":
+            p.pop("engine")          # cogito 是預設引擎，人設不寫
+        p.setdefault("slug", f"member-{sid}")
+        if m.get("readonly"):
+            p["readonly"] = True
+        if subs := [str(r) for r in m.get("sub_roles") or [] if str(r).strip()]:
+            p["sub_roles"] = subs
+        (TEAM_DIR / f"{sid}.yaml").write_text(yaml.safe_dump(p, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        (TEAM_DIR / f"{sid}.md").write_text(str(m.get("md") or f"# {p['name']} · {p['role']}\n").rstrip() + "\n", encoding="utf-8")
+    meta = {"template": str(d.get("template") or team_meta().get("template") or ""),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M")}
+    (TEAM_DIR / "team.yaml").write_text(yaml.safe_dump(meta, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    load_roster()
+    sync_souls(); sync_agents(); prune_agent_docs()
+    if viewers and waypoint_list:   # 畫面在線：照新名冊重開生活迴圈，並顯示／隱藏角色
+        stop_agents()
+        start_agents(list(unity_ids), list(waypoint_list))
+    await sync_visibility()
+    audit("team.saved", "", members=[f"{m['slot']}:{str(m.get('name')).strip()}" for m in members], template=meta["template"])
+    notify("roster")
+    return {"ok": True, "count": len(members)}
+
+
+def prune_agent_docs() -> int:
+    """cogito 具名 agent 檔是用【名字】命名的：改名或拿掉的人，舊檔會留著、主持人還點得到。
+    只收我們產生的（有 SOUL_MARK），手寫的不碰。"""
+    dst_dir = agents_dir()
+    if dst_dir is None or not dst_dir.exists():
+        return 0
+    names = {f"{a.name}.md" for a in npcs().values()}
+    gone = 0
+    for f in dst_dir.glob("*.md"):
+        try:
+            if f.name not in names and SOUL_MARK in f.read_text(encoding="utf-8"):
+                f.unlink(); gone += 1
+        except OSError:
+            pass
+    return gone
+
+
+async def sync_visibility() -> None:
+    """場景裡預烘了 8 個角色：沒啟用的工位把角色藏起來，啟用的顯示（Unity 的 visible 指令，docs/team-setup.md 階段三）。"""
+    for aid in unity_ids:
+        await send_cmd({"agent_id": aid, "action": "visible", "target": "1" if aid in npcs() else "0"})
 
 
 # ── 產出預覽：把任務卡的工作目錄唯讀開一個窗，讓圖片／PDF 直接在工作串裡看得到。
@@ -2790,12 +2987,11 @@ def cli_agents_json() -> str:
     為什麼不寫檔：~/.claude/agents 不吃 CLAUDE_CONFIG_DIR，project 層又得每個工作區各放一份；
     帶在 argv 上零檔案、零漂移。subagent_type 只准小寫英文，所以用 persona 的 slug。"""
     out: dict[str, dict] = {}
-    persona_dir = Path(__file__).parent / "personas"
     for aid, a in npcs().items():
         slug = str(a.persona.get("slug") or "").strip()
         if not slug:
             continue
-        body = (persona_dir / f"{aid}.md").read_text(encoding="utf-8") if (persona_dir / f"{aid}.md").exists() else ""
+        body = persona_body(aid)
         p = a.persona
         head = f"# 你是{p.get('name', aid)}（{p.get('role', '員工')}）" + (f"\n\n個性：{p['personality']}" if p.get("personality") else "") + \
                (f"\n說話風格：{p['style']}" if p.get("style") else "")
@@ -3403,12 +3599,12 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
     if skills := sorted(USER_AGENT_SKILLS.glob("*/SKILL.md")):
         out += ["-c", "skills.config=[" + ", ".join(f"{{path={toml(p)}, enabled=false}}" for p in skills) + "]"]
     home = CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None
-    src = Path(__file__).parent / "personas" / f"{aid}.md"
+    src = persona_md(aid)
     try:
         in_worktree = home is not None and base.resolve() != home.resolve()
     except OSError:
         in_worktree = True
-    dev = [persona_text(aid, src.read_text(encoding="utf-8"))] if in_worktree and aid in agents and src.exists() else []
+    dev = [persona_text(aid, persona_body(aid))] if in_worktree and aid in agents and src.exists() else []
     if CODEX_GUIDE_SRC.exists():
         dev.append(CODEX_GUIDE_SRC.read_text(encoding="utf-8"))
     if dev:
@@ -4988,7 +5184,7 @@ async def show_delivered(aid: str) -> None:
     asyncio.create_task(later())
 
 
-SCHEDULE_FILE = Path(__file__).parent / "schedule.json"
+SCHEDULE_FILE = TEAM_DIR / "schedule.json"   # 班表是使用者的（牽涉個人偏好）：跟團隊一起放在不進 git 的 team/
 sched_last: dict[str, str] = {}   # job name -> 上次觸發的 "YYYY-MM-DD HH"（防同一小時重複；隨 state 持久化）
 
 
@@ -5251,7 +5447,7 @@ def persona_text(aid: str, body: str) -> str:
 
 
 def soul_doc(aid: str, body: str) -> str:
-    return (f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生。手改會在橋下次啟動時被覆蓋；\n"
+    return (f"{SOUL_MARK} {aid} 由辦公室的人設（{aid}.md）產生。手改會在橋下次啟動時被覆蓋；\n"
             f"     想自己維護這個檔案，把這兩行標記刪掉即可，橋就不會再動它。 -->\n\n"
             f"{persona_text(aid, body)}")
 
@@ -5264,7 +5460,7 @@ def soul_doc(aid: str, body: str) -> str:
 # 寫入照樣過審批 middleware，這裡放行的是「能不能被派這種工作」，不是「能不能繞過稽核」。
 READONLY_TOOLS = ["read_file", "bash"]                             # 決策型：只讀，產出是判斷
 WRITER_TOOLS = ["read_file", "bash", "write_file", "edit_file"]    # 實作型：要動得了檔案
-READONLY_ROLES = {"p01", "p19"}   # 小美（產品經理）、老徐（CTO）
+READONLY_ROLES: set[str] = set()   # 只拿唯讀工具的人（決策型）：人設的 readonly: true
 
 
 def agent_tools(aid: str) -> list[str]:
@@ -5279,7 +5475,7 @@ def agent_doc(aid: str, body: str) -> str:
     desc = "；".join(x for x in [p.get("role", ""), p.get("personality", "")] if x)
     return (f"---\nname: {p.get('name', aid)}\ndescription: {desc}\n"
             f"tools: [{', '.join(agent_tools(aid))}]\n---\n"
-            f"{SOUL_MARK} {aid} 由 backend/personas/{aid}.md 產生，刪掉這行即可自行維護。 -->\n\n"
+            f"{SOUL_MARK} {aid} 由辦公室的人設（{aid}.md）產生，刪掉這行即可自行維護。 -->\n\n"
             f"{body.strip()}\n")
 
 
@@ -5294,14 +5490,13 @@ def sync_agents() -> int:
     dst_dir = agents_dir()
     if dst_dir is None:
         return 0
-    persona_dir = Path(__file__).parent / "personas"
     wrote = 0
     for aid, a in npcs().items():
-        src = persona_dir / f"{aid}.md"
+        src = persona_md(aid)
         if not src.exists():
             continue
         dst = dst_dir / f"{a.name}.md"
-        want = agent_doc(aid, src.read_text(encoding="utf-8"))
+        want = agent_doc(aid, persona_body(aid))
         if dst.exists():
             old = dst.read_text(encoding="utf-8")
             if SOUL_MARK not in old:   # ⚠ 保護：手寫的一律不動
@@ -5323,10 +5518,10 @@ def sync_souls() -> dict[str, int]:
     if CHANNELS_DIR is None:
         return n
     for aid in agents:
-        src = Path(__file__).parent / "personas" / f"{aid}.md"
+        src = persona_md(aid)
         if not src.exists():
             continue
-        want = soul_doc(aid, src.read_text(encoding="utf-8"))
+        want = soul_doc(aid, persona_body(aid))
         for fname in SOUL_FILES:
             _sync_one(CHANNELS_DIR / f"office_{aid}" / fname, want, n)
     if any(n.values()):
@@ -5334,8 +5529,8 @@ def sync_souls() -> dict[str, int]:
     return n
 
 
-GUIDE_SRC = Path(__file__).parent / "personas" / "office.md"   # 全辦公室共用守則的唯一來源
-CODEX_GUIDE_SRC = Path(__file__).parent / "personas" / "codex.md"   # 只給 Codex 的工具對照（走 developer_instructions，見 codex_parity_args）
+GUIDE_SRC = PERSONA_DIR / "office.md"   # 全辦公室共用守則的唯一來源
+CODEX_GUIDE_SRC = PERSONA_DIR / "codex.md"   # 只給 Codex 的工具對照（走 developer_instructions，見 codex_parity_args）
 
 
 def guide_doc(body: str) -> str:
