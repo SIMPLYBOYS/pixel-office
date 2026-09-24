@@ -34,6 +34,21 @@ backend/avatars/                 # 從角色圖抽出的頭像（衍生物）
 
 衍生物同樣受原授權拘束：裁切、改色、重新拼裝都不會讓它變成自有素材。
 
+## 展示影片（`docs/media/`）
+
+`pixel-office-demo.mp4` 與它的 GIF 版 `pixel-office-demo.gif` **有進版控**，是這份文件裡唯一例外：
+它們是辦公室實際畫面的錄影與截圖，畫面裡看得到 LimeZu 素材，用途僅限展示本專案。
+它們不是素材檔（拿不回原始圖塊），也不適用 MIT。
+
+影片裡的聲音：
+
+| 項目 | 來源 | 授權 |
+|------|------|------|
+| 配樂 | repo 裡的版本**沒有配樂**。對外發布用的版本另配 ende.app「Happy Beats / Business Moves」，授權尚未確認，所以不進 repo | — |
+| 音效 | [Kenney](https://kenney.nl/)（按鍵、點擊、卡片、撞擊音） | Kenney 素材一般為 CC0，以原素材包標示為準 |
+
+影片的製作檔（企劃、Hyperframes composition）在本機 `brag-output/`，內含素材衍生物，不進版控。
+
 ## 字型
 
 | 項目 | 內容 |

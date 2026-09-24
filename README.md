@@ -7,6 +7,22 @@
 三種引擎可以逐件事切換：cogito-agent、Claude Code CLI、Codex CLI。
 舞台在 Unity，橋在 FastAPI，兩邊用 WebSocket 傳 JSON 指令。
 
+## 影片導覽
+
+<a href="docs/media/pixel-office-demo.mp4"><img src="docs/media/pixel-office-demo.gif" width="300" alt="Pixel Office 展示影片"></a>
+
+26 秒直式展示影片（上面是無聲 GIF，點它看有音效的 mp4）。辦公室、名冊與任務看板都是實際跑起來的畫面錄影與截圖，不是動畫；
+標「重建」的兩段是照外殼樣式重做的示意畫面（當下沒有真的協作板與待審批可拍）。
+
+| 時間 | 畫面 | 對應功能 |
+|------|------|----------|
+| 0:03 | 員工起身走進會議室坐下 | `/cmd` 走位；會議室六個座位（`RoomBuilder.cs` 的 `meet_*`） |
+| 0:06 | 四個人同時上工 | 班表 09:00 開工，多個 agent 並行；名冊的「工作中」狀態燈 |
+| 0:10 | 全辦公室的任務，一張看板看完 | 外殼「📋 任務」分頁：進行中／等審批／完成／失敗・中止四欄 |
+| 0:14 | 一件大事，整隊照相依推進（重建） | 名冊的「看板」協作模式：拆票、標出「⏳ 等誰」、最多 3 人並行 |
+| 0:19 | 高危操作，停下來等你放行（重建） | HITL 審批卡＋頭上倒數徽章（徽章是辦公室實際使用的素材） |
+| 0:23 | 三種引擎，逐件事切換 | cogito-agent／Claude Code／Codex CLI |
+
 （原名 `unity_demo`；架構詳見 aaron-vault 的架構指南與建置筆記。）
 
 ```
@@ -201,5 +217,8 @@ curl -X POST localhost:8123/cmd -H 'Content-Type: application/json' \
 素材**不包含在這個 repository 或任何 release 裡**，也不能被 MIT 重新授權——
 要跑辦公室畫面請自行到 itch.io 取得合法副本，再依上面的「素材重建」重生。
 Modern Interiors 的授權要求標示 credit：limezu.itch.io。
+
+`docs/media/` 的展示影片（mp4 與 GIF）是辦公室實際畫面的錄影與截圖，畫面裡看得到 LimeZu 素材，
+僅用於展示本專案。它們不是素材檔，拿不回原始圖塊，也**不在 MIT 授權範圍內**。
 
 第三方來源與授權邊界整理在 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

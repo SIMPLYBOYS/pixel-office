@@ -57,3 +57,6 @@ unity/Assets/Resources/OfficeFont.otf.meta
 
 # 稽核帳本（append-only，部署資料，不進 git）
 backend/audit/
+
+# /brag 宣傳影片產物（含 LimeZu 素材截圖與衍生物，授權不可散布）
+brag-output/
