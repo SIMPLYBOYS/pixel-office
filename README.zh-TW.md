@@ -9,6 +9,14 @@
 三種引擎可以逐件事切換：cogito-agent、Claude Code CLI、Codex CLI。
 舞台在 Unity，橋在 FastAPI，兩邊用 WebSocket 傳 JSON 指令。
 
+## 搭配 cogito-agent
+
+[cogito-agent](https://github.com/SIMPLYBOYS/cogito-agent) 是引擎那一半：自託管的 Go ReAct agent（Claude 優先、Slack／Telegram、
+具名子 agent、HITL 審批、成本熔斷）。Pixel Office 是舞台那一半：把 cogito 的事件變成看得到的員工、簽得了的審批。
+cogito 那邊設 `COGITO_OFFICE_URL=http://localhost:8123` 即可，同一台機器上會自動帶橋的 token。事件協定寫在 cogito 的
+[docs/office-protocol.md](https://github.com/SIMPLYBOYS/cogito-agent/blob/main/docs/office-protocol.md)。
+Claude Code 與 Codex 兩個引擎不需要 cogito 也能用。
+
 ## 影片導覽
 
 <a href="docs/media/pixel-office-demo.mp4"><img src="docs/media/pixel-office-demo.gif" width="300" alt="Pixel Office 展示影片"></a>

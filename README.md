@@ -11,6 +11,15 @@ actually happened**.
 Three engines can be chosen per task: cogito-agent, Claude Code CLI and Codex CLI.
 The stage runs in Unity, the bridge runs on FastAPI, and the two exchange JSON commands over WebSocket.
 
+## Works with cogito-agent
+
+[cogito-agent](https://github.com/SIMPLYBOYS/cogito-agent) is the engine half: a self-hosted Go ReAct agent (Claude-first,
+Slack/Telegram, named subagents, HITL approvals, cost circuit breakers). Pixel Office is the stage half: it turns cogito's events
+into employees you can watch, and approvals you can sign. Set `COGITO_OFFICE_URL=http://localhost:8123` on the cogito side; on the
+same machine it sends the bridge token automatically. The event protocol is specified in cogito's
+[docs/office-protocol.md](https://github.com/SIMPLYBOYS/cogito-agent/blob/main/docs/office-protocol.md).
+The Claude Code and Codex engines work without cogito.
+
 ## Video tour
 
 <a href="docs/media/pixel-office-demo.mp4"><img src="docs/media/pixel-office-demo.gif" width="300" alt="Pixel Office demo video"></a>
