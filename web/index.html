@@ -1948,10 +1948,10 @@ async function inboxcard() {
   for (const t of r.todo) {
     const row = el('div', '', 'irow todo');
     if (t.kind === 'approval') {
+      // 收件匣不給一鍵核准（稽核 #5）：這裡只放得下一行參數，看不完整就不該能簽。點「查看」到那個人的完整審批卡決定
       const btns = t.from
         ? `<span class="ihint">↩︎ 來自 ${esc(t.from)}，請回原平台核准</span>`
-        : `<button class="yes" onclick="event.stopPropagation(); dispatchFor('${t.agent}', 'approve')">核准</button>
-           <button class="no" onclick="event.stopPropagation(); dispatchFor('${t.agent}', 'reject')">駁回</button>`;
+        : `<button class="yes" onclick="event.stopPropagation(); pick('${t.agent}')">查看</button>`;
       row.innerHTML = `<span class="ileft" data-left="${t.left_s}" data-t0="${Date.now()}"></span>
         <span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">⏳ 審批 <b>${esc(t.tool)}</b> <code>${esc((t.params || '').slice(0, 90))}</code></span>${btns}`;
@@ -2164,14 +2164,14 @@ async function steer(text) {
   if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
 }
 
-async function dispatch(text) {
+async function dispatch(text, task) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
                            repo: $('repoSel').value.trim() || null,
                            model: $('modelSel').value || null,
-                           engine: $('engineSel').value || null }),
+                           engine: $('engineSel').value || null, task: task || null }),
   })).json();
   // 失敗要看得見：先前只有 11px 的灰字，實際回報「按了送出沒有反應」——其實是 cogito 沒開、派工被拒，
   // 但那行字跟平常的提示長得一樣。失敗改紅字並把原因講完；成功照舊。
@@ -3056,7 +3056,7 @@ async function feed() {
 
     const card = $('approvalCard');
     approvalOpen = !!r.approval;   // 球在老闆手上：feed 停止自動捲動與跟隨，畫面別動（見 keepBottom／revealTyping）
-    const sig = r.approval ? JSON.stringify([r.approval, r.approval_from, r.approval_meta && r.approval_meta.task_id]) : '';
+    const sig = r.approval ? JSON.stringify([r.approval, r.approval_from, r.approval_meta && r.approval_meta.task_id, r.approval_queued]) : '';
     if (r.approval && card.dataset.sig === sig) {
       card.style.display = 'block';   // 同一張審批：不重畫。每次 SSE 都會進來這裡，重建 innerHTML 等於按鈕在手指下被換掉
     } else if (r.approval) {
@@ -3066,20 +3066,23 @@ async function feed() {
       const btns = r.approval_from
         // 來自 Slack/TG 的審批只能回原平台按——這裡按了 cogito 也解不開（審批按頻道解析）
         ? `<div class="btns hint">↩︎ 這張審批來自 ${esc(r.approval_from)}，請回 ${esc(r.approval_from)} 回覆 approve / reject</div>`
-        : `<div class="btns"><button class="yes" onclick="dispatch('approve')">核准</button>
-        <button class="no" onclick="dispatch('reject')">駁回</button></div>`;
+        // 按鈕帶著【這張卡】的任務 ID（稽核 #5）：卡在你按之前換成排隊的下一張，橋會拒收，不會看 A 批 B
+        : `<div class="btns"><button class="yes" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('approve', this.dataset.task)">核准</button>
+        <button class="no" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('reject', this.dataset.task)">駁回</button></div>`;
+      const queued = r.approval_queued ? `<div class="tid">⏳ 還有 ${r.approval_queued} 張排隊——一次決定一張，處理完這張才會顯示下一張</div>` : '';
       const m = r.approval_meta;
       if (m) {
         // 結構化版面：橋已把 approval.go 的樣板拆好欄位，這裡只負責排，不再靠 markdown
         card.innerHTML = `<div class="ahead"><b>⚠️ 高危操作審批</b><span class="tool">${esc(m.tool)}</span>`
           + `<span class="left" id="apprLeft"></span></div>`
-          + `<pre class="code wrap"><code>${esc(apprParams(m.params))}</code></pre>`
-          + `<div class="tid">任務 ID：${esc(m.task_id)}</div>` + btns;
+          + `<pre class="code wrap"><code>${esc(showBlank(apprParams(m.params)))}</code></pre>`
+          + `<div class="tid">參數 ${[...m.params].length} 字元${/\s{20,}/.test(m.params) ? '・⚠ 含大段空白（已標成 ⟨N 個空白⟩，後面的內容都在上面）' : ''}</div>`
+          + `<div class="tid">任務 ID：${esc(m.task_id)}</div>` + queued + btns;
         apprDeadline = r.approval_left == null ? null : Date.now() + r.approval_left * 1000;
         tickAppr();
       } else {
         // 解析不了（樣板改版、舊狀態復原）：退回原文渲染——看得到永遠優先於排得漂亮
-        card.innerHTML = `<div class="tx"></div>` + btns;
+        card.innerHTML = `<div class="tx"></div>` + queued + btns;
         renderBody(card.querySelector('.tx'), r.approval, false);
         apprDeadline = null;
       }
@@ -3099,6 +3102,13 @@ function apprParams(p) {
       return '$ ' + o.command;
     return JSON.stringify(o, null, 2);
   } catch { return p; }
+}
+
+// 大段空白標出來（稽核 #5）：惡意指令最省事的藏法是塞幾百個空白或換行，把真正的內容擠到看不到的地方。
+// 標成「⟨N 個空白⟩」，整段參數一眼看完，不必相信自己有捲到底。
+function showBlank(t) {
+  return t.replace(/[ \t\u00a0\u3000]{8,}/g, m => ` ⟨${m.length} 個空白⟩ `)
+          .replace(/(\r?\n[ \t]*){4,}/g, m => `\n⟨${(m.match(/\n/g) || []).length} 個換行⟩\n`);
 }
 
 // 倒數：基準秒數由橋算（兩邊時鐘不同步，基準只能有一份），瀏覽器只負責往下數。

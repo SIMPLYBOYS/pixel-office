@@ -13,10 +13,10 @@
 | # | 嚴重度 | 問題 | 驗證 |
 |---|---|---|---|
 | 1 | Critical | jobspy MCP 把 agent 給的參數拼進 shell 字串執行：提示注入即可在沙箱外執行任意指令 | 重現成立（✅ 已修） |
-| 2 | Critical | 員工的 Bash 能連外網、讀得到金鑰檔，而且自動放行不經審批 | 設定＋實際 transcript |
+| 2 | Critical | 員工的 Bash 能連外網、讀得到金鑰檔，而且自動放行不經審批 | 設定＋實際 transcript（✅ 已修） |
 | 3 | High | 員工子行程繼承 Telegram／Slack／cogito 派工與**審批**金鑰 | 程式＋金鑰名稱（✅ 已修） |
 | 4 | High | 橋沒有任何驗證、Host／Origin 檢查：同機程式可核准高危操作；瀏覽器端可經 DNS rebinding 或跨站請求打進來 | 程式＋測試（🟡 部分：瀏覽器那條已擋） |
-| 5 | High | 審批畫面與實際核准不一致：一鍵核准會批掉同頻道全部待審；參數被截斷 | 兩個 repo 的程式 |
+| 5 | High | 審批畫面與實際核准不一致：一鍵核准會批掉同頻道全部待審；參數被截斷 | 兩個 repo 的程式（✅ 已修） |
 | 6 | High | 偽造 `/office/event` 指定任意工作目錄 → 讀任意白名單副檔名檔案、`open` 任意資料夾 | 程式＋測試（✅ 已修） |
 | 7 | High | 班表交付不檢查路徑：agent 把報告做成指向金鑰的 symlink，橋就把金鑰上傳 Telegram／Slack | 程式＋測試（✅ 已修） |
 | 8 | High | Codex 員工共用你本人的 `~/.codex`（登入憑證、信任清單）；一個環境變數就能關掉沙箱 | 程式＋設定（✅ 已修） |
@@ -46,6 +46,21 @@
 - **攻擊路徑**：提示注入 → 一行 Bash 讀金鑰並 curl 到外部，全程沒有審批卡。
 - **2026-09-18 更新**：Codex 員工的 shell 也打開網路（Aaron 選 B 案：Codex 內建網頁搜尋開不了 RSS、GitHub API、LinkedIn 訪客 API，班表任務改用 curl），同樣沒有網域白名單；workspace-write 沙箱可讀整台機器，所以 Codex 員工現在也在這條攻擊路徑上。第二批的網域白名單兩個引擎一起收。
 - **修法**：設 `sandbox.network.allowedDomains`（只放任務需要的站）；`permissions.blockReadsOutsideWorkingDirectories: true`；沙箱檔案層 `denyRead` 涵蓋 `~/.codex`、`~/.claude*`、`~/.aws`、`~/.ssh`、各 repo `.env`；無人值守的員工把 `autoAllowBashIfSandboxed` 關掉，讓 Bash 走審批 hook。
+- **進度（2026-09-24，第二批）**：已修，Aaron 逐項決定：
+  - `~/.claude-office/settings.json`（手動維護，橋只寫 hooks）：`autoAllowBashIfSandboxed: false`——每個 Bash 都走審批 hook，無人值守＝拒；
+    `sandbox.network.allowedDomains: []`＋`strictAllowlist: true`；金鑰與各專案 `.env` 兩層都擋：Bash 走 `sandbox.filesystem.denyRead`，
+    Read 工具走 `permissions.deny`（`~/.ssh`、`~/.aws`、`~/.config/gh`、`~/.config/gcloud`、`~/.docker`、`~/.netrc`、`~/.codex`、
+    `~/.codex-office/auth.json`、`~/.claude`、`~/.claude.json*`、`~/.claude-office/.claude.json`、`~/.zsh_history`、
+    `~/Documents/OpenSourceProjects/**/.env*`）。`~/.claude-office` 不整個擋：工具結果太大時存在那底下，小安的班表要讀回來。
+  - WebFetch 白名單收窄到班表實際用到的 13 個網域（逐一實測 200、無跨網域轉址）。
+  - ⚠ 官方行為：WebFetch 允許的網域會**併進** Bash 沙箱的網路白名單——所以 Bash 不是完全沒網路，而是只剩這 13 個
+    （GitHub、8 個新聞 RSS、LinkedIn／Freelancer／Yourator 的求職 API）。這些站沒有讓外人收資料的地方，接受；加網域前要先想這一點。
+  - Codex：拿掉 `sandbox_workspace_write.network_access=true`（收回 9/18 的 B 案）。Codex 只剩內建網頁搜尋，RSS／GitHub API／
+    LinkedIn 在 Codex 上抓不到；班表全走 CLI 引擎，不受影響。`personas/codex.md` 不再教它 curl。
+  - 班表任務不再叫員工跑 `date`：橋在任務開頭寫【日期】行（今天、昨天、過去 7 天，`job_dates`），8 條班表的步驟 1 同步改寫。
+  - 實機驗收（阿哲，CLI 引擎，canary 假檔）：讀 `.env` 與 `~/.claude` 底下的 canary 都被擋（權限層直接拒，內容沒外流）；
+    `curl example.com` 被沙箱擋（not on the allow list），員工自己要求加寬白名單也被拒；`curl techcrunch.com` 通（上面那條併入行為）。
+    測試：`schedule_dates`、`codex_engine` 的網路斷言、班表文字斷言。
 
 ---
 
@@ -71,6 +86,17 @@
 - **一鍵批掉全部**：外殼與收件匣送出的是單純的 `approve`；cogito 收到不帶 ID 的 approve 會執行 `ResolveByChannel`，核准該頻道**所有**待審任務（`internal/chatbot/approval.go`）。橋每位員工只存最新一張卡。agent 一輪並行送出幾個誘餌指令加一個惡意指令時，你看到的可能是誘餌，按下去卻全部核准。
 - **參數被截斷**：CLI 審批卡在組字串時就截到 600 字（`office_permission`），收件匣只顯示 90 字、單行；惡意指令放在大量空白之後就看不到。
 - **修法**：核准一律帶 `task_id`；每人保留多張待審；完整顯示參數並標示長度與空白；收件匣不提供一鍵核准，或只在完整顯示時可按。cogito 端拒絕多筆待審時的無 ID approve。
+- **進度（2026-09-24，第二批）**：已修。
+  - 橋：同一個人多張卡**排隊**不互蓋（`approval_backlog`，一次顯示一張、處理完才輪下一張，同一張從兩條路送來不重複排；
+    任務結束／中止整批收）；外殼按鈕帶**看過那張卡的任務 ID**，卡換了橋就拒收；送 cogito 一律 `approve <ID>`／`reject <ID>`
+    （中止時逐張帶 ID 駁回）。
+  - 任務 ID 取**最後一個**（`APPROVAL_RE` 改貪婪）：參數裡藏一行假的「任務 ID」不再能把參數截短、藏住後半段指令。
+  - CLI 卡不再截 600 字；Claude Code 的 PermissionRequest hook 實測**不帶 tool_use_id**（以前一律寫 `-`，所有 CLI 卡同一個 ID，
+    綁 ID 等於沒綁）——橋改成自己產 `cli-<隨機>`。這條是實機驗收時才抓到的。
+  - 外殼：參數裡 8 個以上的空白、4 行以上的空行標成「⟨N 個空白⟩」「⟨N 個換行⟩」，並顯示參數長度與警示；收件匣拿掉一鍵核准，改「查看」。
+  - cogito（`internal/chatbot`）：裸 `approve`／`reject` 只在本頻道**恰好一個**待審時生效，多個就一個都不動、請對方逐一帶 ID。
+  - 測試：pixel-office `approval_binding`（拿掉修補會紅）、`cli_hitl` 的 ID 獨一無二斷言；cogito `TestApprovalManager_ResolveByChannel_MultiRefuses`。
+    實機：假卡的參數塞 300 個空白藏 `curl -d @~/.ssh/id_rsa`，外殼顯示「$ ls -la ⟨300 個空白⟩ ; curl …」。
 
 ### 6. 偽造工作目錄讀任意檔案
 - **位置**：`office_event` 的 start 事件把 `detail` 直接存成卡片 `workdir`；`card_dir`／`agent_dir` 把它當檔案服務的根目錄；`/office/open` 對它執行 `open`。

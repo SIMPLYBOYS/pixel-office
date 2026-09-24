@@ -26,6 +26,7 @@ import sys
 import uuid
 import time
 from collections import deque
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1060,7 +1061,7 @@ async def force_stop(aid: str, how: str) -> None:
     stopped.add(aid)
     log_ev(aid, f"🧑‍💼 老闆中止了任務{how}")
     close_card(aid, "stopped")
-    clear_approval(aid)
+    clear_approval(aid, next_card=False)
     rate_state.pop(aid, None)
     await sync_emote(aid)      # 卡收了，頭上的問號／額度警示也要跟著下來
     await adjourn(aid)
@@ -1081,8 +1082,11 @@ async def tell_cogito_stop(aid: str) -> str:
             # 卡在審批時【先送駁回再送中止】：agent 這時阻塞在等審批，中止指令它根本讀不到，
             # 要等逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
             if aid in pending_approval:
-                await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
-                              headers=cogito_headers("reject"))
+                ids = [(approval_meta.get(aid) or {}).get("task_id")] + \
+                      [(parse_approval(c["text"]) or {}).get("task_id") for c in approval_backlog.get(aid, [])]
+                for tid in [i for i in ids if i] or [None]:
+                    await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": f"reject {tid}" if tid else "reject"},
+                                  headers=cogito_headers("reject"))
                 log_ev(aid, "🧑‍💼 中止前先駁回了待審批的操作")
             r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "/stop"},
                               headers={"Authorization": f"Bearer {COGITO_HTTP_TOKEN}"})
@@ -1106,13 +1110,15 @@ def approve_hint(verb: str, err: str) -> str:
             "卡留著不收（收掉會看起來像已經批准了）；要現在結束就按駁回或中止。")
 
 
-async def tell_cogito_reject(aid: str) -> str:
-    """把駁回轉給 cogito（best-effort）。回一句「實際發生了什麼」。"""
+async def tell_cogito_reject(aid: str, task_id: str | None = None) -> str:
+    """把駁回轉給 cogito（best-effort）。回一句「實際發生了什麼」。
+
+    帶任務 ID：只駁回這一張。cogito 收到不帶 ID 的 reject 會把整個頻道的待審一起處理。"""
     if not COGITO_HTTP:
         return "（未設 COGITO_HTTP——畫面收掉了，agent 那邊會等到逾時自動拒絕）"
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
-            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": "reject"},
+            r = await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": f"reject {task_id}" if task_id else "reject"},
                               headers=cogito_headers("reject"))
     except httpx.HTTPError as e:
         return f"（cogito 連不上：{type(e).__name__}——agent 那邊會等到逾時自動拒絕，結果一樣）"
@@ -1710,7 +1716,7 @@ async def office_event(ev: dict):
                 card["usage"] = {k: int(v) for k, v in ev["usage"].items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
             if card and isinstance(ev.get("api_equiv"), (int, float)) and not isinstance(ev.get("api_equiv"), bool) and ev["api_equiv"] > 0:
                 card["api_equiv"] = float(ev["api_equiv"])
-        clear_approval(aid)  # 任務結束，殘留審批卡（逾時自動拒絕）一併收掉
+        clear_approval(aid, next_card=False)  # 任務結束，殘留審批卡（逾時自動拒絕）與排隊的一併收掉
         rate_state.pop(aid, None)
         refresh_proposed(aid)   # 這一刻剛跑完 consolidate 的話，提案就是現在多出來的
         await sync_emote(aid)
@@ -1765,6 +1771,7 @@ def office_report(aid: str):
             "approval": pending_approval.get(aid, ""),
             "approval_meta": approval_meta.get(aid),
             "approval_left": left,
+        "approval_queued": len(approval_backlog.get(aid, [])),   # 排隊中的下一張：外殼提示「還有 N 張」
             "approval_from": approval_from(aid),  # 非空＝要回該平台核准，外殼不給按鈕
             "timeline": card["events"],  # Unity ReportViewer 相容：最新卡的事件串
             "history": [with_subcards(t) for t in history.get(aid, [])]}
@@ -1812,10 +1819,17 @@ pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell �
 # 審批卡是 approval.go 的固定樣板——收卡時就解析成結構化欄位，外殼直接排版面（工具一顆
 # chip、參數整段折行、任務 ID 降級成小字、逾時做成倒數），不用靠 markdown 碰運氣。
 # 解析不了（樣板改版、舊狀態檔復原的卡）就退回原文渲染——結構化是加分，不是門檻。
-APPROVAL_RE = re.compile(r"• 工具: `([^`]+)`\n• 參數: `?(.*?)`?\n任務 ID: `([^`]+)`", re.S)
+# 參數用貪婪比對、任務 ID 取【最後一個】（稽核 #5）：參數是 agent 給的，懶惰比對時它只要在參數裡藏一行
+# 「任務 ID: `假的`」，解析就停在那裡——畫面上的參數被截短、真正的指令藏在後面，核准送出的還是假 ID。
+# cogito 永遠把真的 ID 接在參數後面，所以最後一個才是它的。
+APPROVAL_RE = re.compile(r"• 工具: `([^`]+)`\n• 參數: `?(.*)\n任務 ID: `([^`]+)`", re.S)
 APPROVAL_TIMEOUT_RE = re.compile(r"(\d+)\s*分鐘內無響應")
 approval_meta: dict[str, dict] = {}   # npc id -> {tool, params, task_id, timeout_s}
 approval_at: dict[str, float] = {}    # npc id -> 收卡的牆鐘時間（倒數的起點）
+# 同一個人的第二張以後的卡（稽核 #5）。cogito 一輪會平行跑好幾個工具呼叫，危險的每個各開一張卡；
+# 以前新卡直接蓋掉舊卡——舊的那張在 cogito 那邊還在等，畫面上卻沒了，一句不帶 ID 的 approve 就全部放行。
+# 現在一次只顯示一張、其餘排隊，處理完一張才輪下一張。
+approval_backlog: dict[str, list[dict]] = {}   # npc id -> [{"agent": 來源會話, "text": 卡片原文}]
 
 
 def parse_approval(text: str) -> dict | None:
@@ -1823,16 +1837,31 @@ def parse_approval(text: str) -> dict | None:
     if not m:
         return None
     t = APPROVAL_TIMEOUT_RE.search(text)
-    return {"tool": m.group(1), "params": m.group(2).strip(), "task_id": m.group(3),
+    params = m.group(2).strip()
+    params = params[:-1].rstrip() if params.endswith("`") else params   # 樣板的收尾反引號
+    return {"tool": m.group(1), "params": params, "task_id": m.group(3),
             "timeout_s": int(t.group(1)) * 60 if t else 300}
 
 
-def clear_approval(aid: str) -> None:
-    """收審批卡（四份狀態一起收——漏一份就是下一個「卡收了倒數還在跑」的 bug）。"""
+def clear_approval(aid: str, next_card: bool = True) -> None:
+    """收審批卡（四份狀態一起收——漏一份就是下一個「卡收了倒數還在跑」的 bug）。
+
+    next_card：這張處理完了，排隊的下一張接著顯示。任務結束或中止時傳 False——整件事都沒了，
+    排著的卡在上游也跟著失效，留著只會出現一張永遠按不掉的幽靈卡。"""
     pending_approval.pop(aid, None)
     approval_src.pop(aid, None)
     approval_meta.pop(aid, None)
     approval_at.pop(aid, None)
+    if not next_card:
+        approval_backlog.pop(aid, None)
+    elif q := approval_backlog.get(aid):
+        nxt = q.pop(0)
+        if not q:
+            approval_backlog.pop(aid, None)
+        try:
+            asyncio.get_running_loop().create_task(office_chat(nxt))
+        except RuntimeError:   # 沒有事件迴圈（例：狀態復原時）：放回去，下一次有人處理時再輪
+            approval_backlog.setdefault(aid, []).insert(0, nxt)
 stopped: set[str] = set()             # 剛被使用者按中止的人——收尾事件到達時別再喊一次「中斷」
 pending_note: dict[str, str] = {}     # npc id -> 等下一張任務卡開出來才掛上去的「老闆交辦」
 # npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
@@ -1876,6 +1905,20 @@ async def office_chat(ev: dict):
         return {"ok": False}
     if text.startswith(PROGRESS_PREFIXES):
         return {"ok": True}
+    if text.startswith(APPROVAL_PREFIX) and aid in pending_approval:
+        new_id = (parse_approval(text) or {}).get("task_id")
+        seen = {(approval_meta.get(aid) or {}).get("task_id")} | \
+               {(parse_approval(q["text"]) or {}).get("task_id") for q in approval_backlog.get(aid, [])}
+        if new_id and new_id in seen:
+            return {"ok": True}   # 同一張卡從兩條路送來（office 平台＋鏡像），不重複排——顯示中的與排隊中的都算
+        approval_backlog.setdefault(aid, []).append({"agent": ev.get("agent", ""), "text": text})
+        m = parse_approval(text) or {}
+        audit("approval.asked", aid, tool=m.get("tool"), params=str(m.get("params") or "")[:300], task_id=m.get("task_id"),
+              source=ev.get("agent", ""), queued=len(approval_backlog[aid]),
+              engine=ENGINE_CLI if aid in cli_procs else ENGINE_COGITO)
+        log_ev(aid, f"⚠ 又一個操作在等審批（排第 {len(approval_backlog[aid])} 張）——前一張處理完才會顯示，一次決定一張")
+        notify("roster", aid, alert="approval")
+        return {"ok": True, "queued": len(approval_backlog[aid])}
     if text.startswith(APPROVAL_PREFIX):
         pending_approval[aid] = text
         approval_src[aid] = ev.get("agent", "")
@@ -3262,14 +3305,14 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
     - 工具對照（personas/codex.md）也走 developer_instructions、每次都帶：AGENTS.md 在 Codex 裡是 user 訊息，
       排在任務文前面；實測任務文的「不要用 curl」蓋過了寫在 AGENTS.md 的對照。developer 訊息的優先序高於 user。
     - MCP：照抄員工 profile 的 mcpServers。網頁：開內建網頁搜尋（Claude Code 的 WebFetch／WebSearch 對應它，見 personas/codex.md）。
-    - shell 可連網（2026-09-18 Aaron 選的 B 案）：實測內建網頁搜尋開不了 RSS（不支援 rss+xml）、GitHub API（not safe to open）、
-      LinkedIn 訪客 API（restricted URL），而班表任務全靠這些。WebFetch 在 Codex 上對應 curl（見 personas/codex.md）。
-      ⚠ 等同安全稽核 #2 的 Claude Code 員工現況：沒有網域白名單，第二批一起收。
+    - shell 不連網（稽核 #2，2026-09-24 Aaron 決定收回 9/18 的 B 案）：Codex 的網路只有全開／全關、沒有網域白名單，
+      workspace-write 沙箱又讀得到整台機器——開著就是「讀金鑰＋送出去」一條龍。代價：內建網頁搜尋開不了 RSS、
+      GitHub API、LinkedIn 訪客 API，這些來源在 Codex 上做不到（班表全走 CLI 引擎，不受影響）。
     - MCP 核准：exec 模式的審批政策是 never，沒設就一律擋（實測：「MCP tool call requires approval」）。
       跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的照樣被擋。
     - 你本人的 ~/.agents/skills 關掉：Claude Code 員工看不到它們；實測 firecrawl 技能寫著「MUST replace WebFetch and WebSearch」，
       直接跟辦公室的工具對照打架。Codex 自己內建的技能（CODEX_HOME 底下）不動。"""
-    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"', "-c", "sandbox_workspace_write.network_access=true",
+    out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"',
            # 辦公室的記憶制度是「提案→老闆放行」（cogito 那套）。Codex 自己的記憶沒有放行關卡、也投影不到畫面，
            # 所以明確關掉——上游目前預設就是關的，但那是上游的預設，不是我們的決定。
            "-c", "features.memories=false"]
@@ -3703,8 +3746,10 @@ async def office_permission(d: dict):
             return {"behavior": "deny", "message": "前一張審批一直沒處理完，這一個等到逾時，拒絕"}
         await asyncio.sleep(0.3)
     # 沿用 cogito 審批卡的樣板：parse_approval 的正則、外殼的版面、倒數，全部不用改
-    text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params[:600]}`\n"
-            f"任務 ID: `{d.get('tool_use_id') or '-'}`\n"
+    # 每張卡都要有獨一無二的 ID（稽核 #5：決定綁在看過的那張卡上）。Claude Code 的 PermissionRequest hook 實測不帶
+    # tool_use_id，以前一律寫 '-'——所有 CLI 卡同一個 ID，卡換了也分不出來，綁 ID 等於沒綁。
+    text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params}`\n"
+            f"任務 ID: `{d.get('tool_use_id') or 'cli-' + uuid.uuid4().hex[:12]}`\n"
             f"👉 直接回復 `approve` / `reject` 即可。{max(1, int(CLI_APPROVAL_S // 60))} 分鐘內無響應將自動拒絕。")
     await office_chat({"agent": f"office:{aid}", "text": text})
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -4524,6 +4569,11 @@ async def office_dispatch(d: dict):
     # 擋住插話等於把「糾正走偏」的唯一選項留給「殺掉重來」。
     if verb in ("approve", "reject") and (src := approval_from(aid)):
         return {"ok": False, "error": f"這張審批來自 {src}，請回 {src} 核准（cogito 按頻道解析審批）"}
+    # 決定綁在【你看到的那張卡】上（稽核 #5）：外殼按鈕帶著卡上的任務 ID，卡在你按下去之前換了（排隊的下一張
+    # 補上來）就不算數——不然看的是 A、批的是 B。聊天框手打的 approve 不帶 ID，就是當下這張。
+    cur_task = (approval_meta.get(aid) or {}).get("task_id")
+    if verb in ("approve", "reject") and (want := str(d.get("task") or "")) and cur_task and want != cur_task:
+        return {"ok": False, "error": "你看的那張審批卡已經換成下一張了——請先看過新的這張再決定"}
     if aid in busy and verb not in ("approve", "reject", "/stop", "/steer"):
         return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
     # 插話只在工作中有意義。閒著時不代發成新任務——那會把「糾正」靜默升級成「開工」。
@@ -4571,8 +4621,9 @@ async def office_dispatch(d: dict):
     # rm -rf 已經授權執行了，實際上 agent 會等到逾時然後【自動拒絕】——那是相反的結果。
     # 寧可卡留著、明講送不出去（見下面轉發失敗的訊息）。
     if verb == "reject" and aid in pending_approval and aid not in cli_permission:
-        audit("approval.rejected", aid, by="office-web", why=text[len("reject"):].strip()[:200], engine=ENGINE_COGITO)
-        how = await tell_cogito_reject(aid)
+        audit("approval.rejected", aid, by="office-web", why=text[len("reject"):].strip()[:200], engine=ENGINE_COGITO,
+              task_id=cur_task)
+        how = await tell_cogito_reject(aid, cur_task)
         clear_approval(aid)
         await sync_emote(aid)                # 頭上的倒數餅圖跟著收
         notify("agent", aid, alert="done")
@@ -4669,6 +4720,9 @@ async def office_dispatch(d: dict):
         if isinstance(bound, str):
             return {"ok": False, "error": bound}
         text = with_repo(text, bound[0], repo["path"], bound[1])
+    why = text[len(verb):].strip() if verb in ("approve", "reject") else ""
+    if verb in ("approve", "reject") and cur_task:
+        text = f"{verb} {cur_task}"   # cogito 把 approve 後面的字當任務 ID；理由只記在帳本
     try:
         async with httpx.AsyncClient(timeout=5) as cl:
             # model：員工的屬性（persona 的 model 欄位），跟任務一起送。空＝不動 cogito
@@ -4705,7 +4759,7 @@ async def office_dispatch(d: dict):
         await bubble(aid, "📨 插話")
     elif verb in ("approve", "reject"):
         audit("approval.approved" if verb == "approve" else "approval.rejected", aid, by="office-web",
-              why=text[len(verb):].strip()[:200], engine=ENGINE_COGITO)
+              why=why[:200], engine=ENGINE_COGITO, task_id=cur_task)
         clear_approval(aid)  # cogito 確認收到才收卡
         await sync_emote(aid)                # 決定做了，頭上的問號立刻收（不等 sweep）
         notify("agent", aid, alert="done")   # 決定送出去了：給個回饋，不然按完毫無反應
@@ -4908,6 +4962,15 @@ def report_today(aid: str, job: dict, day: str) -> Path | None:
     return p if p.is_file() else None
 
 
+def job_dates(day: str) -> str:
+    """班表任務開頭的日期行。以前叫員工自己用 Bash 跑 date——但班表是無人值守，Bash 要審批就一律被拒（稽核 #2
+    關掉自動放行之後），日期由橋算好寫進任務文，員工照用就好。"""
+    d = date.fromisoformat(day)
+    week = [(d - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    return (f"【日期】今天 {day}，昨天 {week[-2]}；含今天在內的過去 7 天：{'、'.join(week)}。"
+            "（橋填的，照用；不要自己推算，也不要用 Bash 跑 date。）\n\n")
+
+
 async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是老闆派的") -> dict:
     """派一張班表任務——到點與老闆手動補跑都走這裡，守門只寫一次：
     今天那份報表已經在了就不重跑（橋在 9:00 不在、10:00 補跑、隔天 9:00 又到點，都靠這條）。
@@ -4927,7 +4990,7 @@ async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是�
         return {"ok": False, "error": "人在忙，這輪跳過"}
     # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
     # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
-    r = await office_dispatch({"agent": aid, "text": job["text"], "repo": job.get("repo"),
+    r = await office_dispatch({"agent": aid, "text": job_dates(stamp[:10]) + job["text"], "repo": job.get("repo"),
                                "engine": job.get("engine"), "scheduled": True})
     if r.get("ok"):
         # 這一刻新卡還沒開，直接 log_ev 會掛在上一張卡的尾巴（實測：卡 237 尾巴多了一行 239 的開跑）。
@@ -5263,7 +5326,7 @@ def save_state() -> None:
     data = {"history": {a: list(cards) for a, cards in history.items()},
             "conv_npc": conv_npc, "pending_approval": pending_approval,
             "approval_src": approval_src,
-            "approval_meta": approval_meta, "approval_at": approval_at,
+            "approval_meta": approval_meta, "approval_at": approval_at, "approval_backlog": approval_backlog,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
             "model_sent": model_sent, "cogito_pick": cogito_pick, "cli_pick": cli_pick,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
@@ -5303,6 +5366,7 @@ def load_state() -> None:
     approval_src.update(data.get("approval_src", {}))
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
+    approval_backlog.update(data.get("approval_backlog", {}))
     sched_last.update(data.get("sched_last", {}))
     if "cli_pick" in data:
         model_sent.update(data.get("model_sent", {}))
