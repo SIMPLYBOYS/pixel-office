@@ -18,7 +18,9 @@ Slack/Telegram, named subagents, HITL approvals, cost circuit breakers). Pixel O
 into employees you can watch, and approvals you can sign. Set `COGITO_OFFICE_URL=http://localhost:8123` on the cogito side; on the
 same machine it sends the bridge token automatically. The event protocol is specified in cogito's
 [docs/office-protocol.md](https://github.com/SIMPLYBOYS/cogito-agent/blob/main/docs/office-protocol.md).
-The Claude Code and Codex engines work without cogito.
+The Claude Code and Codex engines work without cogito. The shell's ⚙ dispatch settings pick the engine, model and
+thinking effort per employee (remembered until reset): Claude Code's `--effort` (low–max), Codex's `model_reasoning_effort`
+(the levels each model lists). cogito's task endpoint doesn't take an effort yet.
 
 ## Video tour
 

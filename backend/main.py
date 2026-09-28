@@ -2082,6 +2082,8 @@ async def office_event(ev: dict):
                 card["run"] = str(ev["run"])   # 引擎自帶的執行 id（cogito）；CLI／Codex 用卡號本身
             # 回溯的鑰匙：哪個引擎、哪條 session、幾點開始。有了它，卡片才連得到完整紀錄。
             card["engine"] = str(ev.get("engine") or ENGINE_COGITO)
+            if ev.get("effort"):
+                card["effort"] = str(ev["effort"])[:10]   # 這一次用的思考力度（卡上跟模型並排顯示）
             card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
             card["ts"] = time.time()
             audit("task.start", aid, card=card["id"], engine=card["engine"], session=card["session"],
@@ -3549,7 +3551,8 @@ def cli_done_events(d: dict) -> list[dict]:
     return out
 
 
-async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False) -> None:
+async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
+                       effort: str = "", notes: tuple = ()) -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
@@ -3585,9 +3588,13 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # 那是它的預設，不是我們該替它決定的事。
     if model:
         argv += ["--model", model]
+    if effort:
+        argv += ["--effort", effort]   # 同理：沒選就不帶，用 Claude Code 自己的預設
     await office_event({"v": 1, "agent": aid, "kind": "start",
                         "label": text[:80], "detail": str(base),
-                        "engine": ENGINE_CLI, "session": cli_session_of[aid]})   # 回溯用
+                        "engine": ENGINE_CLI, "session": cli_session_of[aid], "effort": effort})   # 回溯用
+    for n in notes:   # 派工時的說明（型號、力度沒照選的用）：要等這張卡開了才寫得進來，派工當下寫會掛到上一張卡
+        log_ev(aid, n)
     # 這一次執行＝剛開出來的那張卡（稽核筆記 P0）。之後每個事件都帶著它：中止後才到的收尾、
     # 被砍掉的舊行程吐出來的 done，都只能作用在自己那張卡，碰不到老闆接著派的新任務。
     run = (last_report.get(aid) or {}).get("id")
@@ -3960,8 +3967,18 @@ def codex_model_list() -> list[dict]:
             continue
         ms = [m for m in (data.get("models") or []) if isinstance(m, dict) and m.get("slug") and m.get("visibility", "list") == "list"]
         ms.sort(key=lambda m: (m.get("priority") if isinstance(m.get("priority"), int) else 999, str(m["slug"])))
-        return [{"id": str(m["slug"]), "name": str(m.get("display_name") or m["slug"]), "description": str(m.get("description") or "")} for m in ms]
+        return [{"id": str(m["slug"]), "name": str(m.get("display_name") or m["slug"]), "description": str(m.get("description") or ""),
+                 # 這個型號收哪些 reasoning effort、沒指定時用哪個（Codex 自己的清單寫的；gpt-5.5 只到 xhigh，新的到 ultra）
+                 "efforts": [str(x.get("effort")) for x in m.get("supported_reasoning_levels") or [] if isinstance(x, dict) and x.get("effort")],
+                 "default_effort": str(m.get("default_reasoning_level") or "")} for m in ms]
     return []
+
+
+def codex_effort_for(aid: str, model: str) -> str:
+    """Codex 這次帶哪個力度：選過的，而且這個型號收（清單查不到型號就不擋——交給 Codex 判斷）；否則空＝它的預設。"""
+    want = codex_effort_pick.get(aid, "")
+    known = next((m["efforts"] for m in codex_model_list() if m["id"] == model), [])
+    return want if want and (not known or want in known) else ""
 
 
 def codex_rollout(tid: str) -> Path | None:
@@ -4032,7 +4049,8 @@ def codex_events(d: dict) -> list[dict]:
     return out
 
 
-async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False) -> None:
+async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
+                         effort: str = "", notes: tuple = ()) -> None:
     """在員工工作區跑 `codex exec --json`，事件翻成 office 事件（投影同 run_cli_task）。"""
     base = cwd or agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
     if base is None:
@@ -4048,9 +4066,13 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     argv = [CODEX_CMD, "exec", "--json", "--skip-git-repo-check", "-s", CODEX_SANDBOX, "-C", str(base), *codex_parity_args(aid, base)]
     if want:
         argv += ["-m", want]
+    if effort:
+        argv += ["-c", f"model_reasoning_effort={effort}"]
     argv += ["resume", tid, "-"] if tid else ["-"]   # 提示從 stdin 送（長文、換行都安全）
     await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80], "detail": str(base),
-                        "engine": ENGINE_CODEX, "session": tid})
+                        "engine": ENGINE_CODEX, "session": tid, "effort": effort})
+    for n in notes:   # 同 run_cli_task：派工時的說明寫進【這張】卡
+        log_ev(aid, n)
     # 這一次執行＝剛開出來的那張卡（稽核筆記 P0）。之後每個事件都帶著它：中止後才到的收尾、
     # 被砍掉的舊行程吐出來的 done，都只能作用在自己那張卡，碰不到老闆接著派的新任務。
     run = (last_report.get(aid) or {}).get("id")
@@ -4873,9 +4895,10 @@ def engine_of(aid: str, override: str = "") -> str:
 # resume：接回上次的對話（cogito 斷點續跑、CLI --resume、Codex 接回 thread）；approval：高危操作停下來等老闆；
 # steer：工作中插話；subagents：派子 agent（看板主持人一定要）。
 ENGINE_CAPS = {
-    ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True},
-    ENGINE_CLI: {"name": "Claude Code", "resume": True, "approval": True, "steer": True, "subagents": True},
-    ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": False, "steer": False, "subagents": False},
+    # effort：派工時能不能指定思考力度（Claude Code --effort、Codex model_reasoning_effort；cogito 的 /task 目前不收）
+    ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": False},
+    ENGINE_CLI: {"name": "Claude Code", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": True},
+    ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": False, "steer": False, "subagents": False, "effort": True},
 }
 CAP_LABEL = {"steer": "插話", "approval": "審批", "subagents": "子 agent"}   # 會缺的那幾項，講給人聽的名字
 IN_FLIGHT = ("approve", "reject", "/stop", "/steer")   # 任務進行中的互動（不是派新任務）
@@ -4890,6 +4913,11 @@ def running_engine(aid: str) -> str:
 model_sent: dict[str, str] = {}   # aid -> cogito 那邊 office 頻道現在的模型設定（橋最後一次告訴它的；""＝cogito 預設；沒有這個鍵＝不知道）
 cogito_pick: dict[str, str] = {}  # aid -> 外殼替 cogito 選過的模型（記住，直到「還原」）
 cli_pick: dict[str, str] = {}     # aid -> 外殼替 Claude Code 選過的模型（只收 Claude 型號；跟 cogito、Codex 的分開）
+# 思考力度（effort）：跟模型同一套——外殼替這個人選過的，各引擎各一份、選了記住、「還原」收回；沒選＝不帶，交給引擎自己的預設。
+CLI_EFFORTS = ["low", "medium", "high", "xhigh", "max"]   # `claude --help` 的 --effort 列舉
+EFFORT_RE = re.compile(r"^[a-z]{2,10}$")   # Codex 的等級看型號（models_cache 列的）；這裡只擋怪字（它要進 -c 的 TOML 值）
+cli_effort_pick: dict[str, str] = {}      # aid -> 外殼替 Claude Code 選過的力度
+codex_effort_pick: dict[str, str] = {}    # aid -> 外殼替 Codex 選過的力度
 # 三個引擎的型號互不相通（Claude Code 只跑 Claude、Codex 只跑 OpenAI、cogito 看它自己的 provider），
 # 所以清單、記住的選擇、預設都各自一份。2026-09-17 以前共用一份：cogito 改走 OpenAI 後，Claude Code 的選單裡列的是 GPT。
 
@@ -5025,6 +5053,8 @@ async def office_models():
             "codex_mcp": list(office_mcp_servers()),   # Codex 員工拿到的 MCP（照抄 Claude Code 員工的），外殼講出來
             "engines": {aid: engine_of(aid) for aid in agents},
             "engine_caps": ENGINE_CAPS,   # 外殼的按鈕、提示、選單都照這張（跟派工檢查同一份）
+            # 思考力度：Claude Code 的固定列舉；Codex 的看型號（codex_list 每個型號的 efforts／default_effort）
+            "cli_efforts": CLI_EFFORTS, "cli_effort": dict(cli_effort_pick), "codex_effort": dict(codex_effort_pick),
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
 
@@ -5337,6 +5367,9 @@ async def office_dispatch(d: dict):
                     "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
         # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
+        epick = str(d.get("effort") or "").strip().lower()   # 思考力度：同一套規則（CLI_EFFORTS／codex_effort_for）
+        if epick and epick != MODEL_RESET and not EFFORT_RE.match(epick):
+            return {"ok": False, "error": f"不認得的思考力度：{epick[:20]}"}
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         if codex_mode:
@@ -5349,19 +5382,39 @@ async def office_dispatch(d: dict):
                 codex_model_sent[aid] = pick
                 _dirty = True
             codex_want = codex_model_sent.get(aid, "")
-            asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled"))))
-            return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want}
+            if epick == MODEL_RESET:
+                codex_effort_pick.pop(aid, None)
+                _dirty = True
+            elif epick:
+                codex_effort_pick[aid] = epick
+                _dirty = True
+            eff = codex_effort_for(aid, codex_want)
+            notes = ((f"ℹ {codex_want or 'Codex 預設型號'} 不收思考力度 {codex_effort_pick[aid]}，這次用它自己的預設",)
+                     if codex_effort_pick.get(aid) and not eff else ())
+            asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes))
+            return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want, "effort": eff}
         if pick == MODEL_RESET:
             cli_pick.pop(aid, None)
             _dirty = True
         elif pick and is_claude_model(pick):
             cli_pick[aid] = pick
             _dirty = True
-        elif pick:
-            log_ev(aid, f"ℹ Claude Code 跑不了 {pick}，這次沿用 {cli_model_for(aid) or 'Claude Code 預設'}")
+        notes = []   # 沒照選的用：說明等新卡開了才寫（run_cli_task），派工當下寫會掛到上一張卡
+        if pick and pick != MODEL_RESET and not is_claude_model(pick):
+            notes.append(f"ℹ Claude Code 跑不了 {pick}，這次沿用 {cli_model_for(aid) or 'Claude Code 預設'}")
         cli_want = cli_model_for(aid)
-        asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled"))))
-        return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want}
+        if epick == MODEL_RESET:
+            cli_effort_pick.pop(aid, None)
+            _dirty = True
+        elif epick in CLI_EFFORTS:
+            cli_effort_pick[aid] = epick
+            _dirty = True
+        elif epick:
+            notes.append(f"ℹ Claude Code 沒有「{epick}」這個思考力度，這次沿用 {cli_effort_pick.get(aid) or 'Claude Code 預設'}")
+        cli_eff = cli_effort_pick.get(aid, "")
+        asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
+                                         notes=tuple(notes)))
+        return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want, "effort": cli_eff}
     if cli_mode:
         if verb in ("approve", "reject"):
             why = text[len(verb):].strip()
@@ -6029,6 +6082,7 @@ def save_state() -> None:
             "approval_meta": approval_meta, "approval_at": approval_at, "approval_backlog": approval_backlog,
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
             "model_sent": model_sent, "cogito_pick": cogito_pick, "cli_pick": cli_pick,
+            "cli_effort_pick": cli_effort_pick, "codex_effort_pick": codex_effort_pick,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
@@ -6087,6 +6141,8 @@ def load_state() -> None:
     codex_model.update(data.get("codex_model", {}))
     codex_threads.update(data.get("codex_threads", {}))
     codex_model_sent.update(data.get("codex_model_sent", {}))
+    cli_effort_pick.update(data.get("cli_effort_pick", {}))
+    codex_effort_pick.update(data.get("codex_effort_pick", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。

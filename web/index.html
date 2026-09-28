@@ -709,6 +709,11 @@
         <select id="modelSel"></select>
         <span class="note" id="modelNote"></span>
       </div>
+      <div class="crew" id="effortRow" hidden>
+        <label for="effortSel">思考力度</label>
+        <select id="effortSel"></select>
+        <span class="note" id="effortNote"></span>
+      </div>
       <div class="crew" id="repoRow" hidden>
         <label for="repoSel">工作 repo</label>
         <!-- 用 input+datalist 而不是 select：實測掃得到 288 個 repo，下拉選單在那個量級
@@ -1241,13 +1246,14 @@ function updateComposer() {
   }
   paintModelRow(a, workingNow);
   paintEngineRow(a, workingNow);
+  paintEffortRow(workingNow);   // 在引擎、模型之後：Codex 的等級看選了哪個型號
   paintCfgSummary();
   cmdscard();
 }
 
 // 設定收起來時，不能讓人不知道這次會用什麼跑：引擎、模型、repo 一律寫在按鈕上；
 // 任何一排有警告（⚠：cogito 沒開、Codex 要登入、repo 名字打錯…）就在按鈕前面帶 ⚠，不藏進面板裡。
-const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
+const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'effortRow', 'repoRow'];
 
 // ── 右欄分頁 ─────────────────────────────────────────────────────────────
 // 分頁跟著資料走：面板沒資料（hidden）就沒有那一頁，跟面板原本「有資料才出現」同一個原則。
@@ -1496,6 +1502,8 @@ function paintCfgSummary() {
   if (!$('engineRow').hidden) parts.push(label($('engineSel')).replace(/（.*）$/, ''));
   // 模型選項常帶著引擎名（「Claude Code 預設（opus-5[1m]）」）：前面已經寫了引擎，這裡去掉重複的那段
   if (!$('modelRow').hidden) parts.push(label($('modelSel')).replace(/^(Claude Code|Codex|cogito)\s*/, ''));
+  if (!$('effortRow').hidden && !$('effortSel').disabled && $('effortSel').value)
+    parts.push('力度 ' + label($('effortSel')).replace(/（.*）$/, ''));
   if (!$('repoRow').hidden) parts.push($('repoSel').value.trim() || '不綁 repo');
   if (!$('crew').hidden) parts.push($('crewN').value ? `${$('crewN').value} 位` : '人數自動');
   const warn = shown.some(r => [...r.querySelectorAll('.note')].some(n => n.textContent.includes('⚠')))
@@ -1670,6 +1678,51 @@ function paintCodexModelRow(workingNow) {
     + (desc ? `（${desc}）` : '')
     + (used ? `　上次實際跑的是 ${used}` : '')
     + (list.length ? '' : '　（還沒拿到 Codex 的模型清單：先用 Codex 跑一次就會有）');
+}
+
+// 思考力度（effort）：Claude Code 的 --effort、Codex 的 model_reasoning_effort。跟模型同一套——選了記住（各引擎各一份）、
+// 「還原」收回；沒選＝引擎自己的預設。Codex 的等級看型號（它自己的清單寫的：gpt-5.5 只到 xhigh、新的到 ultra）。
+// cogito 的派工入口還不收：整排停用、講清楚，不讓人選了沒作用。
+const EFFORT_NAME = { minimal: '最省', low: '低', medium: '中', high: '高', xhigh: '很高', max: '最高', ultra: '極限' };
+function paintEffortRow(workingNow) {
+  const row = $('effortRow'), sel = $('effortSel');
+  const eng = $('engineRow').hidden ? 'cogito' : $('engineSel').value;
+  row.hidden = !selected || !modelInfo.engine_caps;
+  if (row.hidden) return;
+  const reset = modelInfo.reset || 'reset';
+  if (!engCaps(eng).effort) {
+    sel.innerHTML = '<option value="">—</option>'; sel.dataset.sig = ''; sel.disabled = true;
+    $('effortNote').textContent = `${engCaps(eng).name || eng} 的派工入口還不收思考力度（要改 ${engCaps(eng).name || eng}）——改選 Claude Code 或 Codex 才能指定`;
+    return;
+  }
+  const codex = eng === 'codex';
+  const picked = (codex ? modelInfo.codex_effort : modelInfo.cli_effort)?.[selected] || '';
+  let levels = modelInfo.cli_efforts || [], dflt = '', model = '';
+  if (codex) {
+    const m = $('modelSel').value;
+    model = m && m !== reset ? m : (modelInfo.codex_effective?.[selected] || modelInfo.codex_default || '');
+    const info = (modelInfo.codex_list || []).find(x => x.id === model);
+    levels = info?.efforts?.length ? info.efforts : ['low', 'medium', 'high'];   // 查不到型號：只給大家都有的三級
+    dflt = info?.default_effort || '';
+  }
+  const want = [['', `${codex ? 'Codex' : 'Claude Code'} 預設${dflt ? `（${EFFORT_NAME[dflt] || dflt}）` : ''}`]]
+    .concat(levels.map(l => [l, `${EFFORT_NAME[l] || l}（${l}）`]));
+  if (picked && !levels.includes(picked)) want.push([picked, `${picked}（這個型號不收，會用預設）`]);
+  if (picked) want.push([reset, '↺ 還原預設']);
+  const sig = eng + '|' + selected + '|' + want.map(x => x[0]).join(',');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = want.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    sel.dataset.sig = sig;
+    sel.value = picked;   // 預選記住的那個——選過之後畫面要看得出來
+  }
+  sel.disabled = workingNow;
+  sel.onchange = () => updateComposer();
+  const pick = sel.value;
+  $('effortNote').textContent =
+    pick === reset ? '這次派工收回選過的力度，改用預設'
+    : pick && pick !== picked ? `這次派工改用 ${pick}——會記住，之後可選「還原」收回`
+    : pick ? `目前會用 ${pick}`
+    : `沒指定：交給 ${codex ? 'Codex' + (model ? `（${model}）` : '') : 'Claude Code'} 自己的預設`;
 }
 
 function paintModelRow(a, workingNow) {
@@ -2347,7 +2400,8 @@ async function dispatch(text, task, resume) {
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
                            repo: $('repoSel').value.trim() || null,
                            model: $('modelSel').value || null,
-                           engine: $('engineSel').value || null, task: task || null, resume: resume ?? null }),
+                           engine: $('engineSel').value || null, task: task || null, resume: resume ?? null,
+                           effort: $('effortRow').hidden || $('effortSel').disabled ? null : ($('effortSel').value || null) }),
   })).json();
   // 失敗要看得見：先前只有 11px 的灰字，實際回報「按了送出沒有反應」——其實是 cogito 沒開、派工被拒，
   // 但那行字跟平常的提示長得一樣。失敗改紅字並把原因講完；成功照舊。
@@ -3209,7 +3263,7 @@ function sync(el, t, bodySel, live) {
   const rg = el.querySelector(':scope > summary .trange');
   // cost_est＝單價是估的（模型未登記定價）：標一個 ~，別讓估計值長得跟實價一樣
   rg.textContent = when(t) + (t.cost > 0 ? `｜${t.cost_est ? '~' : ''}$${t.cost.toFixed(4)}` : '')
-    + (t.model ? `｜${shortModel(t.model)}` : '');
+    + (t.model ? `｜${shortModel(t.model)}` : '') + (t.effort ? `・${t.effort}` : '');
   rg.title = [t.model && `主 agent 實際跑在 ${t.model}（子 agent 可能各用各的）`,
               t.cost_est && '⚠ 這個模型沒登記單價，金額是用保守估價換算的——token 數是真的，單價可能差好幾倍']
              .filter(Boolean).join('\n');

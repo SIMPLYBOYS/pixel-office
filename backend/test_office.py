@@ -1652,6 +1652,30 @@ for o in out:
                 # 選了會記住（Claude Code 自己一份，跟 cogito、Codex 分開）
                 assert main.cli_pick.get("p05") == "claude-haiku-4-5" and "p05" not in main.cogito_pick, (main.cli_pick, main.cogito_pick)
 
+                # 【思考力度】選了就帶 --effort、會記住、卡上記著這次用的；不認得的等級不帶；還原收回
+                def cli_run(body):
+                    main.busy.discard("p05")
+                    b = (main.last_report.get("p05") or {}).get("id")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "engine": "cli", **body}).json()
+                    for _ in range(100):
+                        time.sleep(0.05)
+                        cur = main.last_report.get("p05")
+                        if cur and cur.get("id") != b and cur["status"] != "working":
+                            break
+                    return r, argv_log.read_text(encoding="utf-8").splitlines()[-1]
+                r, sent = cli_run({"text": "想深一點", "effort": "max"})
+                assert r["effort"] == "max" and "--effort max" in sent and main.cli_effort_pick["p05"] == "max", (r, sent)
+                assert main.last_report["p05"].get("effort") == "max", "卡上要記這次用的力度"
+                r, sent = cli_run({"text": "沒選力度"})
+                assert "--effort max" in sent, f"選過的要記住：{sent}"
+                r, sent = cli_run({"text": "亂填", "effort": "ultra"})
+                assert "--effort max" in sent and main.cli_effort_pick["p05"] == "max", "Claude Code 沒有 ultra：不換、沿用"
+                assert any("沒有「ultra」" in e["text"] for e in main.last_report["p05"]["events"]), "說明要寫在這一張卡上"
+                r, sent = cli_run({"text": "還原", "effort": main.MODEL_RESET})
+                assert "--effort" not in sent and "p05" not in main.cli_effort_pick, sent
+                bad = c.post("/office/dispatch", json={"agent": "p05", "engine": "cli", "text": "x", "effort": "hi=1;x"}).json()
+                assert bad["ok"] is False and "思考力度" in bad["error"], bad
+
                 # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
                 # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
                 # cogito-agent（實際回報的症狀）。這條把「兩件事要能同時成立」釘住。
@@ -2670,7 +2694,7 @@ def schedule_jobs() -> None:
         cli_sent: list[tuple[str, str, bool]] = []
         cli_cwd: list = []
 
-        def fake_cli(aid, text, cwd=None, model="", fresh=False):
+        def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=()):
             cli_sent.append((aid, text, fresh)); cli_cwd.append(cwd)
             async def _noop(): pass
             return _noop()
@@ -3121,7 +3145,7 @@ def schedule_manual_run() -> None:
     import tempfile
     cli_sent: list[str] = []
 
-    def fake_cli(aid, text, cwd=None, model="", fresh=False):
+    def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=()):
         cli_sent.append(aid)
         async def _noop(): pass
         return _noop()
@@ -3800,6 +3824,23 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 run({"text": "還原", "model": main.MODEL_RESET})
                 a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
                 assert a[a.index("-m") + 1] == "gpt-test-model" and "p05" not in main.codex_model_sent, f"還原後回到接續那條的模型：{a}"
+                # 思考力度：看型號收不收（models_cache 的 supported_reasoning_levels）。收就帶 -c model_reasoning_effort=…
+                (Path(tmp) / "codexhome" / "models_cache.json").write_text(json.dumps({"models": [
+                    {"slug": "gpt-luna", "display_name": "Luna", "visibility": "list", "priority": 8,
+                     "default_reasoning_level": "low", "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]}]}),
+                    encoding="utf-8")
+                luna = c.get("/office/models").json()["codex_list"][0]
+                assert luna["efforts"] == ["low", "high"] and luna["default_effort"] == "low", luna
+                run({"text": "想深一點", "model": "gpt-luna", "effort": "high"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert a[a.index("-c", a.index("-m")) + 1] == "model_reasoning_effort=high" and main.codex_effort_pick["p05"] == "high", a
+                run({"text": "這型號不收 max", "effort": "max"})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert not any(x.startswith("model_reasoning_effort") for x in a), f"型號不收的力度不能送：{a}"
+                assert any("不收思考力度 max" in e["text"] for e in main.last_report["p05"]["events"]), "要講為什麼沒用"
+                run({"text": "還原", "model": main.MODEL_RESET, "effort": main.MODEL_RESET})
+                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                assert not any(x.startswith("model_reasoning_effort") for x in a) and "p05" not in main.codex_effort_pick, a
                 # 不支援的明講：插話、看板
                 main.busy.add("p05")
                 r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 補一句"}).json()
