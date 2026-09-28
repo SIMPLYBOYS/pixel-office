@@ -12,6 +12,7 @@ public class NavGrid : MonoBehaviour
 
     static Vector2 Center(int c, int r) => new(c + 0.5f, -(r + 0.5f));
     static (int c, int r) Cell(Vector2 p) => (Mathf.FloorToInt(p.x), Mathf.FloorToInt(-p.y));
+    public static bool SameCell(Vector2 a, Vector2 b) => Cell(a) == Cell(b);
 
     (int c, int r)? Nearest((int c, int r) cell)
     {

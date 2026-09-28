@@ -74,7 +74,8 @@ public static class RoomBuilder
         "=============",
         "=============",   // 北外牆（房間在南側→畫成立面）
         "=TTTTT.=.TTT.",   // 左：櫃檯（訪客站 x5、(5,2) 盆栽）｜ 右：會議室。x12 不設牆：
-        "=TTTT..=.TTT.",   //   辦公區自己的西牆就在旁邊 (13,*)，再放一格就是兩道平行的牆
+        "=TT....=.TTT.",   //   辦公區自己的西牆就在旁邊 (13,*)，再放一格就是兩道平行的牆
+                           //   (3,3)(4,3)＝總機的崗位與出口（2026-09-29：櫃檯右半拿掉，小安要能走動，見 compose_room D1_CUTS）
         "=TTTT..=.TTT.",   //   夾一條走不進去的地板縫（同 (12,6) 那個教訓，整欄適用）
         "=............",   // ← 門內走廊，(12,5) 接辦公區
         "=............",   // (12,6) 刻意【不】設牆：辦公區自己的西牆就在旁邊那格(13,6)，
@@ -183,12 +184,17 @@ public static class RoomBuilder
         ("meet_a1@sit_right", 8, 2), ("meet_a2@sit_right", 8, 3), ("meet_a3@sit_right", 8, 4),
         ("meet_b1@sit_left", 12, 2), ("meet_b2@sit_left", 12, 3), ("meet_b3@sit_left", 12, 4),
         ("reception_1@face_left", 5, 3),  // 櫃檯前（訪客站這裡，面向櫃檯）
+        ("reception_seat@face_down", 3, 3),   // 總機的崗位（櫃檯後）：位置不在格心，見 Nudge
         ("entrance@face_up", 6, 9),       // 大門【外】側：進出的人站這裡，也是開門的觸發點
         ("lobby_1", 4, 11), ("lobby_2", 8, 11),      // 訪客等候區
         ("vending_1", 11, 10), ("cooler_2", 2, 13),   // 販賣機／飲水機前
     };
 
     // 建房與驗證都用這一份：辦公區位移後 ⊕ 西區原樣。合併在這裡做一次，別讓呼叫端各自加 OfficeX。
+    // 不在格心的 waypoint（格心＋位移，單位＝格）。總機的崗位要對準櫃檯 sprite 上挖的洞（compose_room 的 D1_HOLES），
+    // 格心會讓她沉到桌面後面、只剩頭。NavGrid 只走到格心，最後一小段由 NPCMover.MoveTo 補；其他 waypoint 一律在格心。
+    static readonly Dictionary<string, Vector2> Nudge = new() { ["reception_seat@face_down"] = new Vector2(0.25f, 0.4375f) };
+
     static IEnumerable<(string name, int cx, int cy)> AllWaypoints() =>
         OfficeWaypoints.Select(w => (w.name, w.cx + OfficeX, w.cy)).Concat(WestWaypoints);
 
@@ -365,7 +371,8 @@ public static class RoomBuilder
         {
             var wp = new GameObject(name);
             wp.transform.SetParent(wps.transform);
-            wp.transform.position = new Vector3(cx + 0.5f, -(cy + 0.5f), 0);
+            var off = Nudge.TryGetValue(name, out var n) ? n : Vector2.zero;
+            wp.transform.position = new Vector3(cx + 0.5f + off.x, -(cy + 0.5f) + off.y, 0);
         }
 
         ValidateWaypoints();

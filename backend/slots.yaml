@@ -8,7 +8,8 @@
 # side    別人委派他時，委派者站在他桌邊的 waypoint。
 # sit     回座後的姿勢；省略＝sit_up（背對鏡頭入座）。
 # gift    交件時遞出去的方向；省略＝gift_right（從桌子往站位那側遞）。
-# fixed   崗位固定、不走位（櫃檯被四面圍住，沒有走得出去的口）——以前寫在小安的人設裡，其實是位子的性質。
+# fixed   崗位固定、不走位：走位一律換成姿勢。位子的性質，不是人的。目前沒有位子用它——櫃檯以前被四面圍住，
+#         2026-09-29 開了出口（compose_room D1_CUTS、RoomBuilder West (3,3)(4,3)），小安跟大家一樣會走動。
 # pool    false＝不進動態指派池（頻道自動配人、會議代打都不找這個位子）。
 slots:
   - {id: p17, label: 上排工位 1, desk: chair_1, side: side_1}
@@ -18,4 +19,4 @@ slots:
   - {id: p12, label: 下排工位 2, desk: chair_5, side: side_5, gift: gift_left}
   - {id: p08, label: 下排工位 3, desk: chair_6, side: side_6}
   - {id: p19, label: 老闆房, desk: boss_seat, side: boss_1, sit: sit_left, gift: gift_left}
-  - {id: p10, label: 櫃檯, sit: face_down, gift: gift_down, fixed: true, pool: false}
+  - {id: p10, label: 櫃檯, desk: reception_seat, side: reception_1, sit: face_down, gift: gift_right, pool: false}

@@ -3565,9 +3565,14 @@ def state_save_retry() -> None:
 
 
 def stay_put() -> None:
-    """崗位固定的人（總機小安，人設 post: fixed）：走位一律換成姿勢——回工位＝面向櫃檯、等審批＝在櫃檯掏手機、
-    idle 不抽 waypoint；出錯往前閃紅、遞交往前遞；只給 Unity 回報的人開生活迴圈。"""
+    """崗位固定的位子（slots.yaml 的 fixed）：走位一律換成姿勢——回工位＝面向前方、等審批＝當場掏手機、
+    idle 不抽 waypoint；出錯往前閃紅；只給 Unity 回報的人開生活迴圈。
+    目前沒有位子用 fixed（櫃檯 2026-09-29 開了出口，小安會走動）——機制保留，這裡臨時把她的位子標成 fixed 來測。"""
     cmds: list[dict] = []
+    real_slot = main.SLOTS["p10"]
+    assert not main.stays_put("p10") and main.WORK_DESK["p10"] == "reception_seat", "小安現在要會走動、有自己的崗位"
+    assert main.DESK_SIDE["p10"] == "reception_1" and main.GIFT_TOWARD["p10"] == "gift_right", "找她的人站櫃檯前、她往東遞"
+    main.SLOTS["p10"] = {**real_slot, "fixed": True}
 
     async def spy(cmd):
         cmds.append(cmd); return True
@@ -3575,7 +3580,7 @@ def stay_put() -> None:
     main.arrived.setdefault("p10", asyncio.Event()); main.arrived.setdefault("p01", asyncio.Event())
     try:
         assert main.stays_put("p10") and not main.stays_put("p01") and not main.stays_put("kanban")
-        assert main.hurt_of("p10") == "hurt_down" and main.GIFT_TOWARD["p10"] == "gift_down"
+        assert main.hurt_of("p10") == "hurt_down"
         asyncio.run(main.goto("p10", main.BOSS_DOOR))
         assert cmds == [{"agent_id": "p10", "action": "use", "target": "face_down"}], f"固定崗位不該送 move_to：{cmds}"
         cmds.clear(); main.pending_approval["p10"] = "x"
@@ -3598,7 +3603,8 @@ def stay_put() -> None:
         assert (n, m) == (2, 1), f"只給畫面上有的人開迴圈：{(n, m)}"
     finally:
         main.send_cmd = old_send; main.pending_approval.pop("p10", None); main.occupied.pop("p01", None)
-    print("  ✓ 固定崗位：走位換姿勢、只給畫面上的人開迴圈")
+        main.SLOTS["p10"] = real_slot
+    print("  ✓ 固定崗位：走位換姿勢、只給畫面上的人開迴圈；小安本人會走動")
 
 
 def isolation_at_import() -> None:
@@ -4784,7 +4790,7 @@ def team_setup() -> None:
             t = c.get("/office/team").json()
             assert t["configured"] and len(t["slots"]) == len(main.SLOTS) == 8, t
             recep = next(x for x in t["slots"] if x["id"] == "p10")
-            assert recep["fixed"] and not recep["pool"], "櫃檯的固定崗位、不進指派池是位子的性質（slots.yaml）"
+            assert not recep["fixed"] and not recep["pool"], "櫃檯：不進指派池是位子的性質（slots.yaml）；2026-09-29 起不再是固定崗位"
             tpl = {x["key"]: x for x in c.get("/office/team/templates").json()["templates"]}
             assert {"demo", "software"} <= set(tpl) and len(tpl["software"]["members"]) == 8, list(tpl)
 
@@ -5244,12 +5250,20 @@ def life_sim() -> None:
         old_wl, main.waypoint_list = main.waypoint_list, [main.RECEPTION_FRONT, "lobby_1", "lobby_2"]
         main.walk = rec_walk
         main.in_world.add("p10"); main.last_chat["at"] = -1e9; main.pair_chat.clear()
+        real_slot = main.SLOTS["p10"]
         try:
+            # 小安現在會走動（2026-09-29 櫃檯開了出口）：聊天跟大家一樣，一起去面對面的位子
             assert asyncio.run(main.life_chat(rec, a, main.OWN_DESK)) is True
-            assert walked == [("p05", main.RECEPTION_FRONT)], f"櫃檯的人不能被叫出來：{walked}"
+            assert ("p10", "lobby_1") in walked, f"小安要能被拉去聊天：{walked}"
+            # 固定崗位的機制保留（目前沒有位子用）：臨時標成 fixed，找她聊的人走到櫃檯前、她自己不動
+            walked.clear(); main.occupied.clear(); main.last_chat["at"] = -1e9; main.pair_chat.clear()
+            main.SLOTS["p10"] = {**real_slot, "fixed": True}
+            assert asyncio.run(main.life_chat(rec, a, main.OWN_DESK)) is True
+            assert walked == [("p05", main.RECEPTION_FRONT)], f"固定崗位的人不能被叫出來：{walked}"
         finally:
+            main.SLOTS["p10"] = real_slot
             main.walk, main.waypoint_list = fake_walk, old_wl
-            main.in_world.discard("p10"); main.occupied.pop("p05", None)
+            main.in_world.discard("p10"); main.occupied.pop("p05", None); main.occupied.pop("p10", None)
 
         # ④-3 辦公室太安靜（一開機也算）：有人起身去找同事聊兩句，聊完回去做自己那段；剛聊過就不會
         main.last_chat["at"] = -1e9; main.pair_chat.clear()

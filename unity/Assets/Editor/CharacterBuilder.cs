@@ -62,12 +62,11 @@ public static class CharacterBuilder
         Debug.Log($"CharacterBuilder: {Personas.Length + 1} 個 NPC 完成（含總機）");
     }
 
-    // 總機小姐（小安，p10）：崗位在櫃檯後那一格——櫃檯叢集 obj_03 的書架、檯面、螢幕桌把那格四面圍住，
-    // 美術上沒有走得出去的口，碰撞圖也是家具格（'T'）。所以她【不走位】：不掛 FakeBrain／NPCSeparation、
-    // 不掛實體碰撞（在牆的 collider 裡會被物理推出去），Rigidbody 設 Kinematic 只為了 NPCMover 能用。
+    // 總機小姐（小安，p10）：崗位在櫃檯後那一格（waypoint reception_seat）。2026-09-29 起她會走動：櫃檯右半拿掉
+    // （compose_room D1_CUTS），碰撞圖 (3,3)(4,3) 打開，往東跨一格就出得去。她還是不掛實體碰撞與 NPCSeparation——
+    // 崗位緊貼著書架與桌面的格子，實體碰撞會被推離崗位；Rigidbody 設 Kinematic，照 NavGrid 的路走，不會穿牆。
     // 其他都跟員工一樣：NPCSprite 的全套姿勢（接電話、看書、趴睡、遞交、受傷）、徽章、泡泡、對話框、NPCAgent。
-    // 橋端用人設的 post: fixed 知道她不走位，走位一律換成姿勢（backend stays_put）。
-    // 出生點刻意不過 Walkable 驗證：位置對準櫃檯 sprite 上挖的洞（D1_HOLES）：世界 px x52-68、腳底 y49 → (60/16, -49/16)。
+    // 出生點＝崗位：對準櫃檯 sprite 上挖的洞（D1_HOLES）：世界 px x52-68、腳底 y49 → (60/16, -49/16)，不在格心（見 RoomBuilder.Nudge）。
     const string ReceptionPrefix = "p10";
     static readonly Vector3 ReceptionPost = new(3.75f, -3.0625f, 0);
 

@@ -18,7 +18,7 @@
 所以 setup 不是「新增幾個人」，而是「這 8 個工位啟用幾個、每個坐什麼角色」。
 
 - **工位定義** `backend/slots.yaml`（進 git）：外觀代號（= 角色 id，例 `p17`）、座位、協作時的站位、坐姿、遞交方向、
-  是不是固定崗位（櫃檯）、進不進動態指派池。以前這些寫死在 `main.py`（`WORK_DESK`、`DESK_SIDE`、`SIT_AT`、`GIFT_TOWARD`）
+  是不是固定崗位（以前的櫃檯；2026-09-29 開了出口，目前沒有位子用）、進不進動態指派池。以前這些寫死在 `main.py`（`WORK_DESK`、`DESK_SIDE`、`SIT_AT`、`GIFT_TOWARD`）
   與 `p10.yaml`（`post: fixed`、`pool: false`——那是**櫃檯這個位子**的性質，不是人的）。
 - **角色（persona）**：名字、職務、團隊、個性、說話風格、習慣、引擎、模型、Claude Code 代號（slug）、唯讀、
   子 agent 角色對應（`sub_roles`，取代寫死的 `SUB_NPC`）、「找他問什麼」（`ask`，給看板的成員表）。

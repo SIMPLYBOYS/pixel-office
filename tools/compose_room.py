@@ -472,6 +472,10 @@ def main():
     # 從這個洞透出來。洞比西裝男的補丁窄——兩側維持補出來的書架，只挖她身體的寬度。
     # Y-sort 讓櫃檯（pivot 更南）畫在她前面：桌面遮腰、書架遮兩側，唯獨洞裡看得到她。
     D1_HOLES = {"obj_03": (36, 19, 52, 41)}
+    # 總機的出口（2026-09-29，Aaron：小安要能在辦公室走動、跟大家互動，不是坐著不動）：整座【右邊的書架】與
+    # 桌面右端拿掉，桌子收在她身旁——她從左書架裡的崗位往東跨一格就出得去（RoomBuilder 的 West (3,3)(4,3) 同步打開）。
+    # (清掉的欄 x0–x1, 收邊：把原本桌子右端的描邊欄 src 貼到新的右端欄 dst，列 y0–y1)
+    D1_CUTS = {"obj_03": (54, 64, 61, 53, 41, 56)}
 
     def d1_sprite(obj):
         im = read_png(f"{D1}/{obj}.png")
@@ -487,6 +491,14 @@ def main():
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     im[y][x] = (0, 0, 0, 0)
+        if obj in D1_CUTS:
+            x0, x1, src, dst, y0, y1 = D1_CUTS[obj]
+            orig, im = im, [r[:] for r in im]
+            for y in range(y0, y1):
+                im[y][dst] = orig[y][src]
+            for row in im:
+                for x in range(x0, min(x1, len(row))):
+                    row[x] = (0, 0, 0, 0)
         return im
 
     def place_px(name, img, x, y):
