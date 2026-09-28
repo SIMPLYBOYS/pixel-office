@@ -18,7 +18,7 @@ import yaml
 LIFE_MODEL = os.environ.get("OFFICE_LIFE_MODEL", "").strip() or "claude-haiku-4-5"
 # 每百萬 token 的美元（Haiku 4.5：輸入、輸出、寫快取、讀快取）。換成別的模型要跟著改，預算才算得準。
 PRICE = {"in": 1.0, "out": 5.0, "cache_w": 1.25, "cache_r": 0.10}
-MEM_MAX = 80        # 記憶流上限（舊的先掉）
+MEM_MAX = 80        # 記憶流上限：塞滿時先丟瑣事（見 remember）
 LINE_MAX = 20       # 一句話上限：泡泡 8 字一行，20 字＝三行
 PLAN_MIN, PLAN_MAX = 5, 45   # 行程一段幾分鐘
 PLAN_TOTAL = 240             # 一份行程最長幾分鐘
@@ -150,7 +150,10 @@ class Agent:
     def remember(self, text: str, imp: int = 3, kind: str = "obs") -> None:
         """imp：1＝走到哪、做什麼（瑣事），3＝一般，5＝聊天心得，6–7＝工作與驗收，8＝反思。"""
         self.memory.append({"t": time.time(), "text": text, "imp": imp, "kind": kind})
-        del self.memory[:-MEM_MAX]
+        if len(self.memory) > MEM_MAX:
+            # 塞滿了先丟最舊的瑣事（走到哪、做什麼，imp≤2）；聊天、工作、心得留著。以前是照順序丟最舊的——
+            # 實測八成是瑣事，三、四個小時就塞滿，重要的也一起被擠掉，記憶效應只剩幾小時。全是重要的才丟最舊的。
+            del self.memory[next((i for i, m in enumerate(self.memory) if m["imp"] <= 2), 0)]
         self.since_reflect += imp
 
     @property

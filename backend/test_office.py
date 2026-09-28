@@ -5264,6 +5264,17 @@ def life_sim() -> None:
             main.random = old_rand
             main.life_quiet.discard("p05")
 
+        # ④-4 記憶塞滿時先丟瑣事：重要的（聊天、工作、心得）記得比瑣事久；全是重要的才丟最舊的
+        m = life.Agent("p05", main.TEAM_DIR)
+        m.remember("老闆驗收通過了「競品表」", imp=7, kind="work")
+        for k in range(life.MEM_MAX + 20):
+            m.remember(f"瑣事 {k}", imp=1)
+        assert m.memory[0]["text"] == "老闆驗收通過了「競品表」" and len(m.memory) == life.MEM_MAX, m.memory[:2]
+        assert m.memory[1]["text"] == "瑣事 21", "瑣事要從最舊的開始丟"
+        for k in range(life.MEM_MAX):
+            m.remember(f"聊天 {k}", imp=5, kind="chat")
+        assert m.memory[0]["text"] == "聊天 0" and len(m.memory) == life.MEM_MAX, "全是重要的：丟最舊的"
+
         # ⑤ 反思：空的心得丟掉，心得的重要度最高
         a.since_reflect = 99
         asyncio.run(main.life_reflect(a))

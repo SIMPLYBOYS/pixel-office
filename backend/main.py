@@ -256,8 +256,7 @@ async def handle_event(evt: dict) -> None:
     elif kind == "arrived":
         aid = evt.get("agent_id", "")
         if aid in agents:
-            agents[aid].location = evt.get("at", "?")
-            agents[aid].remember(f"到了{evt.get('at')}", imp=1)
+            agents[aid].location = evt.get("at", "?")   # 不記進記憶：「到了 chair_6」沒有資訊量，只會把記憶流塞滿
             arrived[aid].set()
     else:
         print("事件:", evt)
