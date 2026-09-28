@@ -546,6 +546,7 @@ def run() -> None:
     late_done_race()
     task_chain()
     verdict_flow()
+    engine_caps_flow()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -1344,7 +1345,8 @@ def stop_always_works() -> None:
         # ① CLI 引擎、沒有行程可砍（卡片來自手打事件或上個行程留下的）
         main.busy.discard("p05")
         main.engine_sent["p05"] = main.ENGINE_CLI
-        post(c, agent="p05", kind="start", label="停不掉的任務")
+        # 卡上記著 cli：中止跟著【正在跑的】引擎走，不是設定面板（沒帶 engine 的事件是 cogito 的卡）
+        post(c, agent="p05", kind="start", label="停不掉的任務", engine=main.ENGINE_CLI)
         assert "p05" in main.busy
         r = stop(c, "p05")
         assert r["ok"], f"沒有 CLI 行程也必須停得掉：{r}"
@@ -5068,6 +5070,52 @@ def _verdict_flow(aid: str, ws: Path) -> None:
         dv = next(x for x in h["evidence"] if x["kind"] == "deliver")
         assert h["verdict"] == "pending" and dv["state"] == "fail" and "沒有產出" in dv["text"], h["evidence"]
         h.pop("verdict")
+
+
+def engine_caps_flow() -> None:
+    """引擎能力表（Paperclip 比較筆記第三批）：能力寫在一處，指令頁、派工檢查、外殼都照它；
+    工作中的互動（中止、插話、審批）跟著【正在跑的】引擎走，不是設定面板現在選的。"""
+    with TestClient(main.app) as c:
+        cmds = lambda aid, eng: {x["cmd"].strip() for x in c.get(f"/office/commands?agent={aid}&engine={eng}").json()["items"]}
+        # ① 指令頁照能力表列：有插話才列 /steer、有審批才列 approve、能派子 agent 的看板才列「開工」
+        for eng, cap in main.ENGINE_CAPS.items():
+            got = cmds("p05", eng)
+            assert ("/steer" in got) == cap["steer"] and ("approve" in got) == cap["approval"] and "/stop" in got, (eng, got)
+            assert any("開工" in x for x in cmds(main.KANBAN, eng)) == cap["subagents"], eng
+        # ② 能力只改一處：Codex 補上插話 → 指令頁跟著列、說明不再寫「不支援插話」
+        main.ENGINE_CAPS[main.ENGINE_CODEX]["steer"] = True
+        try:
+            r = c.get("/office/commands?agent=p05&engine=codex").json()
+            assert "/steer" in {x["cmd"].strip() for x in r["items"]} and not any("插話" in n for n in r["notes"]), r
+        finally:
+            main.ENGINE_CAPS[main.ENGINE_CODEX]["steer"] = False
+        assert c.get("/office/models").json()["engine_caps"]["codex"]["approval"] is False
+        # ③ cogito 跑到一半，老闆把設定面板改選 Claude Code：中止要叫停的是 cogito（以前只收卡、沒叫停）
+        aid = "p07"
+        main.busy.discard(aid); main.stopped.discard(aid); main.clear_approval(aid)
+        called: list[str] = []
+
+        async def fake_stop(a):
+            called.append(a)
+            return "（已叫停 cogito）"
+        old = (main.tell_cogito_stop, main.COGITO_HTTP, main.cli_available, main.codex_available, main.codex_blocked)
+        main.tell_cogito_stop, main.COGITO_HTTP = fake_stop, "http://cogito.invalid"
+        main.cli_available = main.codex_available = lambda: True
+        main.codex_blocked = lambda: ""
+        try:
+            post(c, agent=aid, kind="start", label="cogito 在跑的事")   # 沒帶 engine＝cogito 的卡
+            assert c.get("/agents").json()[aid]["running"] == "cogito"
+            r = c.post("/office/dispatch", json={"agent": aid, "text": "/stop", "engine": "cli"}).json()
+            assert r["ok"] and called == [aid], (r, called)
+            assert c.get("/agents").json()[aid]["running"] == "", "收工後就沒有正在跑的引擎"
+            # ④ Codex 在跑、面板選 cogito：插話要被擋（照 Codex 的能力），不是送去 cogito
+            post(c, agent=aid, kind="start", label="Codex 在跑的事", engine=main.ENGINE_CODEX)
+            r = c.post("/office/dispatch", json={"agent": aid, "text": "/steer 換個方向", "engine": "cogito"}).json()
+            assert r["ok"] is False and "Codex" in r["error"] and "不支援插話" in r["error"], r
+            post(c, agent=aid, kind="done", label="ok", engine=main.ENGINE_CODEX)
+        finally:
+            main.tell_cogito_stop, main.COGITO_HTTP, main.cli_available, main.codex_available, main.codex_blocked = old
+            main.busy.discard(aid); main.engine_sent.pop(aid, None)
 
 
 if __name__ == "__main__":

@@ -1160,8 +1160,11 @@ function updateComposer() {
   // 先前一律包成 /steer：打 approve 變成一句插話、打 /steer xxx 變成 /steer /steer xxx。
   const verbOf = t => (t.split(/\s/)[0] || '').toLowerCase();
   const AS_IS = { '/stop': '中止', approve: '核准', reject: '駁回' };
+  // 正在跑的引擎不收插話（能力表）：輸入框關掉、按鈕只剩中止——打了字才被拒，等於白打
+  const noSteer = workingNow && engCaps(a.running).steer === false;
+  box.disabled = noSteer;
   const paint = () => {
-    const t = box.value.trim(), v = verbOf(t);
+    const t = noSteer ? '' : box.value.trim(), v = verbOf(t);
     btn.textContent = !workingNow ? '送出' : !t ? '中止' : AS_IS[v] || '📨 插話';
     btn.classList.toggle('stop', workingNow && (!t || v === '/stop'));
   };
@@ -1169,7 +1172,7 @@ function updateComposer() {
   box.oninput = paint;
   // 中止與插話都立刻生效（中止是反悔、插話搶的就是時機），只有派工走反悔窗
   btn.onclick = () => {
-    const t = box.value.trim(), v = verbOf(t);
+    const t = noSteer ? '' : box.value.trim(), v = verbOf(t);
     if (!workingNow) return queueSend(box.value);
     if (!t) return dispatch('/stop');
     if (v === '/steer') return t.slice(6).trim() ? steer(t.slice(6).trim()) : undefined;   // 已經帶前綴：別再包一次
@@ -1201,7 +1204,9 @@ function updateComposer() {
       ? '一位＝不開會，直接請他給意見；spec 與板子照樣會寫'
       : sel.value ? '這是上限，人選仍由主持人判斷' : '';
   }
-  box.placeholder = workingNow
+  box.placeholder = noSteer
+    ? `⏳ ${a.name} 工作中——${engCaps(a.running).name} 不收插話，要補充就等收工再派；按「中止」停下這件事`
+    : workingNow
     ? (isMode ? '⏳ 協作進行中——打字可「插話」給主持人糾正方向（不中止），或按「中止」停下整場'
               : `⏳ ${a.name} 工作中——打字可「插話」糾正方向（不中止），或按「中止」停下這件事`)
     : (isMode ? '描述一件要整隊完成的任務——會先開會、收斂成 spec，再分工…'
@@ -1253,7 +1258,9 @@ const cmdsCache = {};   // key → {r, t}：一分鐘有效（引擎裝了什麼
 async function cmdscard() {
   const box = $('cmds');
   if (!selected) { box.hidden = true; return; }
-  const eng = $('engineRow').hidden ? '' : $('engineSel').value;   // 設定面板裡選了哪個引擎，就列那個引擎的
+  const a = agentsData[selected] || {};
+  // 工作中列【正在跑的】引擎能收的指令；閒著時列設定面板選的那個（下一件要派給它）
+  const eng = a.running || ($('engineRow').hidden ? '' : $('engineSel').value);
   const key = selected + '|' + eng;
   let r = cmdsCache[key] && Date.now() - cmdsCache[key].t < 60000 ? cmdsCache[key].r : null;
   if (!r) {
@@ -1262,7 +1269,6 @@ async function cmdscard() {
     if (!r.ok) { box.hidden = true; return; }
     cmdsCache[key] = { r, t: Date.now() };
   }
-  const a = agentsData[selected] || {};
   const now = { busy: !!a.busy, approval: !!a.approval, idle: !a.busy };
   const cp = r.caps || {};
   const sig = JSON.stringify([key, now, cp.source || cp.note || '', (cp.skills || []).length, (cp.slash || []).length]);
@@ -1503,6 +1509,10 @@ $('cfgPanel').addEventListener('input', paintCfgSummary);
 // 模型選單（觀察 ③：外殼要能臨時換模型）。清單與「目前實際會用哪個」都來自橋，前端不寫死
 // 型號——cogito 不驗證 model id，打錯只會讓下個任務報錯燒掉一輪，所以給選單不給自由輸入。
 let modelInfo = { models: [], reset: 'reset', effective: {} };
+// 引擎能力表（Paperclip 比較筆記第三批）：跟派工的檢查同一份，/office/models 帶來。缺什麼就事先講、按鈕就不給，不讓人按了才被拒
+const CAP_LABEL = { steer: '插話', approval: '審批', subagents: '子 agent' };
+const engCaps = eng => (modelInfo.engine_caps || {})[eng] || {};
+const lacks = eng => Object.keys(CAP_LABEL).filter(k => engCaps(eng)[k] === false).map(k => CAP_LABEL[k]);
 async function loadModels() {
   try { modelInfo = await (await fetch('/office/models')).json(); } catch { /* 拿不到就不畫 */ }
   if (modelInfo.codex_login_needed && codexLogin.status === 'idle') {   // 重新整理頁面時登入可能還在等：接回去
@@ -1518,6 +1528,7 @@ function paintEngineRow(a, workingNow) {
   row.hidden = !(modelInfo.cli || modelInfo.codex || modelInfo.codex_login_needed);   // 兩個 CLI 都找不到就一個像素都不多（入口資料驅動）
   if (row.hidden) return;
   for (const o of sel.options) {   // 找不到的引擎不給選（Claude Code 與 Codex 各自判斷）
+    o.disabled = false;
     if (o.value === 'cli') o.hidden = !modelInfo.cli;
     if (o.value === 'codex') {
       // 只差登入：照樣可選，選了旁邊出現「登入 Codex」。安全條件不符（沙箱被關、指到你本人的 ~/.codex）：
@@ -1526,6 +1537,10 @@ function paintEngineRow(a, workingNow) {
       o.disabled = !modelInfo.codex && !modelInfo.codex_login_needed;
       o.textContent = modelInfo.codex ? 'Codex（ChatGPT 訂閱）' : modelInfo.codex_login_needed ? 'Codex（需登入）' : 'Codex（未啟用）';
       o.title = modelInfo.codex_blocked || '';
+    }
+    if (selected === 'kanban' && engCaps(o.value).subagents === false) {   // 看板主持人要派子 agent
+      o.disabled = true;
+      o.title = `看板主持人要派子 agent，${engCaps(o.value).name} 引擎還沒接`;
     }
   }
   if (!sel.dataset.bound) {
@@ -1548,10 +1563,10 @@ function paintEngineRow(a, workingNow) {
     // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
     $('engineNote').textContent = (modelInfo.codex_login_needed
       ? '還沒登入 Codex：按下面的按鈕，用瀏覽器登入你的 ChatGPT 帳號（員工用自己的一份登入，不碰你本人的 ~/.codex）'
-      : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止，暫不支援插話與審批`
+      : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止${lacks('codex').length ? '，暫不支援' + lacks('codex').join('、') : ''}`
         // 工具講出來：Codex 員工的 MCP 照抄 Claude Code 員工的，網頁走 Codex 內建搜尋（任務裡的 WebFetch／WebSearch 對應它）
         + `；工具：網頁搜尋、shell 可連網${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
-      + (selected === 'kanban' ? '　⚠ 看板暫不支援 Codex' : '');
+      + (selected === 'kanban' && engCaps('codex').subagents === false ? '　⚠ 看板暫不支援 Codex' : '');
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;
   }

@@ -4645,6 +4645,27 @@ def engine_of(aid: str, override: str = "") -> str:
     if want == ENGINE_CODEX and codex_available():
         return ENGINE_CODEX
     return ENGINE_COGITO
+
+
+# 引擎能力表（Paperclip 比較筆記第三批）：三個引擎能做什麼寫在【這一處】——派工的檢查、指令頁、外殼的按鈕與提示都讀它，
+# 班表走同一個 office_dispatch，檢查自動套用。引擎補上能力（例如 Codex 接上插話）就改這張表。
+# resume：接回上次的對話（cogito 斷點續跑、CLI --resume、Codex 接回 thread）；approval：高危操作停下來等老闆；
+# steer：工作中插話；subagents：派子 agent（看板主持人一定要）。
+ENGINE_CAPS = {
+    ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True},
+    ENGINE_CLI: {"name": "Claude Code", "resume": True, "approval": True, "steer": True, "subagents": True},
+    ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": False, "steer": False, "subagents": False},
+}
+CAP_LABEL = {"steer": "插話", "approval": "審批", "subagents": "子 agent"}   # 會缺的那幾項，講給人聽的名字
+IN_FLIGHT = ("approve", "reject", "/stop", "/steer")   # 任務進行中的互動（不是派新任務）
+
+
+def running_engine(aid: str) -> str:
+    """正在跑這件事的引擎；沒在工作就回空字串。工作中的互動要找【它】，不是設定面板現在選的那個。"""
+    if aid in cli_permission:
+        return ENGINE_CLI   # Claude Code 的審批 hook 正在等：這件一定是它在跑（比卡片上記的更確定）
+    c = last_report.get(aid) or {}
+    return str(c.get("engine") or ENGINE_COGITO) if aid in busy and c.get("status") == "working" else ""
 model_sent: dict[str, str] = {}   # aid -> cogito 那邊 office 頻道現在的模型設定（橋最後一次告訴它的；""＝cogito 預設；沒有這個鍵＝不知道）
 cogito_pick: dict[str, str] = {}  # aid -> 外殼替 cogito 選過的模型（記住，直到「還原」）
 cli_pick: dict[str, str] = {}     # aid -> 外殼替 Claude Code 選過的模型（只收 Claude 型號；跟 cogito、Codex 的分開）
@@ -4782,6 +4803,7 @@ async def office_models():
             "codex_effective": dict(codex_model_sent), "codex_default": os.environ.get("OFFICE_CODEX_MODEL", "").strip(),
             "codex_mcp": list(office_mcp_servers()),   # Codex 員工拿到的 MCP（照抄 Claude Code 員工的），外殼講出來
             "engines": {aid: engine_of(aid) for aid in agents},
+            "engine_caps": ENGINE_CAPS,   # 外殼的按鈕、提示、選單都照這張（跟派工檢查同一份）
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
 
@@ -4793,14 +4815,14 @@ async def office_models():
 # get（把檔案傳回聊天，辦公室這條平台沒實測過）。
 COGITO_CMD_GROUP = "cogito 指令（原樣轉給 cogito）"
 OFFICE_COMMANDS = [
-    {"cmd": "/stop", "desc": "中止這件事，不管做到哪", "when": "busy", "engines": ("cli", "cogito", "codex"), "group": "任務進行中"},
+    {"cmd": "/stop", "desc": "中止這件事，不管做到哪", "when": "busy", "group": "任務進行中"},
     {"cmd": "/steer ", "desc": "插話：不中止，補一句話糾正方向（下一回合生效）", "example": "/steer 先別改測試，專心修 bug",
-     "when": "busy", "engines": ("cli", "cogito"), "group": "任務進行中"},
-    {"cmd": "approve", "desc": "核准待審的操作", "when": "approval", "engines": ("cli", "cogito"), "group": "審批"},
+     "when": "busy", "cap": "steer", "group": "任務進行中"},
+    {"cmd": "approve", "desc": "核准待審的操作", "when": "approval", "cap": "approval", "group": "審批"},
     {"cmd": "reject ", "desc": "駁回，後面可以接理由（會轉給員工）", "example": "reject 不要刪檔，改成移到 archive/",
-     "when": "approval", "engines": ("cli", "cogito"), "group": "審批"},
+     "when": "approval", "cap": "approval", "group": "審批"},
     {"cmd": "開工。照板子推進，先做相依都滿足的票，最多 3 人並行。", "desc": "板子開好後，叫主持人開始分工",
-     "when": "idle", "engines": ("cli", "cogito"), "group": "看板", "agents": (KANBAN,)},
+     "when": "idle", "cap": "subagents", "group": "看板", "agents": (KANBAN,)},
     {"cmd": "status", "desc": "這個頻道的花費、token、歷史長度與模型", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
     {"cmd": "compress", "desc": "手動摺疊 context，縮短歷史省成本", "when": "idle", "engines": ("cogito",), "group": COGITO_CMD_GROUP},
     {"cmd": "goal ", "desc": "設一個驗收標準，追到判定達成為止（goal status／pause／resume／clear 管理）",
@@ -4960,12 +4982,14 @@ def office_commands(agent: str = "", engine: str = ""):
     """這位員工、這個引擎能打的指令。engine 沒帶就用他現在生效的引擎（外殼會帶設定面板裡選的那個）。"""
     if agent not in agents:
         return {"ok": False, "error": "沒有這位員工"}
-    eng = engine if engine in (ENGINE_CLI, ENGINE_COGITO, ENGINE_CODEX) else engine_of(agent)
-    items = [{k: v for k, v in c.items() if k not in ("engines", "agents")} for c in OFFICE_COMMANDS
-             if eng in c["engines"] and agent in c.get("agents", (agent,))]
+    eng = engine if engine in ENGINE_CAPS else engine_of(agent)
+    cap = ENGINE_CAPS[eng]
+    # engines＝那個引擎自己的聊天指令（cogito 的 status 之類）；cap＝要引擎有這項能力（插話、審批⋯）才列
+    items = [{k: v for k, v in c.items() if k not in ("engines", "agents", "cap")} for c in OFFICE_COMMANDS
+             if eng in c.get("engines", ENGINE_CAPS) and (not c.get("cap") or cap[c["cap"]]) and agent in c.get("agents", (agent,))]
     notes = ["閒置時，其他任何文字都是派一件新任務。", "換引擎、模型、工作 repo：輸入框下方的 ⚙ 設定。"]
-    if eng == ENGINE_CODEX:
-        notes.append("Codex 引擎目前不支援插話與審批：要補充就等它收工再派，或中止重派。")
+    if lack := [v for k, v in CAP_LABEL.items() if not cap[k]]:
+        notes.append(f"{cap['name']} 引擎目前不支援{'、'.join(lack)}：要補充就等它收工再派，或中止重派。")
     return {"ok": True, "engine": eng, "items": items, "notes": notes, "caps": engine_caps(eng)}
 
 
@@ -5005,10 +5029,15 @@ async def office_dispatch(d: dict):
     # 引擎分流：CLI 模式不經過 cogito——它自己就是完整的 agent，橋只負責把它的事件
     # 轉成 office 事件（走位/泡泡/工作串/卡片全部共用同一條投影路徑）。
     want_engine = str(d.get("engine") or "") or engine_sent.get(aid) or (agents[aid].engine if aid in agents else "")
-    if want_engine == ENGINE_CODEX and verb not in ("/stop",) and (why := codex_blocked()):
+    if want_engine == ENGINE_CODEX and verb not in IN_FLIGHT and (why := codex_blocked()):
         # 選了 Codex 卻不能用：明講原因，不要靜靜改派給 cogito（那會讓人以為是 Codex 在做）
         return {"ok": False, "error": f"Codex 引擎未啟用：{why}"}
     eng_now = engine_of(aid, str(d.get("engine") or ""))
+    if verb in IN_FLIGHT and (run_eng := running_engine(aid)):
+        # 進行中的互動跟著【正在跑的】引擎走。以前跟著設定面板：cogito 跑到一半把面板改選 Claude Code，
+        # 按中止只收了卡、沒叫停 cogito（整理能力表時發現）。
+        eng_now = run_eng
+    cap = ENGINE_CAPS[eng_now]
     cli_mode = eng_now == ENGINE_CLI
     codex_mode = eng_now == ENGINE_CODEX
     # 中止在分流【之前】處理：兩種引擎共用同一條收尾，差別只在「怎麼叫停上游」。
@@ -5052,12 +5081,14 @@ async def office_dispatch(d: dict):
         asyncio.create_task(show_rejected(aid))   # 丟出，演完才回工位繼續
         return {"ok": True, "delivered": not how}
 
-    if codex_mode and verb in ("approve", "reject", "/steer"):
-        # 不假裝：exec 模式沒有第二則訊息的入口，審批政策是 never（沙箱外的操作直接失敗、模型自己改道）
-        return {"ok": False, "error": ("Codex 引擎目前不支援插話——要補充就等它收工再派，或中止重派" if verb == "/steer"
-                                       else f"{agents[aid].name} 在 Codex 引擎上沒有審批（沙箱外的操作會直接失敗）")}
-    if codex_mode and aid == KANBAN and verb not in ("/stop",):
-        return {"ok": False, "error": "看板暫不支援 Codex 引擎（主持人要派子 agent，那條還沒接）——請改選 Claude Code 或 cogito"}
+    # 不假裝：能力表說沒有的，明講（例：Codex 的 exec 模式沒有第二則訊息的入口，審批政策是 never）
+    if verb == "/steer" and not cap["steer"]:
+        return {"ok": False, "error": f"{cap['name']} 引擎目前不支援插話——要補充就等它收工再派，或中止重派"}
+    if verb in ("approve", "reject") and not cap["approval"]:
+        return {"ok": False, "error": f"{agents[aid].name} 在 {cap['name']} 引擎上沒有審批——它不會停下來等核准"}
+    if aid == KANBAN and verb not in IN_FLIGHT and not cap["subagents"]:
+        ok = "或".join(c["name"] for c in ENGINE_CAPS.values() if c["subagents"])
+        return {"ok": False, "error": f"看板暫不支援 {cap['name']} 引擎（主持人要派子 agent，這個引擎還沒接）——請改選 {ok}"}
     if (cli_mode or codex_mode) and verb not in ("approve", "reject", "/stop", "/steer"):
         # 只記外殼的選擇；班表派工（scheduled）指定的引擎是那件事的屬性，不是老闆對這個人的決定
         if (eng := str(d.get("engine") or "")) and not d.get("scheduled"):
@@ -5542,6 +5573,7 @@ def get_agents():
               "scheduled": len(schedule_of(aid, jobs)),
               "team": a.persona.get("team", "未分組"),
               "location": a.location, "busy": aid in busy,
+              "running": running_engine(aid),   # 正在跑這件事的引擎（工作中的按鈕看它能不能插話／審批）
               "approval": aid in pending_approval,   # 等你決定的人要在名冊上一眼看得到
               # 名冊也要看得到頭上那些徽章。理由不只是方便：
               #   ① 看板【沒有身體】，它那份（實測 33 條待審提案，佔全部六成）在 3D 畫面上
