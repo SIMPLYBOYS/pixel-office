@@ -217,6 +217,7 @@ MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強�
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
 STOP_ECHO = "office 送來的 /stop"   # cogito 的中止紀錄開頭＝平台名（NewCore("office")）＋固定字樣
+RESUME_WINDOW = 120.0            # 按「接著做」之後這麼久內開工的那張，才接到舊卡後面
 WORK_TIMEOUT = 300.0             # 上工中這麼久沒事件＝claw-cli 掛了（done 是 fire-and-forget 會丟）
 STUCK_AFTER = 60.0               # 上工中這麼久【只有 think/turn】沒有任何工具事件＝卡住了，去接杯水
 SUB_TIMEOUT = 420.0              # 子 agent 被徵用這麼久還沒收到釋放事件＝那則事件掉了，強制放人
@@ -1469,7 +1470,7 @@ _card_seq = 0  # 任務卡編號：委派事件用它把子卡掛回主任務串
 def report_card(aid: str, task: str, workdir: str = "") -> dict:
     global _card_seq
     _card_seq += 1
-    card = {"id": _card_seq, "task": task, "status": "working", "report": "",
+    card = {"id": _card_seq, "task_id": _card_seq, "task": task, "status": "working", "report": "",
             "workdir": workdir,  # cogito 該會話的工作目錄——產出落在哪，看板直接標出來
             # day：卡片會跨天累積，只有 HH:MM 分不出「這是哪一天做的」（實際踩到）。
             # 不改 at 的格式——Unity 的報告面板與既有卡都吃它。
@@ -1478,6 +1479,14 @@ def report_card(aid: str, task: str, workdir: str = "") -> dict:
     history.setdefault(aid, deque(maxlen=20)).append(card)
     last_report[aid] = card
     return card
+
+
+def link_cards(prev: dict, card: dict) -> None:
+    """同一件事的下一次執行接在前一次後面（Paperclip 比較筆記第一批）：任務＝一串執行。
+    task_id 沿用第一次那張的卡號；prev／next 讓工作串前後跳得過去。續跑、重試、換引擎都走這裡。"""
+    card["task_id"] = prev.get("task_id", prev["id"])
+    card["prev"] = prev["id"]
+    prev["next"] = card["id"]
 
 
 def supersede_card(card: dict) -> None:
@@ -1676,11 +1685,18 @@ async def office_event(ev: dict):
     if aid is None:  # Unity 不在線也照收：時間軸/報告卡是資料面，投影指令會自動 no-op
         return {"ok": False, "error": "沒有可指派的 NPC"}
     a = agents[aid]
+    # 重送去重：事件帶 eid（唯一 id）時，同一個 eid 只算一次——不重複開卡、不重複記用量。沒帶的照舊。
+    if eid := str(ev.get("eid") or ""):
+        seen = seen_eids.setdefault(aid, deque(maxlen=512))
+        if eid in seen:
+            return {"ok": True, "dup": True}
+        seen.append(eid)
     # 過期事件（稽核筆記 P0）：CLI／Codex 的事件帶著它那次執行的卡號。對不上現在這張卡＝那次執行早就被中止
     # 或取代了，老闆已經派了新的——舊的 done 以前會把新卡關成「異常結束」。一律不投影、不改卡。
     # cogito 與外部 claw-cli 不帶 run（協定還沒有），照舊。
     run = ev.get("run")
-    if run is not None and (last_report.get(aid) or {}).get("id") != run:
+    cur = last_report.get(aid) or {}
+    if run is not None and kind != "start" and cur.get("run", cur.get("id")) != run:
         print(f"ℹ {a.name} 收到過期事件（{kind}，屬於卡 {run}），略過——那次執行已被中止或取代")
         return {"ok": True, "stale": True}
 
@@ -1750,12 +1766,15 @@ async def office_event(ev: dict):
             # 只在目前這張卡的串裡記一句對話——回一句問候卻被當成新任務很怪。
             chat_mode.add(aid)
             chatting = True
+            if ev.get("run"):   # 閒聊不開卡、話記在目前這張：這一段對話的事件（帶新的 run）也要認得這張卡
+                last_report[aid]["run"] = str(ev["run"])
             await pose(aid, "face_down")   # 有人在跟他講話：轉頭面向鏡頭（原本背對）
             log_ev(aid, f"💬 老闆：{label}")
         else:
             # 斷點續跑：cogito 送的 prompt 是那句系統提示，拿它當卡片標題沒人看得懂做過什麼。
             # 沿用上一張未完成卡的任務名，才接得回中斷前那條工作串。
             task = label
+            prev = None
             if label.startswith(RESUME_NUDGE_PREFIX):
                 prev = next((t for t in reversed(history.get(aid, []))
                              if t["status"] in ("working", "lost", "superseded")
@@ -1766,6 +1785,15 @@ async def office_event(ev: dict):
             # start 的 detail＝工作目錄。照記（卡上要顯示產出落在哪），但拿來讀檔、列目錄、開資料夾之前一律過 workdir_ok——
             # 邊界放在【用的那一刻】，狀態檔裡的舊卡、偽造的事件都一樣擋得住（2026-09-17 安全稽核 High #6）
             card = report_card(aid, task, ev.get("detail", ""))
+            # 老闆按了「接著做」：接在指定那張後面（沒在 RESUME_WINDOW 內開工就作廢，別黏到不相干的下一件）
+            if (pr := pending_resume.pop(aid, None)) and time.monotonic() - pr[1] < RESUME_WINDOW:
+                prev = find_card(aid, pr[0]) or prev
+                if prev and prev is not card:
+                    supersede_card(prev)   # 還開著／失聯的舊卡由這張接手；中止、出錯的照原樣留著
+            if prev and prev is not card:
+                link_cards(prev, card)
+            if ev.get("run"):
+                card["run"] = str(ev["run"])   # 引擎自帶的執行 id（cogito）；CLI／Codex 用卡號本身
             # 回溯的鑰匙：哪個引擎、哪條 session、幾點開始。有了它，卡片才連得到完整紀錄。
             card["engine"] = str(ev.get("engine") or ENGINE_COGITO)
             card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
@@ -2003,6 +2031,8 @@ def clear_approval(aid: str, next_card: bool = True) -> None:
             asyncio.get_running_loop().create_task(office_chat(nxt))
         except RuntimeError:   # 沒有事件迴圈（例：狀態復原時）：放回去，下一次有人處理時再輪
             approval_backlog.setdefault(aid, []).insert(0, nxt)
+pending_resume: dict[str, tuple[int, float]] = {}   # npc id -> (要接著做的卡號, 按下的時間)
+seen_eids: dict[str, deque] = {}      # npc id -> 最近收過的事件 eid（重送去重）
 stopped: set[str] = set()             # 剛被使用者按中止的人——收尾事件到達時別再喊一次「中斷」
 pending_note: dict[str, str] = {}     # npc id -> 等下一張任務卡開出來才掛上去的「老闆交辦」
 # npc id -> 這張審批來自哪個頻道（office:p17 / slack:C999…）。非 office 來源只能回原平台核准：
@@ -4866,6 +4896,13 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": "你看的那張審批卡已經換成下一張了——請先看過新的這張再決定"}
     if aid in busy and verb not in ("approve", "reject", "/stop", "/steer"):
         return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
+    # 「接著做」：這件是某張中止／出錯／失聯的卡的下一次執行（Paperclip 比較筆記第一批）。開工那一刻接到那張後面，
+    # 同一個任務底下看得到前後每一次；CLI 本來就接回同一段對話，這裡補的是【卡片層】的關聯。
+    if (rid := d.get("resume")) is not None:
+        prev = find_card(aid, rid) if isinstance(rid, int) and not isinstance(rid, bool) else None
+        if prev is None or prev["status"] not in ("stopped", "error", "lost", "superseded"):
+            return {"ok": False, "error": "那張卡不在，或不是中止／出錯／失聯的——沒有東西可以接著做"}
+        pending_resume[aid] = (prev["id"], time.monotonic())
     # 插話只在工作中有意義。閒著時不代發成新任務——那會把「糾正」靜默升級成「開工」。
     if verb == "/steer":
         if aid not in busy:
@@ -5699,9 +5736,18 @@ def load_state() -> None:
     if orphan:
         print(f"清掉 {orphan} 張孤兒卡（上個行程沒收完的委派）")
     for aid, card in last_report.items():
-        if card["status"] == "working":  # 重啟時任務可能還在跑：先當在跑，事件續流；死了 watchdog 兜底
-            busy.add(aid)
-            work_last[aid] = time.monotonic()
+        if card["status"] != "working":
+            continue
+        if card.get("engine") in (ENGINE_CLI, ENGINE_CODEX):
+            # CLI／Codex 是橋的子行程：橋重啟時它們一定跟著結束了，不必等五分鐘失聯保險才承認。
+            # 標失聯（不是成功、也不是失敗）——做到哪裡不知道，要不要接著做由老闆決定。
+            card["status"] = "lost"
+            card["end"] = card["end"] or time.strftime("%H:%M")
+            card["report"] = card["report"] or "橋重啟時這個行程一起結束了——做到哪裡不確定，可以按「接著做」"
+            continue
+        # cogito 在橋外面跑，任務可能還在進行：先當在跑，事件續流；死了 watchdog 兜底
+        busy.add(aid)
+        work_last[aid] = time.monotonic()
     n = sum(len(c) for c in history.values())
     if n:
         print(f"工作紀錄載入：{len(history)} 位員工、{n} 張任務卡")

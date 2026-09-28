@@ -544,6 +544,7 @@ def run() -> None:
     token_required()
     team_setup()
     late_done_race()
+    task_chain()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -4897,6 +4898,75 @@ def late_done_race() -> None:
         assert b["status"] == "stopped", f"頻道裡真的按的中止沒收：{b['status']}"
     main.busy.discard(aid); main.stopped.discard(aid)
     main.STATE_FILE.unlink(missing_ok=True)
+
+
+def task_chain() -> None:
+    """任務＝一串執行（Paperclip 比較筆記第一批）：接著做／自動續跑接在前一張後面、引擎自帶 run id、重送去重、
+    重啟時 CLI／Codex 的卡直接標失聯。"""
+    aid = "p07"
+    main.busy.discard(aid); main.stopped.discard(aid); main.engine_sent.pop(aid, None)
+    with TestClient(main.app) as c:
+        cards = lambda: list(main.history.get(aid, []))
+        # ① 老闆按「接著做」：新卡接在中止的那張後面，舊卡照原樣（中止就是中止）
+        post(c, agent=aid, kind="start", label="整理競品表")
+        a = main.last_report[aid]
+        post(c, agent=aid, kind="done", label="error", detail="炸了")
+        assert a["status"] == "error"
+        r = c.post("/office/dispatch", json={"agent": aid, "text": "接著做：整理競品表", "resume": a["id"]}).json()
+        assert aid in main.pending_resume, r   # cogito 沒開（COGITO_HTTP 空）派不出去，但接續的意圖已經記下
+        post(c, agent=aid, kind="start", label="接著做：整理競品表")
+        b = main.last_report[aid]
+        assert b is not a and b["prev"] == a["id"] and b["task_id"] == a["task_id"] and a["next"] == b["id"], (a, b)
+        assert a["status"] == "error", "中止／出錯的舊卡不該被改成「由續跑接手」"
+        post(c, agent=aid, kind="done", label="ok")
+        bad = c.post("/office/dispatch", json={"agent": aid, "text": "再來", "resume": b["id"]}).json()
+        assert bad["ok"] is False and "接著做" in bad["error"], "完成的卡不能接著做"
+        main.pending_resume.pop(aid, None)
+        # ② cogito 自動續跑（系統提示開頭）：失聯的舊卡由新卡接手，而且接在同一個任務底下
+        post(c, agent=aid, kind="start", label="寫週報")
+        lost = main.last_report[aid]; lost["status"] = "lost"; main.busy.discard(aid)
+        post(c, agent=aid, kind="start", label=main.RESUME_NUDGE_PREFIX + "，請從斷點繼續")
+        d = main.last_report[aid]
+        assert lost["status"] == "superseded" and d["prev"] == lost["id"] and d["task_id"] == lost["task_id"], (lost, d)
+        post(c, agent=aid, kind="done", label="ok")
+        # ③ 引擎自帶 run id（cogito 協定的新欄位）：對不上的就是過期事件
+        post(c, agent=aid, kind="start", label="第三件", run="r-new")
+        e = main.last_report[aid]
+        assert e["run"] == "r-new"
+        assert post(c, agent=aid, kind="done", label="error", run="r-old").get("stale"), "別的 run 的 done 沒被擋"
+        assert e["status"] == "working"
+        post(c, agent=aid, kind="done", label="ok", run="r-new")
+        assert e["status"] == "ok"
+        # 閒聊不開卡、話記在目前這張：那段對話帶的是【新的】run，它的事件不能被當成過期丟掉
+        post(c, agent=aid, kind="start", label="nice job", run="r-chat")
+        assert main.last_report[aid] is e, "閒聊不該開新卡"
+        assert not post(c, agent=aid, kind="msg", label="謝謝，有需要再找我。", run="r-chat").get("stale"), "閒聊的回話被當成過期丟了"
+        post(c, agent=aid, kind="done", label="ok", run="r-chat")
+        assert aid not in main.busy, "閒聊收工沒放人"
+        # ④ 重送去重：同一個 eid 只算一次——開卡、事件都不重複
+        n0 = len(cards())
+        post(c, agent=aid, kind="start", label="只算一次", eid="s-1")
+        post(c, agent=aid, kind="start", label="只算一次", eid="s-1")
+        assert len(cards()) == n0 + 1, "同一個 start 重送開了兩張卡"
+        f = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Read", detail="a.py", eid="t-1")
+        n1 = len(f["events"])
+        assert post(c, agent=aid, kind="tool", label="Read", detail="a.py", eid="t-1").get("dup")
+        assert len(f["events"]) == n1, "重送的事件記了兩次"
+        post(c, agent=aid, kind="done", label="ok", eid="d-1")
+    # ⑤ 重啟：CLI／Codex 是橋的子行程，重啟時一定跟著結束了——直接標失聯、不重新算在忙；cogito 照舊當可能還在跑
+    try:
+        cli = main.report_card("p12", "CLI 跑到一半", ""); cli["engine"] = main.ENGINE_CLI
+        cog = main.report_card("p17", "cogito 跑到一半", ""); cog["engine"] = main.ENGINE_COGITO
+        main.save_state()
+        main.history.clear(); main.last_report.clear(); main.busy.clear(); main.work_last.clear()
+        main.load_state()
+        cli2, cog2 = main.last_report["p12"], main.last_report["p17"]
+        assert cli2["status"] == "lost" and "p12" not in main.busy and "接著做" in cli2["report"], cli2
+        assert cog2["status"] == "working" and "p17" in main.busy, "cogito 在橋外面，重啟後可能還在跑"
+    finally:
+        main.STATE_FILE.unlink(missing_ok=True)
+        main.busy.discard("p12"); main.busy.discard("p17"); main.work_last.clear()
 
 
 if __name__ == "__main__":

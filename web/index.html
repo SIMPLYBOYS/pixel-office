@@ -553,6 +553,11 @@
 .npc-badge{position:absolute;top:-4px;right:-4px;width:16px;height:16px;border-radius:50%;
   font-size:11px;text-align:center;line-height:16px;}
 .npc-badge.L2{background:#e08a3a;color:#1a1200;}
+  /* 同一件事的前後執行（↩ 接續／→ 接手／↻ 接著做） */
+  .tlinks { display: inline-flex; gap: 6px; margin-left: 6px; }
+  .tlink { font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; cursor: pointer; }
+  .tlink:hover { color: var(--text); border-color: #3a404c; }
+  .tlink.go { color: var(--accent); border-color: #5a4a20; }
   /* 還沒登入（稽核 #4 token）：整條橫在最上面，講清楚怎麼登入——不是一片靜悄悄的空名冊 */
   .needlogin { position: fixed; top: 0; left: 0; right: 0; z-index: 99; background: #5a2a2a; color: #fff;
                padding: 10px 16px; font-size: 14px; line-height: 1.6; }
@@ -2255,14 +2260,14 @@ async function steer(text) {
   if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
 }
 
-async function dispatch(text, task) {
+async function dispatch(text, task, resume) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
                            repo: $('repoSel').value.trim() || null,
                            model: $('modelSel').value || null,
-                           engine: $('engineSel').value || null, task: task || null }),
+                           engine: $('engineSel').value || null, task: task || null, resume: resume ?? null }),
   })).json();
   // 失敗要看得見：先前只有 11px 的灰字，實際回報「按了送出沒有反應」——其實是 cogito 沒開、派工被拒，
   // 但那行字跟平常的提示長得一樣。失敗改紅字並把原因講完；成功照舊。
@@ -2933,7 +2938,7 @@ function cardEl(t) {
   el.className = 'tcard';
   el.dataset.id = t.id;
   el.innerHTML = `<summary><span class="badge"></span>
-      <span class="ttitle">${esc(t.task)}</span><span class="trange"></span></summary>
+      <span class="ttitle">${esc(t.task)}</span><span class="tlinks"></span><span class="trange"></span></summary>
     <div class="tbody"></div>`;
   if (t.workdir) {   // 卡頭的 📁：不展開也能直接開資料夾（展開後的那行仍留著顯示路徑）
     const btn = document.createElement('span');   // 這個函式裡的 el 是卡片節點，不是 el() 建構器
@@ -3055,12 +3060,33 @@ const LANG_BY_EXT = { py: 'python', js: 'javascript', ts: 'typescript', go: 'go'
                       html: 'html', css: 'css', json: 'json', yaml: 'yaml', yml: 'yaml',
                       md: 'markdown', sql: 'sql', csv: '' };
 
+// 同一件事的前後幾次執行（Paperclip 比較筆記第一批）：↩ 接續哪一張、→ 由哪一張接手；
+// 中止／出錯／失聯、還沒人接手的卡給一顆「↻ 接著做」——接在這張後面開一次新的執行，同一個任務底下看得到前後。
+let lastHistory = [];
+function cardLinks(t) {
+  const out = [];
+  if (t.prev) out.push(`<span class="tlink" title="這是同一件事的下一次執行" onclick="event.preventDefault(); event.stopPropagation(); openCard(selected, ${t.prev})">↩ 接續 #${t.prev}</span>`);
+  if (t.next) out.push(`<span class="tlink" title="這件事已經接著做了" onclick="event.preventDefault(); event.stopPropagation(); openCard(selected, ${t.next})">→ 由 #${t.next} 接手</span>`);
+  else if (['stopped', 'error', 'lost'].includes(t.status) && typeof t.id === 'number' && !(agentsData[selected] || {}).busy)
+    out.push(`<span class="tlink go" title="接在這張後面再做一次（CLI 會接回同一段對話）" onclick="event.preventDefault(); event.stopPropagation(); resumeCard(${t.id})">↻ 接著做</span>`);
+  return out.join('');
+}
+async function resumeCard(id) {
+  const t = lastHistory.find(x => x.id === id);
+  if (!t) return;
+  const why = { stopped: '上次被中止', error: '上次出錯', lost: '上次失聯，做到哪裡不確定' }[t.status] || '上次沒做完';
+  const task = t.task.replace(/^(🔄 續跑：|接著做：)+/, '').replace(/（上次[^）]*）$/, '');
+  await dispatch(`接著做：${task}（${why}——先確認做到哪裡，再把沒做完的做完）`, null, id);
+}
+
 // 卡片同步：狀態列就地更新、只把【新到的事件】接上去。不整段重畫才有串流感，
 // 也不會閃爍、不會弄丟使用者的文字選取與捲動位置。
 function sync(el, t, bodySel, live) {
   const b = el.querySelector(':scope > summary .badge');
   b.className = 'badge ' + t.status;
   b.textContent = BADGE[t.status] || t.status;
+  const tl = el.querySelector(':scope > summary .tlinks');
+  if (tl) tl.innerHTML = cardLinks(t);
   // cost/model 都是 cogito 報的【實際】值（協定：未知不送）——有才顯示。
   // 兩個要放一起：花費沒有模型當分母就只是個數字（haiku 跑十輪 vs opus 跑兩輪）。
   const rg = el.querySelector(':scope > summary .trange');
@@ -3135,6 +3161,7 @@ async function feed() {
       gen++;        // 佇列裡屬於上一位員工的事件作廢
       stuck = true; // 換人一律先看最新的
     }
+    lastHistory = r.history || [];   // 「↻ 接著做」要查卡片內容
     for (const [i, t] of (r.history || []).entries()) {
       t.id = t.id ?? 'ix' + i;   // 沒編號的卡不能全叫 undefined——會互搶同一張 DOM 卡
       let el = f.querySelector(`.tcard[data-id="${t.id}"]`);   // 可能在某個日期分組裡
