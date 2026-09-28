@@ -216,6 +216,7 @@ IDLE_SLEEP = 600.0               # 這麼久沒接到工作＝回工位趴著（
 MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強制結束）
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
+STOP_ECHO = "office 送來的 /stop"   # cogito 的中止紀錄開頭＝平台名（NewCore("office")）＋固定字樣
 WORK_TIMEOUT = 300.0             # 上工中這麼久沒事件＝claw-cli 掛了（done 是 fire-and-forget 會丟）
 STUCK_AFTER = 60.0               # 上工中這麼久【只有 think/turn】沒有任何工具事件＝卡住了，去接杯水
 SUB_TIMEOUT = 420.0              # 子 agent 被徵用這麼久還沒收到釋放事件＝那則事件掉了，強制放人
@@ -1675,6 +1676,13 @@ async def office_event(ev: dict):
     if aid is None:  # Unity 不在線也照收：時間軸/報告卡是資料面，投影指令會自動 no-op
         return {"ok": False, "error": "沒有可指派的 NPC"}
     a = agents[aid]
+    # 過期事件（稽核筆記 P0）：CLI／Codex 的事件帶著它那次執行的卡號。對不上現在這張卡＝那次執行早就被中止
+    # 或取代了，老闆已經派了新的——舊的 done 以前會把新卡關成「異常結束」。一律不投影、不改卡。
+    # cogito 與外部 claw-cli 不帶 run（協定還沒有），照舊。
+    run = ev.get("run")
+    if run is not None and (last_report.get(aid) or {}).get("id") != run:
+        print(f"ℹ {a.name} 收到過期事件（{kind}，屬於卡 {run}），略過——那次執行已被中止或取代")
+        return {"ok": True, "stale": True}
 
     # 板子一寫好就散會——會議結束的時刻是「結論定案」，不是整個任務做完。
     # 沒有「board.json 被建立」這種事件可以掛，所以每則看板事件順手檢查一次：
@@ -1800,6 +1808,13 @@ async def office_event(ev: dict):
         cost = ev.get("cost")
         if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
             cost = None
+        if label == "stopped" and aid not in stopped and str(ev.get("detail") or "").startswith(STOP_ECHO):
+            # 「office 送來的 /stop」＝【橋自己】剛才送去的中止（只有橋會往 cogito 的 office 平台送 /stop）。
+            # 這時人卻不在 stopped 裡＝那次中止早就收好了、老闆已經派了新任務，這筆是舊任務晚到的回音
+            # （cogito 不帶 run id，事件跨 reporter 不保序）。以前它被當成「有人在 cogito 頻道按了中止」，
+            # 把新任務一起殺掉（稽核筆記 P0）。橋要停新任務一定先走 force_stop，那時人就在 stopped 裡，不會落到這裡。
+            print(f"ℹ {a.name} 收到舊任務晚到的中止回音，略過（新卡 {(last_report.get(aid) or {}).get('id')} 照常進行）")
+            return {"ok": True, "stale": True}
         if label == "stopped" and aid not in stopped:
             # 在 cogito 頻道按的 /stop：橋到收工這一刻才聽說。先前它被當成一筆「context canceled」失敗，
             # 帳本沒有中止紀錄（2026-09-23 查核）。照網頁按的一樣收卡、落帳，再走下面的停妥。
@@ -3256,6 +3271,9 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     await office_event({"v": 1, "agent": aid, "kind": "start",
                         "label": text[:80], "detail": str(base),
                         "engine": ENGINE_CLI, "session": cli_session_of[aid]})   # 回溯用
+    # 這一次執行＝剛開出來的那張卡（稽核筆記 P0）。之後每個事件都帶著它：中止後才到的收尾、
+    # 被砍掉的舊行程吐出來的 done，都只能作用在自己那張卡，碰不到老闆接著派的新任務。
+    run = (last_report.get(aid) or {}).get("id")
     try:
         # 員工 CLI 走訂閱（office profile 的登入），【不能】把橋自己的 ANTHROPIC_* 帶給它：Claude Code 看到
         # ANTHROPIC_API_KEY 會優先用 API key 計費。實際踩到：一場會議的子 agent 被「Credit balance is too low」打掉——
@@ -3265,13 +3283,13 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
             *argv, cwd=str(base), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=1 << 22)   # 單行可能很長（工具參數）
     except OSError as e:
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": f"起不了 CLI（{CLI_CMD}）：{e}"})
         return
     cli_procs[aid] = proc
     cli_turns[aid] = 1
     if not await cli_send(aid, text):   # 提示送不進去＝這個 CLI 不吃 stdin，明講，不假裝派了
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": "提示送不進 CLI 的 stdin（行程一起來就結束？）"})
         cli_procs.pop(aid, None)
         return
@@ -3333,7 +3351,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     # total_cost_usd 是「換算成 API 會是多少錢」，訂閱制並不會這樣扣。
                     # 標成花費就是說謊，所以不送 cost——額度用量另外講（見 msg）。
                     for ev in cli_done_events(d):   # 被權限擋下的交付不算完成（見函式說明）
-                        await office_event({"v": 1, "agent": aid, **ev})
+                        await office_event({"v": 1, "agent": aid, "run": run, **ev})
                     if proc.stdin is not None and not proc.stdin.is_closing():
                         proc.stdin.close()       # 關 stdin，行程才會結束
                     continue
@@ -3350,26 +3368,29 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                         if ev["label"] in warned:
                             continue
                         warned.add(ev["label"])
-                    await office_event({"v": 1, "agent": aid, **ev})
+                    await office_event({"v": 1, "agent": aid, "run": run, **ev})
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
         kill_tree(proc.pid)
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": f"CLI 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
         kill_tree(proc.pid)              # 老闆按了中止——或橋正在關閉、把還在跑的任務一起取消
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，CLI 行程被中斷（不是老闆按的）"})
         done_sent = True
         raise
     finally:
-        cli_procs.pop(aid, None)
-        cli_turns.pop(aid, None)
-        if fut := cli_permission.get(aid):        # 行程沒了，等著的審批也沒有意義
-            if not fut.done():
-                fut.set_result((False, "CLI 行程已結束"))
+        # 只收【自己的】：中止之後老闆可能已經派了新任務，cli_procs 裡放的是新的那個行程——
+        # 以前這裡照單全收，新任務的 /stop、/steer 從此失靈，等著的審批也被這裡駁回（稽核筆記 P0）
+        if cli_procs.get(aid) is proc:
+            cli_procs.pop(aid, None)
+            cli_turns.pop(aid, None)
+            if fut := cli_permission.get(aid):        # 行程沒了，等著的審批也沒有意義
+                if not fut.done():
+                    fut.set_result((False, "CLI 行程已結束"))
         if not done_sent:
             # CLI 沒吐 result 就死了（崩潰、被殺、輸出壞掉）。不補這一筆的話，
             # 卡片會永遠停在「進行中」、NPC 永遠不回座位——watchdog 五分鐘後才兜底。
@@ -3377,7 +3398,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
             if proc.stderr is not None:
                 err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
             what = "CLI 行程已結束" if aid in stopped else "CLI 異常結束"   # 中止後的 -9 是我們自己砍的，不是異常
-            await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+            await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                                 "detail": f"{what}（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
 
 
@@ -3713,6 +3734,9 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     argv += ["resume", tid, "-"] if tid else ["-"]   # 提示從 stdin 送（長文、換行都安全）
     await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80], "detail": str(base),
                         "engine": ENGINE_CODEX, "session": tid})
+    # 這一次執行＝剛開出來的那張卡（稽核筆記 P0）。之後每個事件都帶著它：中止後才到的收尾、
+    # 被砍掉的舊行程吐出來的 done，都只能作用在自己那張卡，碰不到老闆接著派的新任務。
+    run = (last_report.get(aid) or {}).get("id")
     if not tid and not fresh and key in codex_threads:
         log_ev(aid, "ℹ 找不到上次的 Codex 對話紀錄，這次開一條新的")
     env = agent_env()   # 白名單：OPENAI_API_KEY／CODEX_API_KEY 不在裡面（否則改走 API 計費），橋的交付與審批金鑰也不在
@@ -3722,7 +3746,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
             *argv, cwd=str(base), env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=1 << 22)
     except OSError as e:
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error", "detail": f"起不了 Codex（{CODEX_CMD}）：{e}"})
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": f"起不了 Codex（{CODEX_CMD}）：{e}"})
         return
     cli_procs[aid] = proc   # 中止走同一條（/stop 砍 cli_procs 裡的行程）
     try:
@@ -3732,7 +3756,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
         proc.stdin.close()
     except (OSError, ConnectionError) as e:
         cli_procs.pop(aid, None)
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error", "detail": f"提示送不進 Codex：{e}"})
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": f"提示送不進 Codex：{e}"})
         return
     done_sent = False
     thread = tid
@@ -3767,7 +3791,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
                         globals()["_dirty"] = True
                     if t == "turn.failed":
                         msg = str((d.get("error") or {}).get("message") or "Codex 回報失敗")
-                        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error", "detail": msg[:300], "model": m})
+                        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": msg[:300], "model": m})
                     else:
                         u = d.get("usage") or {}
                         usage = {"in": int(u.get("input_tokens") or 0), "out": int(u.get("output_tokens") or 0),
@@ -3776,25 +3800,26 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
                         ev = {"v": 1, "agent": aid, "kind": "done", "label": "ok", "detail": "", "model": m}
                         if any(usage.values()):
                             ev["usage"] = usage
-                        await office_event(ev)
+                        await office_event({**ev, "run": run})
                     continue
                 for ev in codex_events(d):
-                    await office_event({"v": 1, "agent": aid, **ev})
+                    await office_event({"v": 1, "agent": aid, "run": run, **ev})
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
         kill_tree(proc.pid)
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": f"Codex 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
         kill_tree(proc.pid)
-        await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，Codex 行程被中斷（不是老闆按的）"})
         done_sent = True
         raise
     finally:
-        cli_procs.pop(aid, None)
+        if cli_procs.get(aid) is proc:   # 只收自己的（同 run_cli_task：新任務的行程別被舊的收尾拿掉）
+            cli_procs.pop(aid, None)
         if not done_sent:
             err = ""
             if proc.stderr is not None:

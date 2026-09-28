@@ -543,6 +543,7 @@ def run() -> None:
     approval_binding()
     token_required()
     team_setup()
+    late_done_race()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -4821,6 +4822,80 @@ def team_setup() -> None:
             (main.TEAM_DIR / name).write_bytes(b)
         main.load_roster()
     assert set(main.npcs()) == {"p01", "p05", "p07", "p08", "p10", "p12", "p17", "p19"}
+    main.STATE_FILE.unlink(missing_ok=True)
+
+
+def late_done_race() -> None:
+    """中止後馬上派新任務，舊任務的收尾才到（Paperclip 比較筆記的 P0）：不能把新卡關掉、不能拿走新任務的行程。
+
+    以前事件只認「這個人目前那張卡」：舊 CLI 被砍之後補的 done（退出碼 -9）會把老闆接著派的新卡
+    標成異常結束，收尾時還把 cli_procs 清掉——新任務的 /stop、/steer 從此失靈。"""
+    import tempfile
+    aid = "p05"
+    fake = f"#!{sys.executable}\nimport sys, json, time\nsys.stdin.readline()\n" \
+           "print(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'm', 'cwd': 'x', 'tools': []}), flush=True)\n" \
+           "time.sleep(60)\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakeclaude"
+        bin_.write_text(fake, encoding="utf-8"); bin_.chmod(0o755)
+        wd = Path(tmp) / "wd"; wd.mkdir()
+        old_cmd, main.CLI_CMD = main.CLI_CMD, str(bin_)
+        old_sess, main.CLI_SESSION_DIR = main.CLI_SESSION_DIR, Path(tmp) / "sessions"
+        main.CLI_SESSION_DIR.mkdir()
+        main.busy.discard(aid); main.stopped.discard(aid); main.cli_procs.pop(aid, None)
+
+        async def until(pred, what):
+            for _ in range(200):
+                if pred():
+                    return
+                await asyncio.sleep(0.05)
+            raise AssertionError(f"等不到：{what}")
+
+        async def drive():
+            t1 = asyncio.create_task(main.run_cli_task(aid, "第一件", cwd=wd))
+            await until(lambda: main.cli_procs.get(aid) is not None, "第一個行程")
+            p1, a_id = main.cli_procs[aid], main.last_report[aid]["id"]
+            # 先不真的砍：讓舊行程的收尾【一定】晚於新任務開工（真實世界靠運氣撞上，測試要每次都撞上）
+            real_kill, main.kill_tree = main.kill_tree, (lambda pid: 0)
+            try:
+                r = await main.office_dispatch({"agent": aid, "text": "/stop", "engine": main.ENGINE_CLI})
+            finally:
+                main.kill_tree = real_kill
+            assert r["ok"] and main.last_report[aid]["status"] == "stopped", r
+            t2 = asyncio.create_task(main.run_cli_task(aid, "第二件", cwd=wd))
+            await until(lambda: main.cli_procs.get(aid) not in (None, p1), "第二個行程")
+            p2, b = main.cli_procs[aid], main.last_report[aid]
+            assert b["id"] != a_id and b["status"] == "working"
+            p1.kill()                                     # 舊行程這時才死：它的收尾是「晚到的」
+            await asyncio.wait_for(t1, 10)
+            assert main.last_report[aid] is b and b["status"] == "working", \
+                f"舊任務晚到的 done 把新卡關掉了：{b['status']} {b.get('report')!r}"
+            assert main.cli_procs.get(aid) is p2 and aid in main.cli_turns, "舊任務的收尾拿走了新任務的行程——/stop、/steer 會失靈"
+            assert aid in main.busy
+            # 帶著自己卡號的事件照常生效：新任務自己的收尾會正常關掉自己的卡
+            p2.kill()
+            await asyncio.wait_for(t2, 10)
+            assert b["status"] == "error" and aid not in main.cli_procs, b["status"]
+
+        try:
+            asyncio.run(drive())
+        finally:
+            main.CLI_CMD, main.CLI_SESSION_DIR = old_cmd, old_sess
+            main.busy.discard(aid); main.stopped.discard(aid); main.cli_procs.pop(aid, None)
+
+    # cogito 沒有 run id：橋自己送的 /stop，回音會寫「office 送來的 /stop」——新卡開了才到＝舊任務的回音，
+    # 不能當成有人在 cogito 頻道又按了一次中止；Slack 等頻道真的按的中止照常收
+    with TestClient(main.app) as c:
+        main.engine_sent.pop(aid, None)
+        post(c, agent=aid, kind="start", label="cogito 第一件")
+        asyncio.run(main.force_stop(aid, "（測試）"))
+        post(c, agent=aid, kind="start", label="cogito 第二件")
+        b = main.last_report[aid]
+        r = post(c, agent=aid, kind="done", label="stopped", detail="office 送來的 /stop；一併收掉 1 個背景子 agent")
+        assert r.get("stale") and b["status"] == "working", f"舊任務的中止回音把新任務殺掉了：{b['status']}"
+        post(c, agent=aid, kind="done", label="stopped", detail="slack 送來的 /stop")
+        assert b["status"] == "stopped", f"頻道裡真的按的中止沒收：{b['status']}"
+    main.busy.discard(aid); main.stopped.discard(aid)
     main.STATE_FILE.unlink(missing_ok=True)
 
 
