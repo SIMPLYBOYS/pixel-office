@@ -12,7 +12,7 @@ public class NPCSpeech : MonoBehaviour
     void Awake()
     {
         // 內建 Arial 沒有中文字形——編輯器靠 macOS 系統字型補字，WebGL 無字可退就空白。
-        // 有 Resources/OfficeFont（只烘泡泡用字的圖集字型）就換上，兩邊都畫得出中文。
+        // 有 Resources/OfficeFont（常用繁中子集的動態字型，見 OfficeFontImporter）就換上，兩邊都畫得出中文。
         var cjk = Resources.Load<Font>("OfficeFont");
         if (cjk == null || text == null) return;
         text.font = cjk;

@@ -231,7 +231,7 @@ def run() -> None:
             m = recv(ws, "p01")
             assert m["text"] == "✓ 回報完成", m
             assert "p01" not in main.busy
-            assert any("委派" in x for x in main.agents["p01"].memory)
+            assert any("委派" in x for x in main.agents["p01"].memory_texts)
             r = c.get("/office/report/p01").json()  # 委派也有報告卡
             assert (r["task"], r["status"], r["report"]) == (
                 "支援阿哲：code-reviewer", "ok", "LGTM，無阻塞問題")
@@ -249,7 +249,7 @@ def run() -> None:
             assert "p17" not in main.busy and "p01" not in main.busy
             assert not main.sub_active
             assert not main.work_last
-            assert any("接到工作任務" in x for x in main.agents["p17"].memory)
+            assert any("接到工作任務" in x for x in main.agents["p17"].memory_texts)
             r = c.get("/office/report/p17").json()  # 報告卡：任務 + 全文 + 狀態
             assert r["ok"] and r["name"] == "阿哲"
             assert (r["task"], r["status"], r["report"]) == (
@@ -547,6 +547,7 @@ def run() -> None:
     task_chain()
     verdict_flow()
     engine_caps_flow()
+    life_sim()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -5116,6 +5117,202 @@ def engine_caps_flow() -> None:
         finally:
             main.tell_cogito_stop, main.COGITO_HTTP, main.cli_available, main.codex_available, main.codex_blocked = old
             main.busy.discard(aid); main.engine_sent.pop(aid, None)
+
+
+class _Blk:
+    def __init__(self, name, inp):
+        self.type, self.name, self.input = "tool_use", name, inp
+
+
+class _Usage:
+    def __init__(self, i, o):
+        self.input_tokens, self.output_tokens = i, o
+        self.cache_creation_input_tokens = self.cache_read_input_tokens = 0
+
+
+class _LifeClient:
+    """假的 Anthropic client：照工具名回預先寫好的答案，記下每次呼叫。raise_ 設了就丟那個例外。"""
+    def __init__(self, answers):
+        self.answers, self.calls, self.raise_ = answers, [], None
+        self.messages = self
+
+    async def create(self, **kw):
+        self.calls.append(kw)
+        if self.raise_:
+            raise self.raise_
+        name = kw["tools"][0]["name"]
+        return type("R", (), {"content": [_Blk(name, self.answers[name])], "usage": _Usage(1000, 200)})()
+
+
+def life_sim() -> None:
+    """生活模擬（Haiku）：行程驗過才用、照表走位不花錢、整段閒聊一次呼叫、工作優先、預算封頂、出錯冷卻、重啟不失憶。"""
+    import agent as life
+    import httpx
+    a, b = main.agents["p05"], main.agents["p07"]
+    saved = (main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT, main.LIFE_BUDGET,
+             set(main.in_world), dict(main.life_spend), dict(main.life_pause))
+    sent: list[dict] = []
+
+    async def fake_send(cmd):
+        sent.append(cmd)
+        return True
+
+    async def fake_walk(x, target):
+        main.occupied[x.id] = target
+        return True
+    places = [main.OWN_DESK, "飲水機", "會議室"]
+    fake = _LifeClient({
+        "set_plan": {"steps": [
+            {"minutes": 30, "place": main.OWN_DESK, "activity": "整理桌面", "pose": "看書", "say": "來整理一下"},
+            {"minutes": 100, "place": "飲水機", "activity": "裝水", "with": b.name},
+            {"minutes": 10, "place": "火星", "activity": "去不了的地方"},
+            {"minutes": 10, "place": "會議室", "activity": "發呆", "with": "不存在的人", "pose": "倒立"}]},
+        "chat": {"lines": [{"who": a.name, "text": "早啊，今天好冷"}, {"who": "路人", "text": "我不在這裡"},
+                           {"who": b.name, "text": "對啊，" + "冷" * 40}, {"who": a.name, "text": "去裝杯熱水"}],
+                 "a_memory": f"{b.name}也覺得冷", "b_memory": f"{a.name}要去裝熱水", "closer": 1},
+        "reflect": {"insights": ["我好像很怕冷", ""]}})
+    try:
+        main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT = fake, False, fake_send, fake_walk, 0
+        main.LIFE_BUDGET = 1.0
+        main.life_spend.update(day="", usd=0.0); main.life_pause.update(until=0.0, warned=False)
+        main.in_world.clear(); main.in_world.update({"p05", "p07"})
+        for x in (a, b):
+            x.memory, x.relations, x.plan, x.since_reflect = [], {}, {}, 0
+            main.busy.discard(x.id); main.life_chatting.discard(x.id); main.life_quiet.discard(x.id)
+        main.last_chat["at"] = -1e9; main.pair_chat.clear(); main.life_log.clear()
+
+        # ① 花費照回應的 usage 算：Haiku 4.5 $1／$5 每百萬 token
+        assert abs(life.usage_cost(_Usage(1000, 200)) - 0.002) < 1e-12
+
+        # ② 排行程：地點不在清單上的丟掉、分鐘夾在範圍內、不認識的人與動作清掉；照表的第一段不花錢
+        steps, cost = asyncio.run(a.make_plan(fake, "09:00", places, {b.name: "還不熟"}))
+        assert [s["place"] for s in steps] == [main.OWN_DESK, "飲水機", "會議室"], steps
+        assert steps[1]["minutes"] == life.PLAN_MAX and steps[1]["with"] == b.name, steps[1]
+        assert steps[2]["with"] == "" and steps[2]["pose"] == "", "不在名單上的人、不在清單上的動作要清掉"
+        assert fake.calls[-1]["model"] == life.LIFE_MODEL == "claude-haiku-4-5" and "output_config" not in fake.calls[-1], \
+            "Haiku 4.5 不收 effort：送了會 400"
+        a.plan = {"at": time.time() - 60, "steps": steps}
+        i, step, end = main.life_step(a)
+        assert i == 0 and step["activity"] == "整理桌面" and end > time.time()
+        n0 = len(fake.calls)
+        sent.clear(); asyncio.run(main.life_do(a, step))
+        assert {"agent_id": "p05", "action": "use", "target": "book"} in sent, sent
+        assert {"agent_id": "p05", "action": "say", "channel": "public", "text": "來整理一下"} in sent, sent
+        assert len(fake.calls) == n0, "照表走位不該呼叫模型"
+        a.plan = {"at": time.time() - 99999, "steps": steps}
+        assert main.life_step(a) is None, "行程走完了要重排"
+
+        # ③ 閒聊：整段一次呼叫、照順序輪流冒泡；說話的人不在對話裡的句子丟掉、太長的剪短；記憶與好感都記上
+        sent.clear(); n0 = len(fake.calls)
+        assert asyncio.run(main.life_chat(a, b, "飲水機")) is True
+        assert len(fake.calls) == n0 + 1, "一段對話只該呼叫一次"
+        says = [(c["agent_id"], c["text"]) for c in sent if c["action"] == "say"]
+        assert [x[0] for x in says] == ["p05", "p07", "p05"] and len(says[1][1]) == life.LINE_MAX, says
+        assert a.memory[-1]["kind"] == "chat" and b.name in a.memory[-1]["text"] and a.relations["p07"]["score"] == 1
+        assert b.relations["p05"]["note"] == f"{a.name}要去裝熱水" and main.life_log[-1]["b"] == "p07"
+        assert not main.life_chatting and "p07" in main.life_quiet, "聊完兩個人都要放回去；被拉來的人回去接著做"
+        assert asyncio.run(main.life_chat(a, b, "飲水機")) is False, "同一對人剛聊過：冷卻中"
+
+        # ④ 工作優先：聊到一半被派工，話就散了
+        main.last_chat["at"] = -1e9; main.pair_chat.clear(); sent.clear()
+
+        async def send_then_work(cmd):
+            sent.append(cmd)
+            main.busy.add("p07")   # 第一句一出去就有人派工給他
+            return True
+        main.send_cmd = send_then_work
+        asyncio.run(main.life_chat(a, b, "飲水機"))
+        assert len([c for c in sent if c["action"] == "say"]) == 1, sent
+        assert a.memory[-1]["text"] == f"和{b.name}聊到一半就散了" and a.relations["p07"]["score"] == 1, \
+            "沒說出口的後半段不能記成聊過了"
+        assert asyncio.run(main.life_chat(a, b, "飲水機")) is False, "上工中的人不能被拉去聊天"
+        main.busy.discard("p07"); main.send_cmd = fake_send
+
+        # ④-2 櫃檯的人走不出來（四面被櫃檯圍住）：找她聊的人走到櫃檯前，她自己不動
+        rec, walked = main.agents["p10"], []
+
+        async def rec_walk(x, t):
+            walked.append((x.id, t))
+            main.occupied[x.id] = t
+            return True
+        old_wl, main.waypoint_list = main.waypoint_list, [main.RECEPTION_FRONT, "lobby_1", "lobby_2"]
+        main.walk = rec_walk
+        main.in_world.add("p10"); main.last_chat["at"] = -1e9; main.pair_chat.clear()
+        try:
+            assert asyncio.run(main.life_chat(rec, a, main.OWN_DESK)) is True
+            assert walked == [("p05", main.RECEPTION_FRONT)], f"櫃檯的人不能被叫出來：{walked}"
+        finally:
+            main.walk, main.waypoint_list = fake_walk, old_wl
+            main.in_world.discard("p10"); main.occupied.pop("p05", None)
+
+        # ⑤ 反思：空的心得丟掉，心得的重要度最高
+        a.since_reflect = 99
+        asyncio.run(main.life_reflect(a))
+        assert a.memory[-1]["text"] == "心得：我好像很怕冷" and a.memory[-1]["imp"] == 8 and a.since_reflect == 0
+
+        # ⑥ 預算封頂：花到上限之後不再叫模型，行程改走規則排的
+        main.life_spend["usd"] = main.LIFE_BUDGET
+        n0 = len(fake.calls)
+        asyncio.run(main.life_replan(a))
+        assert len(fake.calls) == n0 and a.plan["llm"] is False and a.plan["steps"], "超過預算：不呼叫、走規則排的行程"
+        main.life_spend["usd"] = 0.0
+
+        # ⑦ 出錯冷卻：額度不足／key 不對這類 4xx 改了設定才會好——十分鐘內不再叫
+        fake.raise_ = anthropic_error(401)
+        asyncio.run(main.life_replan(a))
+        assert a.plan["llm"] is False and main.life_pause["until"] > time.monotonic() + 500, main.life_pause
+        fake.raise_ = None
+        n0 = len(fake.calls)
+        asyncio.run(main.life_replan(a))
+        assert len(fake.calls) == n0, "冷卻中不該再叫"
+        main.life_pause["until"] = 0.0
+
+        # ⑧ 真的工作進生活的記憶（帶任務名）；老闆的評語也是
+        with TestClient(main.app) as c:
+            post(c, agent="p05", kind="start", label="整理競品表")
+            post(c, agent="p05", kind="done", label="ok")
+            texts = a.memory_texts
+            assert "接到工作任務「整理競品表」，開始上工" in texts and "完成了工作任務「整理競品表」" in texts, texts[-4:]
+            r = c.get("/office/life?agent=p05").json()
+            assert r["model"] == "claude-haiku-4-5" and r["mode"] == "life" and "p05" in r["agents"], r
+            assert r["agents"]["p05"]["rel"][0]["name"] == b.name and r["chats"], r
+
+        # ⑨ 重啟不失憶、名冊重載（團隊設定存檔）也不失憶
+        a.plan = {"at": time.time(), "steps": steps}
+        main.save_state()
+        main.life_saved.clear()
+        main.load_state()
+        assert main.life_saved["p05"]["mem"][-1]["text"] == a.memory[-1]["text"], "狀態檔裡要有生活的心智"
+        main.life_saved.clear()
+        main.load_roster()
+        a2 = main.agents["p05"]
+        assert a2 is not a and a2.relations.get("p07", {}).get("score") == 1 and a2.plan["steps"], "重載名冊把心智弄丟了"
+
+        # ⑩ 生活模擬模式：生活迴圈交給 life_loop（純投影模式才是零成本 idle）
+        went = []
+
+        async def fake_life(x):
+            went.append(x.id)
+        old_ll, main.life_loop = main.life_loop, fake_life
+        try:
+            asyncio.run(REAL_AGENT_LOOP(a2, []))
+        finally:
+            main.life_loop = old_ll
+        assert went == ["p05"], went
+    finally:
+        (main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT, main.LIFE_BUDGET) = saved[:6]
+        main.in_world.clear(); main.in_world.update(saved[6])
+        main.life_spend.clear(); main.life_spend.update(saved[7]); main.life_pause.update(saved[8])
+        main.STATE_FILE.unlink(missing_ok=True)
+        main.life_chatting.clear(); main.life_quiet.clear(); main.busy.discard("p07")
+
+
+def anthropic_error(status: int):
+    import anthropic
+    import httpx
+    resp = httpx.Response(status, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return anthropic.APIStatusError("credit balance too low", response=resp, body=None) if status != 401 else \
+        anthropic.AuthenticationError("invalid x-api-key", response=resp, body=None)
 
 
 if __name__ == "__main__":

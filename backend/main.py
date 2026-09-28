@@ -6,10 +6,9 @@
 
 流程：
   Unity 連上 /ws → 送握手 {"type":"waypoints","agents":[...],"list":[...]}
-  → 每個 agent 一個決策迴圈：decide()（Claude）→ 推指令給 Unity → arrived 寫回記憶
-  → say 全員廣播進記憶（小辦公室聽得到）；say 帶 to＝搭話 → 展開回合對話
-    （最多 MAX_ROUNDS 輪，對話中雙方主迴圈掛起）
-  ponytail: 廣播不分距離——一間房 3 個人合理；房間多了再做鄰近過濾
+  → 每個 agent 一個生活迴圈：純投影模式（OFFICE_MODE=projection）零成本 idle；
+    否則是生活模擬——照 Haiku 排的行程走、遇到同事聊幾句、累積夠了反思（見 life_loop）
+  → 真的工作事件（/office/event）一律蓋過生活
 
 手動介入照舊：
   curl -X POST localhost:8123/cmd -d '{"agent_id":"p17","action":"move_to","target":"cooler_1"}'
@@ -40,9 +39,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent import Agent, build_tools
+load_dotenv()  # 讀 backend/.env（ANTHROPIC_API_KEY=...），已 gitignore。要在 import agent 之前：OFFICE_LIFE_MODEL 在那裡載入時就讀
 
-load_dotenv()  # 讀 backend/.env（ANTHROPIC_API_KEY=...），已 gitignore
+from agent import Agent, LIFE_MODEL  # noqa: E402
 
 app = FastAPI()
 
@@ -210,10 +209,8 @@ if client is None:
 # 生活模擬代碼保留不刪——平台方向完全確定後再清場（概念筆記 §九 決策方向反轉）。
 PROJECTION = os.environ.get("OFFICE_MODE") == "projection"
 
-DECISION_INTERVAL = (8.0, 25.0)  # 決策間隔秒數範圍（拉長省成本、縮短加快節奏）
 IDLE_INTERVAL = (45.0, 120.0)    # 純投影模式的 idle 走動間隔（點綴用，別太熱鬧）
 IDLE_SLEEP = 600.0               # 這麼久沒接到工作＝回工位趴著（「這位沒事做」要看得出來）
-MAX_ROUNDS = 5                   # 對話回合上限（指南 §3：4~6 輪強制結束）
 BUBBLE_WAIT = 2.8                # 每句話的展示間隔（等泡泡讀完）
 BUBBLE_GAP = 2.2                 # 投影泡泡最小展示間隔（工具連發時後浪蓋前浪）
 STOP_ECHO = "office 送來的 /stop"   # cogito 的中止紀錄開頭＝平台名（NewCore("office")）＋固定字樣
@@ -259,7 +256,7 @@ async def handle_event(evt: dict) -> None:
         aid = evt.get("agent_id", "")
         if aid in agents:
             agents[aid].location = evt.get("at", "?")
-            agents[aid].remember(f"到了{evt.get('at')}")
+            agents[aid].remember(f"到了{evt.get('at')}", imp=1)
             arrived[aid].set()
     else:
         print("事件:", evt)
@@ -312,7 +309,11 @@ def load_roster() -> None:
         agents.pop(aid)
         arrived.pop(aid, None)
     for aid in wanted:
-        agents[aid] = Agent(aid, TEAM_DIR)
+        old, agents[aid] = agents.get(aid), Agent(aid, TEAM_DIR)
+        if old is not None and old.name == agents[aid].name:
+            agents[aid].load_life(old.life_state())   # 同一個人：記憶、人際、行程照舊（換了人就從頭認識大家）
+        elif isinstance(saved := life_saved.pop(aid, None), dict):
+            agents[aid].load_life(saved)
         arrived.setdefault(aid, asyncio.Event())
         # 閒置計時從【現在】起算：預設 0.0 的話，「從沒接過任務」會被算成「閒了很久」，
         # 於是一開機全員直接回工位趴著，再也不會走動（實測到的）。
@@ -350,19 +351,20 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
     waypoint_list = waypoints
     unity_ids[:] = agent_ids
     present = set(agent_ids) or set(npcs())   # 舊版畫面沒回報名單就當全員都在
+    in_world.clear()
     for aid, a in npcs().items():   # 看板沒有身體，不進生活迴圈也不算同事
         if aid not in present:   # 名冊有、畫面沒有的人：不開迴圈——他的每個 move_to 都會等到逾時、還把畫面誤判成凍結
             continue
-        colleagues = [o.name for oid, o in npcs().items() if oid != aid]
-        tools = build_tools(waypoints, colleagues)
-        loops.append(asyncio.create_task(agent_loop(a, tools)))
+        in_world.add(aid)
+        loops.append(asyncio.create_task(agent_loop(a, [])))
     global watchdog
     if watchdog is None or watchdog.done():
         watchdog = asyncio.create_task(work_watchdog())
     if PROJECTION:
         mode = "純投影（生活大腦停用，idle 走動）"
     else:
-        mode = "Claude 決策" if client else "隨機走動（無 API key）"
+        mode = (f"生活模擬（{LIFE_MODEL}，每天上限 ${LIFE_BUDGET:g}）" if client
+                else "生活模擬（沒有 API key：照規則排行程、不聊天）")
     print(f"啟動 {len(agents)} 個 agent（{mode}），{len(waypoints)} 個互動點")
 
 
@@ -374,6 +376,9 @@ def stop_agents() -> None:
         t.cancel()
     loops.clear()
     occupied.clear()
+    in_world.clear()
+    life_chatting.clear()
+    life_cur.clear()   # 重新連上時每個人重新走到自己這一段的位子
     bubble_q.clear()
     pacers.clear()
     # sub_active 的值是【list】（同名子 agent 可並行），set() 直接包會 TypeError:
@@ -391,23 +396,6 @@ def find_by_name(name: str | None) -> Agent | None:
         if a.name == name:
             return a
     return None
-
-
-def others_desc(me: Agent) -> str:
-    return "，".join(
-        f"{o.name}在{o.location}" for oid, o in agents.items() if oid != me.id
-    )
-
-
-def broadcast_say(speaker: Agent, text: str, target: Agent | None) -> None:
-    """一間房大家都聽得到：對象記「對我說」，旁人記「聽到」。"""
-    for oid, other in agents.items():
-        if oid == speaker.id:
-            continue
-        if target is not None and oid == target.id:
-            other.remember(f"{speaker.name}對我說「{text}」")
-        else:
-            other.remember(f"聽到{speaker.name}說「{text}」")
 
 
 async def send_cmd(cmd: dict) -> bool:
@@ -433,119 +421,65 @@ async def send_cmd(cmd: dict) -> bool:
     return bool(viewers)
 
 
-async def converse(a: Agent, b: Agent, opening: str) -> None:
-    """對話回合迴圈（指南 §3）：a 對 b 說了 opening，之後輪流回話，上限 MAX_ROUNDS。"""
-    busy.add(a.id)
-    busy.add(b.id)
-    print(f"💬 {a.name} ↔ {b.name} 開聊：「{opening}」")
+async def walk(a: Agent, target: str) -> bool:
+    """走過去、等到點（30 秒沒回報＝畫面多半凍結了）。佔位記在 occupied，別人就不會擠過來。"""
+    global canvas_stale
+    occupied[a.id] = target
+    arrived[a.id].clear()
+    await send_cmd({"agent_id": a.id, "action": "move_to", "target": target})
     try:
-        speaker, listener, line = b, a, opening
-        for _ in range(MAX_ROUNDS):
-            await asyncio.sleep(BUBBLE_WAIT)  # 等上一句泡泡讀完
-            try:
-                act = await speaker.decide_reply(client, listener.name, line)
-            except Exception as e:
-                print(f"⚠ {speaker.id} 回話失敗（{type(e).__name__}），散會")
-                break
-            if not act or act.get("action") != "reply" or not act.get("text"):
-                print(f"💬 {speaker.name} 結束了對話")
-                break
-            line = act["text"]
-            if not await send_cmd({"agent_id": speaker.id, "action": "say",
-                                   "channel": "public", "text": line}):
-                break
-            print(f"💬 {speaker.name} → {listener.name}：「{line}」")
-            speaker.remember(f"回{listener.name}「{line}」")
-            broadcast_say(speaker, line, listener)
-            speaker, listener = listener, speaker
-        else:
-            print(f"💬 {a.name} ↔ {b.name} 聊到回合上限，散會")
-    finally:
-        busy.discard(a.id)
-        busy.discard(b.id)
+        await asyncio.wait_for(arrived[a.id].wait(), timeout=30.0)
+        return True
+    except asyncio.TimeoutError:
+        if not canvas_stale:  # 指令沒回音：畫面十之八九凍結了，讓外殼顯示出來
+            canvas_stale = True
+            print("⚠ 移動指令無回應——WebGL 分頁可能被凍結（重整該分頁）")
+            notify("roster")
+        return False
 
 
-async def agent_loop(a: Agent, tools: list[dict]) -> None:
+async def agent_loop(a: Agent, tools: list | None = None) -> None:
+    """生活迴圈。生活模擬交給 life_loop；純投影模式（OFFICE_MODE=projection）在這裡：
+    零成本 idle——偶爾走動，太久沒接到工作就回工位趴著，崗位固定的人留在崗位上。"""
+    if not PROJECTION:
+        return await life_loop(a)
     await asyncio.sleep(random.uniform(1.0, 6.0))  # 錯開起步
     while viewers:
-        while a.id in busy:  # 對話中掛起主迴圈
+        while a.id in busy:  # 上工中掛起
             await asyncio.sleep(1.0)
         going_to_sleep = False
-
-        try:
-            if client is not None and not PROJECTION:
-                actions = await a.decide(client, tools, others_desc(a))
-            elif a.id in sleeping:
-                actions = []   # 已經趴著了：安靜等下一輪（有事件會把他叫醒）
-            elif time.monotonic() - last_work.get(a.id, 0.0) > IDLE_SLEEP:
-                # 太久沒接到工作：回自己工位趴著。這是狀態投影不是裝飾——
-                # 「閒晃」與「沒事做」在畫面上長得一樣，久了看板就失去訊息量。
-                desk = WORK_DESK.get(a.id)
-                actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
-                    if desk else [{"action": "use", "target": "sleep"}]
-                going_to_sleep = True   # 趴下【之後】才算睡著（見迴圈尾）
-            elif stays_put(a.id):   # 崗位固定：不走位，偶爾接個電話點綴，其餘時間就是在櫃檯辦公
-                actions = [{"action": "use", "target": random.choice([SIT_AT.get(a.id, "face_down")] * 3 + ["phone"])}]
-            else:  # 零成本 idle：不打 API，偶爾走動點綴
-                actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
-        except Exception as e:
-            print(f"⚠ {a.id} decide 失敗（{type(e).__name__}: {e}），隨機走")
-            actions = [{"action": "move_to", "target": random.choice(waypoint_list)}]
+        if a.id in sleeping:
+            actions = []   # 已經趴著了：安靜等下一輪（有事件會把他叫醒）
+        elif time.monotonic() - last_work.get(a.id, 0.0) > IDLE_SLEEP:
+            # 太久沒接到工作：回自己工位趴著。這是狀態投影不是裝飾——
+            # 「閒晃」與「沒事做」在畫面上長得一樣，久了看板就失去訊息量。
+            desk = WORK_DESK.get(a.id)
+            actions = [{"action": "move_to", "target": desk}, {"action": "use", "target": "sleep"}] \
+                if desk else [{"action": "use", "target": "sleep"}]
+            going_to_sleep = True   # 趴下【之後】才算睡著（見迴圈尾）
+        elif stays_put(a.id):   # 崗位固定：不走位，偶爾接個電話點綴，其餘時間就是在櫃檯辦公
+            actions = [{"action": "use", "target": random.choice([SIT_AT.get(a.id, "face_down")] * 3 + ["phone"])}]
+        else:  # 零成本 idle：不打 API，偶爾走動點綴
+            actions = [{"action": "move_to", "target": random.choice(waypoint_list)}] if waypoint_list else []
 
         for act in actions:
             if not viewers:
                 return
-            if a.id in busy:  # 剛被人搭話，放棄剩餘動作
+            if a.id in busy:  # 剛被派工，放棄剩餘動作
                 going_to_sleep = False
                 break
-
             if act["action"] == "use":
                 await pose(a.id, act["target"])
                 continue
-
-            if act["action"] == "move_to":
-                # 佔位守衛：目的地被同事佔用就換空位（大腦知道同事動態，這是硬保險）
-                taken = {t for aid, t in occupied.items() if aid != a.id}
-                target = act.get("target")
-                if not target:
+            # 佔位守衛：目的地被同事佔用就換空位
+            taken = {t for aid, t in occupied.items() if aid != a.id}
+            target = act["target"]
+            if target in taken:
+                free = [w for w in waypoint_list if w not in taken]
+                if not free:
                     continue
-                if target in taken:
-                    free = [w for w in waypoint_list if w not in taken]
-                    if not free:
-                        continue
-                    new_target = random.choice(free)
-                    a.remember(f"想去{target}但有人，改去{new_target}")
-                    target = new_target
-                    act = {"action": "move_to", "target": target}
-                occupied[a.id] = target
-
-                await send_cmd({"agent_id": a.id, **act})
-                print(f"{a.name}: {act}")
-                a.remember(f"出發去{target}")
-                arrived[a.id].clear()
-                try:
-                    await asyncio.wait_for(arrived[a.id].wait(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    a.remember("剛剛走去某處超時沒走到")
-                    global canvas_stale
-                    if not canvas_stale:  # 指令沒回音：畫面十之八九凍結了，讓外殼顯示出來
-                        canvas_stale = True
-                        print("⚠ 移動指令無回應——WebGL 分頁可能被凍結（重整該分頁）")
-                        notify("roster")
-
-            elif act["action"] == "say":
-                text = act.get("text", "")
-                if not text:
-                    continue
-                await send_cmd({"agent_id": a.id, "action": "say",
-                                "channel": "public", "text": text})
-                print(f"{a.name}: {act}")
-                a.remember(f"說了「{text}」")
-                target_agent = find_by_name(act.get("to"))
-                broadcast_say(a, text, target_agent)
-                # 搭話且對方有空 → 展開對話迴圈
-                if target_agent and target_agent.id not in busy and client is not None:
-                    await converse(a, target_agent, text)
+                target = random.choice(free)
+            await walk(a, target)
 
         if going_to_sleep:
             # 人真的趴到位子上了才掛 zZ。先掛的話，去工位那段路就是「掛著 zZ 在走」——
@@ -553,7 +487,245 @@ async def agent_loop(a: Agent, tools: list[dict]) -> None:
             sleeping.add(a.id)
             await sync_emote(a.id)
 
-        await asyncio.sleep(random.uniform(*(IDLE_INTERVAL if PROJECTION else DECISION_INTERVAL)))
+        await asyncio.sleep(random.uniform(*IDLE_INTERVAL))
+
+
+# ── 生活模擬（OFFICE_MODE 不是 projection）──────────────────────────────────────
+# 照 Generative Agents 的骨架：每人有行程、記憶流、人際關係，會反思。為了成本改寫成（agent.py 的三種呼叫）：
+#   排行程——每人每三小時一次；照表走位不花錢
+#   閒聊——兩人碰到時整段對話一次寫完（不是一句一呼叫）
+#   反思——累積的重要度夠了才做
+# 真的工作永遠蓋過生活：被派工的人（busy）立刻停下，話說到一半也散。
+# 生活是生活、工作是工作：閒聊只准提記憶裡真的做過的工作（LIFE_RULES），人物動作不是工作的證據。
+LIFE_BUDGET = float(os.environ.get("OFFICE_LIFE_BUDGET_USD") or 1.0)   # 每天最多花幾美元；到了就改走規則排的行程、不聊天
+LIFE_TICK = 30.0     # 同一段行程裡多久看一次（有沒有被派工、這段結束了沒）
+CHAT_GAP = 90.0      # 全辦公室兩段閒聊至少隔幾秒（熱鬧與成本的平衡）
+PAIR_GAP = 1200.0    # 同一對人多久才再聊（別一直黏著同一個人）
+CHAT_CHANCE = 0.35   # 在茶水間這類地方遇到有空的同事，聊起來的機率
+REFLECT_AT = 40      # 累積多少重要度就反思一次（聊天 5、工作 6、瑣事 1）
+OWN_DESK = "自己的座位"
+# 行程上的地點（講給模型聽的名字）→ 站得過去的點（RoomBuilder 的 waypoint；畫面上沒有的自動不列）
+PLACES = {"飲水機": ["cooler_1", "cooler_2"], "販賣機": ["vending_1"], "印表機": ["printer_1"],
+          "大廳沙發": ["lobby_1", "lobby_2"], "會議室": ["meet_a1", "meet_b1", "meet_a2", "meet_b2", "meet_a3", "meet_b3"],
+          "白板": ["board_1"], "大門口": ["entrance"]}
+SOCIAL = {"飲水機", "販賣機", "大廳沙發"}   # 在這些地方遇到人會聊起來
+RECEPTION_FRONT = "reception_1"   # 櫃檯前（訪客站的那格）：櫃檯的人走不出來，找她聊的人站這裡
+CHAT_SEATS = [("lobby_1", "lobby_2"), ("meet_a1", "meet_b1"), ("meet_a2", "meet_b2"), ("meet_a3", "meet_b3")]   # 面對面的兩個位子
+LIFE_POSE = {"看書": "book", "講電話": "phone", "打盹": "sleep"}
+life_spend = {"day": "", "usd": 0.0}   # 今天花了多少（隨 state 持久化）
+life_saved: dict[str, dict] = {}        # 狀態檔讀進來、還沒交給 Agent 的心智（load_state 比 load_roster 早跑）
+life_chatting: set[str] = set()         # 正在閒聊的人。不用 busy：busy 是工作的，聊完 discard 會把工作一起清掉
+life_quiet: set[str] = set()            # 被拉去聊天的人：回去接著做自己那段時不再重記、不再開口
+life_cur: dict[str, tuple] = {}         # aid -> 正在做的那一段（行程開始時間, 第幾段）
+life_log: deque = deque(maxlen=30)      # 最近的閒聊（外殼的生活頁看）
+in_world: set[str] = set()              # 畫面上真的有身體、有生活迴圈的人
+last_chat = {"at": -1e9}
+pair_chat: dict[frozenset, float] = {}
+life_sem = asyncio.Semaphore(2)         # 同時最多兩個生活呼叫：一開機八個人一起排行程，別一次衝出去
+life_pause = {"until": 0.0, "warned": False}
+
+
+def life_on() -> bool:
+    return not PROJECTION and client is not None
+
+
+def life_budget_left() -> bool:
+    today = time.strftime("%Y-%m-%d")
+    if life_spend["day"] != today:
+        life_spend.update(day=today, usd=0.0)
+        life_pause["warned"] = False
+    return life_spend["usd"] < LIFE_BUDGET
+
+
+async def life_call(fn):
+    """生活模擬的每一次模型呼叫都走這裡：沒 key、今天預算用完、剛出錯在冷卻中就不叫——回 None，
+    呼叫端退回不花錢的做法（規則排的行程、不聊天）。SDK 本身已重試過 429／5xx／連線錯誤兩次，到這裡的都是持續性的。"""
+    global _dirty
+    if not life_on() or not life_budget_left() or time.monotonic() < life_pause["until"]:
+        return None
+    async with life_sem:
+        try:
+            res, cost = await fn()
+        except anthropic.RateLimitError:
+            life_pause["until"] = time.monotonic() + 120
+            print("⚠ 生活模擬被限流，兩分鐘後再試（這段時間走規則排的行程）")
+            return None
+        except anthropic.APIStatusError as e:   # 400／401／403（額度不足、key 不對、模型名錯）：改了設定才會好
+            life_pause["until"] = time.monotonic() + 600
+            print(f"⚠ 生活模擬呼叫被拒（{e.status_code}：{str(e.message)[:120]}）——十分鐘內不再叫")
+            return None
+        except anthropic.APIConnectionError:
+            life_pause["until"] = time.monotonic() + 60
+            print("⚠ 生活模擬連不上 API，一分鐘後再試")
+            return None
+    life_spend["usd"] += cost
+    _dirty = True
+    if not life_budget_left() and not life_pause["warned"]:
+        life_pause["warned"] = True
+        print(f"ℹ 生活模擬今天花到 ${life_spend['usd']:.3f}（上限 ${LIFE_BUDGET}）——今天剩下的時間走規則排的行程、不聊天")
+    return res
+
+
+def life_places(aid: str) -> list[str]:
+    if stays_put(aid):
+        return [OWN_DESK]   # 崗位固定的人（櫃檯）：生活也在崗位上，同事會過來找他
+    return [OWN_DESK] + [k for k, pts in PLACES.items() if any(p in waypoint_list for p in pts)]
+
+
+def life_spot(aid: str, place: str) -> str | None:
+    if place == OWN_DESK:
+        return WORK_DESK.get(aid)
+    taken = {t for x, t in occupied.items() if x != aid}
+    return next((p for p in PLACES.get(place, []) if p in waypoint_list and p not in taken), None)
+
+
+def fallback_plan(aid: str) -> list[dict]:
+    """不花錢的行程（沒 key、今天預算用完、模型回的不能用）：大多在座位，偶爾去走走。"""
+    places, out = life_places(aid), []
+    for _ in range(4):
+        out.append({"minutes": random.randint(15, 40), "place": OWN_DESK, "activity": "在座位上", "pose": "", "with": "", "say": ""})
+        if len(places) > 1:
+            out.append({"minutes": random.randint(5, 10), "place": random.choice(places[1:]), "activity": "走走",
+                        "pose": "", "with": "", "say": ""})
+    return out
+
+
+def life_now() -> str:
+    return time.strftime("%H:%M") + f"（週{'一二三四五六日'[time.localtime().tm_wday]}）"
+
+
+def life_step(a: Agent) -> tuple[int, dict, float] | None:
+    """行程上現在這一段：(第幾段, 那一段, 結束的 epoch)。行程走完了（或還沒排）回 None。"""
+    t = float(a.plan.get("at") or 0.0)
+    for i, s in enumerate(a.plan.get("steps") or []):
+        end = t + s["minutes"] * 60
+        if t <= time.time() < end:
+            return i, s, end
+        t = end
+    return None
+
+
+async def life_replan(a: Agent) -> None:
+    mates = {o.name: (a.relations.get(oid) or {}).get("note") or o.role
+             for oid, o in npcs().items() if oid != a.id and oid in in_world}
+    places = life_places(a.id)
+    steps = await life_call(lambda: a.make_plan(client, life_now(), places, mates))
+    a.plan = {"at": time.time(), "steps": steps or fallback_plan(a.id), "llm": bool(steps)}
+    notify("life", a.id)
+
+
+def chat_free(a: Agent, b: Agent) -> bool:
+    """這兩個人現在能不能聊：都在畫面上、都沒在工作或聊天、全辦公室與這一對的冷卻都過了、還叫得動模型。"""
+    now = time.monotonic()
+    return (b.id in in_world and a.id != b.id and not {a.id, b.id} & (busy | life_chatting)
+            and now - last_chat["at"] >= CHAT_GAP and now - pair_chat.get(frozenset((a.id, b.id)), -1e9) >= PAIR_GAP
+            and life_on() and life_budget_left() and now >= life_pause["until"])
+
+
+async def life_chat(a: Agent, b: Agent, place: str) -> bool:
+    """a 找 b 聊：有人在櫃檯（走不出來）→ 另一個人走到櫃檯前；b 坐在自己位子上 → a 走到他桌邊；
+    不然找一組面對面的空位兩人一起過去。整段對話一次寫完、輪流冒泡。"""
+    if not chat_free(a, b):
+        return False
+    now = time.monotonic()
+    last_chat["at"] = now
+    pair_chat[frozenset((a.id, b.id))] = now
+    life_chatting.update((a.id, b.id))
+    try:
+        taken = {t for x, t in occupied.items() if x not in (a.id, b.id)}
+        side = DESK_SIDE.get(b.id)
+        if stays_put(a.id) or stays_put(b.id):
+            guest = b if stays_put(a.id) else a
+            if stays_put(guest.id) or RECEPTION_FRONT not in waypoint_list or RECEPTION_FRONT in taken:
+                return False   # 兩個都走不出來、或櫃檯前有人：這次不聊
+            place = "櫃檯前"
+            await walk(guest, RECEPTION_FRONT)
+        elif occupied.get(b.id) == WORK_DESK.get(b.id) and side and side not in taken:
+            place = f"{b.name}的座位旁"
+            await walk(a, side)
+        elif seats := next((p for p in CHAT_SEATS if p[0] in waypoint_list and not set(p) & taken), None):
+            await asyncio.gather(walk(a, seats[0]), walk(b, seats[1]))
+        res = await life_call(lambda: a.chat(client, b, place, life_now()))
+        if not res:
+            return False
+        said = []
+        for ln in res["lines"]:
+            if a.id in busy or b.id in busy:
+                break   # 有人被派工：工作優先，話說到一半就散
+            sp = a if ln["who"] == a.name else b
+            await send_cmd({"agent_id": sp.id, "action": "say", "channel": "public", "text": ln["text"]})
+            said.append(ln)
+            await asyncio.sleep(BUBBLE_WAIT)
+        if len(said) < len(res["lines"]):
+            # 被工作打斷：後半段根本沒說出口，那份「各自記住什麼」是整段寫的——不能記成聊過了
+            a.remember(f"和{b.name}聊到一半就散了", imp=2, kind="chat")
+            b.remember(f"和{a.name}聊到一半就散了", imp=2, kind="chat")
+        else:
+            a.remember(f"和{b.name}聊天：{res['a_memory']}", imp=5, kind="chat")
+            b.remember(f"和{a.name}聊天：{res['b_memory']}", imp=5, kind="chat")
+            a.feel(b.id, res["closer"], res["a_memory"])
+            b.feel(a.id, res["closer"], res["b_memory"])
+        life_log.append({"at": time.strftime("%H:%M"), "a": a.id, "b": b.id, "place": place, "lines": said})
+        print(f"💬 {a.name} ↔ {b.name}（{place}）：" + "／".join(f"{x['who']}：{x['text']}" for x in said))
+        notify("life", a.id)
+        return True
+    finally:
+        life_chatting.difference_update((a.id, b.id))
+        life_cur.pop(b.id, None)   # 被拉來聊的人：回去接著做自己那一段
+        life_quiet.add(b.id)
+
+
+async def life_do(a: Agent, step: dict, quiet: bool = False) -> None:
+    """開始行程上的一段：找人聊、或走過去擺姿勢、隨口說一句；在茶水間這類地方遇到有空的人可能聊起來。
+    quiet＝被拉去聊天後回來接著做：只走回去，不重記、不再開口。"""
+    if not quiet:
+        a.remember(f"{step['activity']}（{step['place']}）", imp=1)
+        mate = find_by_name(step.get("with") or None)
+        if mate and await life_chat(a, mate, step["place"]):
+            return
+    spot = life_spot(a.id, step["place"])
+    if spot and occupied.get(a.id) != spot:
+        await walk(a, spot)
+    if a.id in busy or a.id in life_chatting:
+        return   # 路上被派工、或被同事拉去聊了
+    if p := LIFE_POSE.get(step.get("pose") or ""):
+        await pose(a.id, p)
+    if quiet:
+        return
+    if step.get("say"):
+        await send_cmd({"agent_id": a.id, "action": "say", "channel": "public", "text": step["say"]})
+    if step["place"] in SOCIAL and random.random() < CHAT_CHANCE:
+        near = [o for oid, o in npcs().items() if chat_free(a, o) and (s := life_step(o)) and s[1]["place"] in SOCIAL]
+        if near:
+            await life_chat(a, random.choice(near), step["place"])
+
+
+async def life_reflect(a: Agent) -> None:
+    a.since_reflect = 0
+    for x in await life_call(lambda: a.reflect(client)) or []:
+        a.remember(f"心得：{x}", imp=8, kind="reflect")
+    a.since_reflect = 0   # 心得本身不再算進下一輪
+
+
+async def life_loop(a: Agent) -> None:
+    await asyncio.sleep(random.uniform(1.0, 6.0))  # 錯開起步
+    while viewers:
+        while a.id in busy or a.id in life_chatting:
+            await asyncio.sleep(1.0)
+        if (cur := life_step(a)) is None:
+            await life_replan(a)
+            if (cur := life_step(a)) is None:
+                await asyncio.sleep(LIFE_TICK)
+                continue
+        i, step, end = cur
+        if life_cur.get(a.id) != (key := (a.plan.get("at"), i)):
+            life_cur[a.id] = key
+            quiet = a.id in life_quiet
+            life_quiet.discard(a.id)
+            await life_do(a, step, quiet)
+        if a.since_reflect >= REFLECT_AT:
+            await life_reflect(a)
+        await asyncio.sleep(max(1.0, min(end - time.time(), LIFE_TICK)))
 
 
 # ── Office 投影：cogito-agent 真工作事件 → 像素辦公室狀態（概念筆記 §十）────────
@@ -1879,7 +2051,7 @@ async def office_event(ev: dict):
                 log_ev(aid, note)
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
-            a.remember(f"接到工作任務「{label}」，開始上工")
+            a.remember(f"接到工作任務「{label}」，開始上工", imp=6, kind="work")
     elif kind == "turn":
         # 回合標記【只在真的安靜時】才記。它原本的用途是填補長考的空白——兩次工具呼叫之間
         # 如果什麼都沒有，看起來像 agent 掛了。但每輪都印就變成另一種噪音：使用者看到的是
@@ -1967,7 +2139,8 @@ async def office_event(ev: dict):
             notify("agent", aid, alert="done" if label == "ok" else "error")
             paid = f"（${cost:.4f}）" if cost else ""  # 中斷也標——燒掉的錢不因失敗就不見
             log_ev(aid, ("✔ 任務完成" if label == "ok" else "✗ 任務中斷") + paid)
-            a.remember("完成了手上的工作任務" if label == "ok" else "工作任務中斷了")
+            t0 = (card or {}).get("task", "")
+            a.remember((f"完成了工作任務「{t0}」" if label == "ok" else f"工作任務「{t0}」中斷了"), imp=6, kind="work")
             c0 = card or {}
             audit("task.done", aid, card=c0.get("id"), label=label, cost=cost, detail=str(ev.get("detail") or "")[:300],
                   engine=c0.get("engine"), model=c0.get("model"), cost_est=True if (cost and c0.get("cost_est")) else None,
@@ -4892,6 +5065,9 @@ async def office_verdict(d: dict):
     card["events"].append({"at": time.strftime("%H:%M:%S"),
                            "text": "✅ 老闆驗收通過" if v == "accepted" else "↺ 老闆要求修改" + (f"：{note}" if note else "")})
     audit("task.verdict", aid, card=card["id"], task_id=card.get("task_id"), verdict=v, note=note)
+    if aid in agents:   # 生活的記憶：老闆的評語是會拿出來聊的事
+        agents[aid].remember((f"老闆驗收通過了「{card['task']}」" if v == "accepted"
+                              else f"老闆要我修改「{card['task']}」" + (f"：{note}" if note else "")), imp=7, kind="work")
     notify("agent", aid)
     await sync_emote(aid)
     return {"ok": True}
@@ -5586,9 +5762,34 @@ def get_agents():
               "memo": memo_pending.get(aid, 0),
               "npc": aid != KANBAN,   # False＝這張卡沒有身體（看板），前端不畫走位/位置
             "model": a.model,      # 設定值（空＝跟 cogito 啟動預設）；實際跑的那個看卡片
-              "memory": list(a.memory)}
+              "memory": a.memory_texts[-12:]}
         for aid, a in agents.items()
     }
+
+
+@app.get("/office/life")
+def office_life(agent: str = ""):
+    """生活模擬的現況：每個人今天的行程（標出正在做哪一段）、人際關係、心得、最近記得的事，加上最近的閒聊與今天的花費。"""
+    life_budget_left()   # 跨日歸零
+
+    def one(a: Agent) -> dict:
+        cur, t, steps = life_step(a), float(a.plan.get("at") or 0.0), []
+        for i, st in enumerate(a.plan.get("steps") or []):
+            steps.append({**st, "at": time.strftime("%H:%M", time.localtime(t)), "now": bool(cur and cur[0] == i)})
+            t += st["minutes"] * 60
+        rel = sorted(({"id": oid, "name": agents[oid].name, **r} for oid, r in a.relations.items() if oid in agents),
+                     key=lambda r: -r["score"])
+        return {"plan": steps, "planned_by": "model" if a.plan.get("llm") else "rules", "rel": rel,
+                "insights": [m["text"] for m in a.memory if m.get("kind") == "reflect"][-3:][::-1],
+                "recent": [m["text"] for m in a.memory if m["imp"] >= 3][-8:][::-1],
+                "chatting": a.id in life_chatting}
+    name = lambda x: agents[x].name if x in agents else x
+    return {"ok": True, "mode": "projection" if PROJECTION else "life", "on": life_on(), "model": LIFE_MODEL,
+            "has_key": client is not None, "spend": round(life_spend["usd"], 4), "budget": LIFE_BUDGET,
+            "paused": time.monotonic() < life_pause["until"],
+            "agents": {aid: one(a) for aid, a in npcs().items() if not agent or aid == agent},
+            "chats": [{**c, "a_name": name(c["a"]), "b_name": name(c["b"])} for c in reversed(life_log)
+                      if not agent or agent in (c["a"], c["b"])][:10]}
 
 
 # ── 持久化：任務卡/黏性指派/審批卡落地 JSON——橋重啟不失憶（cogito 的 session 本來就落地，
@@ -5785,7 +5986,9 @@ def save_state() -> None:
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
             "cli_caps": cli_caps, "cli_model": cli_model,
             "codex_model": codex_model, "codex_threads": codex_threads, "codex_model_sent": codex_model_sent,
-            "memory_seen": memory_seen}   # 記憶檔記過哪些：重啟後不該把舊檔當成新寫的再記一次
+            "memory_seen": memory_seen,   # 記憶檔記過哪些：重啟後不該把舊檔當成新寫的再記一次
+            # 生活模擬的心智與今天的花費：重啟不失憶、預算不歸零。還沒交給 Agent 的（畫面外的人）原樣留著
+            "life": {**life_saved, **{aid: a.life_state() for aid, a in npcs().items()}}, "life_spend": life_spend}
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(STATE_FILE)
@@ -5828,6 +6031,8 @@ def load_state() -> None:
         # cogito 那邊當作「不知道現在設成什麼」，第一次派工送一次 reset 收回（見 office_dispatch）。
         cli_pick.update({k: v for k, v in data.get("model_sent", {}).items() if v and is_claude_model(v)})
     engine_sent.update(data.get("engine_sent", {}))
+    life_saved.update(data.get("life") or {})     # 名冊還沒載（load_roster 在後面）：先放著，建 Agent 時接回去
+    life_spend.update(data.get("life_spend") or {})
     if isinstance(saved := data.get("cli_caps"), dict) and saved.get("tools"):
         cli_caps.update(saved)
     cli_model.update(data.get("cli_model", {}))

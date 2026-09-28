@@ -56,7 +56,9 @@ backend/avatars/                 # 從角色圖抽出的頭像（衍生物）
 | 字型 | Noto Sans CJK TC Regular |
 | 授權 | SIL Open Font License 1.1 |
 | 來源 | https://github.com/notofonts/noto-cjk |
-| 是否包含在本 repository | 否——由 `tools/get_font.sh` 自行下載到 `unity/Assets/Resources/` |
+| 是否包含在本 repository | 否——由 `tools/get_font.sh` 自行下載到 `unity/FontSource/`，再切出常用字子集到 `unity/Assets/Resources/OfficeFont.otf` |
+| 修改 | 子集化（`tools/subset_font.py`：Big5 常用字＋標點＋英數，拿掉 hinting 與排版特性）；字型名稱與授權說明保留 |
+| 隨 WebGL build 散布 | 是：子集字型的字形資料內嵌在 build 裡（動態字型）。散布 build 時請一併附上 OFL 授權 |
 
 ## Unity 套件
 

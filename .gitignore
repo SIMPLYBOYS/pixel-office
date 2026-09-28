@@ -47,7 +47,8 @@ backend/office_state_test.json
 # 名冊頭像（LimeZu 衍生物，跑 tools/make_avatars.py 重生）
 backend/avatars/
 
-# 泡泡中文字型（16MB，OFL 授權；跑 tools/get_font.sh 取得）
+# 泡泡中文字型（OFL 授權；跑 tools/get_font.sh 取得）：完整字型放 FontSource，Resources 裡的是切出來的常用字子集
+unity/FontSource/
 unity/Assets/Resources/OfficeFont.otf
 unity/Assets/Resources/OfficeFont.otf.meta
 

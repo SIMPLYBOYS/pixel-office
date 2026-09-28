@@ -56,8 +56,17 @@ cd backend
 - `OFFICE_MODE=projection`（預設建議）：生活大腦（Claude 決策閒逛/搭話）停用，NPC 平時
   零成本 idle（偶爾隨機走動），只有 cogito 的 `/office/event` 工作事件驅動行為——
   接真工作用這個，不燒 API、狀態畫面也不被閒逛污染。
-- 註解掉該行＝生活模擬 demo 模式（Claude 決策過日子）。
-- 判準：啟動連上 Unity 後印「啟動 N 個 agent（純投影…）」即生效；改 `.env` 後要重啟 uvicorn。
+- 註解掉該行＝**生活模擬**：每個人有一天的行程，碰到同事會聊幾句，會記事、有人際關係、會反思
+  （Generative Agents 的骨架）；真的工作一來立刻蓋過生活。模型是 Claude Haiku 4.5，為成本設計：
+  行程一次排三小時、照表走位不花錢；一段對話整段一次呼叫；累積夠了才反思。有畫面連著才過日子（沒人看就不花錢），
+  八個人一天約 $0.3–1，看畫面開多久、聊得多頻繁。
+  用的是 `ANTHROPIC_API_KEY`（API 額度，不是訂閱）。
+  - `OFFICE_LIFE_BUDGET_USD`（預設 `1.0`）：每天上限，到了就改走規則排的行程、不聊天。
+  - `OFFICE_LIFE_MODEL`（預設 `claude-haiku-4-5`）：`agent.py` 裡的單價是 Haiku 的，換模型要跟著改。
+  - 沒有 API key（或額度用完）時退回規則排的行程、不聊天。
+  - 外殼的 🌱 生活分頁看得到每個人的行程、人際、心得與最近的閒聊。閒聊可以提記憶裡真的做過的工作，
+    但被要求不准編造；人物動作不是工作的證據。
+- 判準：啟動連上 Unity 後印「啟動 N 個 agent（純投影…）」或「生活模擬（claude-haiku-4-5…）」即生效；改 `.env` 後要重啟 uvicorn。
 
 **團隊與人設**：辦公室有 8 個固定工位（`backend/slots.yaml`：外觀、座位、姿勢），團隊設定決定哪幾個啟用、坐的是誰。
 第一次開外殼會進**團隊設定精靈**（選範本 → 選工位 → 設定每個人），之後從名冊的「👥 團隊設定」再調。
@@ -82,9 +91,10 @@ cogito 共享根 `workspace/AGENTS.md`（PromptComposer 先讀根、再疊頻道
 `$CLAUDE_CONFIG_DIR/CLAUDE.md`（Claude Code 的使用者層指示，實測會載入）。同一套覆寫保護。
 
 泡泡中文字型（一次性）：`tools/get_font.sh` 取得 Noto Sans CJK TC（OFL 授權，16MB 已
-gitignore）放到 `unity/Assets/Resources/OfficeFont.otf`。編輯器匯入時只會把泡泡用字烘成
-圖集（見 `OfficeFontImporter.cs` 的字表），build 不會被字型拖胖；沒有這個檔案時 WebGL
-的中文泡泡會是空白（Unity 內建 Arial 無中文字形）。**改泡泡用詞要同步更新那份字表。**
+gitignore）放到 `unity/FontSource/`，再切出常用字子集（Big5 常用字＋標點＋英數，約 1.4MB；
+`tools/subset_font.py`，要有 `uv`）到 `unity/Assets/Resources/OfficeFont.otf`。Unity 以動態字型匯入、
+字形資料跟著 build 走，所以生活模擬的自由對話在 WebGL 畫得出來（Unity 內建 Arial 無中文字形）。
+子集以外的罕用字仍會是空白。
 
 名冊頭像（可選，一次性）：`python3 tools/make_avatars.py` 從角色圖抽 64×64 像素頭像到
 `backend/avatars/`（LimeZu 衍生物，已 gitignore；沒跑就顯示文字頭像）。分組看 persona 的

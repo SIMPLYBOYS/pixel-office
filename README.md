@@ -64,9 +64,19 @@ The mode comes from `OFFICE_MODE` in `backend/.env` (loaded automatically by `lo
   wander and chat) is off. NPCs idle at zero cost (with the occasional random walk), and only cogito's
   `/office/event` work events drive behavior. Use this for real work: it spends no API credits, and the
   status display isn't polluted by wandering.
-- Comment the line out for the life-simulation demo mode (Claude decides how everyone spends the day).
+- Comment the line out for **life simulation**: everyone gets a daily itinerary, chats with colleagues they
+  run into, remembers things, forms relationships, and reflects (Generative Agents style). Real work still
+  overrides life instantly. It runs on Claude Haiku 4.5 and is built for cost: an itinerary covers three hours
+  and walking it costs nothing; a whole conversation is one call; reflection only happens when enough has piled up.
+  Life only runs while a screen is connected (no viewer, no spending); eight people cost roughly $0.3–1 a day depending on
+  how long the office is on screen and how often they chat. It uses `ANTHROPIC_API_KEY` (API credit, not a subscription).
+  - `OFFICE_LIFE_BUDGET_USD` (default `1.0`): daily cap. Past it, people follow rule-based itineraries and stop chatting.
+  - `OFFICE_LIFE_MODEL` (default `claude-haiku-4-5`): the per-token prices in `agent.py` are Haiku's; update them if you switch.
+  - Without an API key (or with no credit left), it falls back to rule-based itineraries and no chatting.
+  - The shell's 🌱 tab shows each person's itinerary, relationships, reflections and recent chats. Chats may mention
+    real work from memory, but are told never to invent work; character movement is never evidence of work.
 - How to tell it took effect: once Unity connects, the log prints 「啟動 N 個 agent（純投影…）」
-  ("starting N agents (projection only…)"). Restart uvicorn after changing `.env`.
+  ("starting N agents (projection only…)") or 「生活模擬（claude-haiku-4-5…）」. Restart uvicorn after changing `.env`.
 
 **Team and personas**: the office has 8 fixed workstations (`backend/slots.yaml`: look, seat, pose); the team setup decides
 which are active and who sits there. The first time you open the shell you get the **team setup wizard** (pick a template →
@@ -98,10 +108,10 @@ then layers the channel's file on top) and the employee CLI profile's `$CLAUDE_C
 (Claude Code's user-level instructions, confirmed to load). Same overwrite protection.
 
 Speech-bubble CJK font (one-time): `tools/get_font.sh` fetches Noto Sans CJK TC (OFL license, 16MB,
-gitignored) into `unity/Assets/Resources/OfficeFont.otf`. On import the editor bakes only the characters used
-in bubbles into an atlas (see the character list in `OfficeFontImporter.cs`), so the font doesn't bloat the
-build. Without this file, Chinese bubbles are blank in WebGL (Unity's built-in Arial has no CJK glyphs).
-**When you change bubble wording, update that character list too.**
+gitignored) into `unity/FontSource/`, then cuts a subset (Big5 common characters + punctuation + ASCII, about 1.4MB;
+`tools/subset_font.py`, needs `uv`) into `unity/Assets/Resources/OfficeFont.otf`. Unity imports it as a dynamic font
+with the glyph data included, so free-form dialogue renders in WebGL (Unity's built-in Arial has no CJK glyphs).
+Rare characters outside the subset still show blank.
 
 Roster avatars (optional, one-time): `python3 tools/make_avatars.py` extracts 64×64 pixel avatars from the
 character sheets into `backend/avatars/` (LimeZu derivatives, gitignored; without them the roster shows text

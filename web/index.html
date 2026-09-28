@@ -559,6 +559,16 @@
   .tlink { font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; cursor: pointer; }
   .tlink:hover { color: var(--text); border-color: #3a404c; }
   .tlink.go { color: var(--accent); border-color: #5a4a20; }
+  /* 生活模擬（Haiku）：今天的行程、人際、心得、最近的閒聊 */
+  .lifebody { font-size: 12px; }
+  .lifebody .lh { color: var(--dim); margin: 10px 0 4px; }
+  .lifebody .lh:first-child { margin-top: 0; }
+  .lstep { padding: 2px 0; }
+  .lstep.now { color: var(--accent); font-weight: 600; }
+  .lstep .lt { color: var(--dim); display: inline-block; width: 44px; font-variant-numeric: tabular-nums; }
+  .lifebody small { color: var(--dim); margin-left: 6px; }
+  .lrel .heart { margin-left: 6px; color: #e07070; }
+  .lchat { margin-bottom: 6px; padding-left: 8px; border-left: 2px solid var(--line); }
   /* 驗收（Paperclip 比較筆記第二批）：跑完≠被接受。卡頭一顆狀態、卡尾一塊證據＋兩顆鈕 */
   .vchip { font-size: 11px; border-radius: 10px; padding: 0 7px; border: 1px solid; }
   .vchip.pending { color: #e8b04a; border-color: #5a4a20; }
@@ -666,6 +676,7 @@
     <details class="prof inbox" id="inbox" hidden></details>
     <details class="prof memo" id="memo" hidden></details>
     <details class="prof" id="profile" hidden></details>
+<details class="prof life" id="life" hidden></details>
     <details class="prof audit" id="audit" hidden></details>
     <details class="prof costs" id="costs" hidden></details>
     <details class="prof cmds" id="cmds" hidden></details>
@@ -1242,7 +1253,7 @@ const CFG_ROWS = ['crew', 'engineRow', 'modelRow', 'repoRow'];
 // 分頁跟著資料走：面板沒資料（hidden）就沒有那一頁，跟面板原本「有資料才出現」同一個原則。
 // 當前頁一定展開——各面板重畫時會照自己記在 localStorage 的開合狀態收起來，觀察者負責再打開。
 const TABS = [['feed', '💬 工作串'], ['tasks', '📋 任務'], ['ws', '📂 工作區'], ['board', '🗂 任務板'], ['memo', '💡 記憶'],
-              ['profile', '👤 檔案'], ['audit', '🧾 稽核'], ['costs', '💰 花費'], ['cmds', '⌨️ 指令']];
+              ['profile', '👤 檔案'], ['life', '🌱 生活'], ['audit', '🧾 稽核'], ['costs', '💰 花費'], ['cmds', '⌨️ 指令']];
 let tab = 'feed', feedNew = false;   // feedNew：人在別頁時工作串有新東西，分頁上亮一個點，別讓人漏看
 // 標題列的頭像與職稱：跟名冊同一套頭像（/avatars/<id>.png，沒有就用名字第一個字頂替）
 const headFace = id => `<img class="face lg" src="/avatars/${id}.png" alt=""
@@ -1748,7 +1759,7 @@ function pick(id) {
   // 它們各自 await 自己的 fetch，誰先回來就誰先改 DOM——而 feed 是那個有彈性的元素，
   // 面板每落地一塊它就被擠一次。量過：先前切過去時 feed 高度在 60ms 內跳四次（579→615→
   // 573→245），看起來就是閃爍。讓面板先settle，feed 只需要重排一次。
-  Promise.all([profile(id), board(id), workspace(id, ''), memocard(id)]).then(feed);
+  Promise.all([profile(id), board(id), workspace(id, ''), memocard(id), lifecard(id)]).then(feed);
 }
 
 // 工作區瀏覽：agent 的產出不只在任務卡裡（有子目錄、有跨任務累積的檔案）。
@@ -2002,6 +2013,37 @@ async function workspace(id, path) {
 
 // 角色設定（persona 欄位 + personas/<id>.md）。只在換人時抓一次——它不會即時變，
 // 掛在每 8 秒的 poll 裡只會把使用者展開的面板一直重畫。
+// 生活模擬（Haiku）：這個人今天的行程（亮的是正在做的那段）、人際、心得、最近的閒聊。
+// 只在生活模擬模式出現——純投影模式沒有這一頁（跟其他面板一樣：沒資料就沒有分頁）。
+async function lifecard(id) {
+  const box = $('life');
+  let r;
+  try { r = id && await (await fetch(`/office/life?agent=${encodeURIComponent(id)}`)).json(); } catch { return; }
+  const me = r && r.ok && r.mode === 'life' ? r.agents[id] : null;
+  if (!me) { box.hidden = true; return; }
+  const sig = JSON.stringify([id, r.spend, r.paused, me, r.chats]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  const state = !r.has_key ? '沒有 API key：照規則排行程、不聊天'
+    : r.spend >= r.budget ? `今天的預算用完了（$${r.spend.toFixed(3)}）：改走規則排的行程、不聊天`
+    : r.paused ? 'API 出錯，暫停一下再試（見橋的 log）'
+    : `${r.model}・今天 $${r.spend.toFixed(3)} / $${r.budget}`;
+  const heart = n => n > 0 ? '♥'.repeat(n) : n < 0 ? '✕'.repeat(-n) : '·';
+  box.innerHTML = `<summary>🌱 生活<small>${esc(state)}</small></summary><div class="body lifebody">
+    <div class="lh">今天的行程${me.planned_by === 'rules' ? '<small>規則排的（沒叫模型）</small>' : ''}</div>
+    ${me.plan.map(s => `<div class="lstep${s.now ? ' now' : ''}"><span class="lt">${esc(s.at)}</span>${esc(s.place)}・${esc(s.activity)}${
+      s.with ? `<small>找${esc(s.with)}</small>` : ''}${s.pose ? `<small>${esc(s.pose)}</small>` : ''}</div>`).join('')
+      || '<div class="lstep">還沒排——畫面連上之後才開始過日子</div>'}
+    ${me.rel.length ? '<div class="lh">人際</div>' + me.rel.map(x =>
+      `<div class="lrel"><b>${esc(x.name)}</b><span class="heart">${heart(x.score)}</span><small>${esc(x.note || '')}</small></div>`).join('') : ''}
+    ${me.insights.length ? '<div class="lh">心得</div>' + me.insights.map(t => `<div>${esc(t.replace(/^心得：/, ''))}</div>`).join('') : ''}
+    ${r.chats.length ? '<div class="lh">最近的閒聊</div>' + r.chats.map(c => `<div class="lchat"><small>${esc(c.at)}・${esc(c.place)}</small>${
+      c.lines.map(l => `<div><b>${esc(l.who)}</b>：${esc(l.text)}</div>`).join('')}</div>`).join('') : ''}
+    ${me.recent.length ? '<div class="lh">最近記得的事</div>' + me.recent.map(t => `<div>${esc(t)}</div>`).join('') : ''}</div>`;
+  box.hidden = false;
+}
+setInterval(() => { if (tab === 'life') lifecard(selected); }, 30000);   // 「正在做哪一段」會隨時間換
+
 async function profile(id) {
   const box = $('profile');
   box.hidden = true;
@@ -3342,6 +3384,7 @@ function openStream() {
   costcard();                           // 花費也是全員視角
   inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
     if (ev.type === 'roster') roster();
+    else if (ev.type === 'life') lifecard(selected);   // 誰排了行程、誰跟誰聊了：簽章沒變就不重畫
     else if (ev.type === 'agent') {
       if (ev.id === selected) {
         feed();
