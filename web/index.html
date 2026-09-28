@@ -245,6 +245,7 @@
   .tcolh small { color: var(--dim); }
   .tcol.doing .tcolh { border-bottom-color: #f5c451; }
   .tcol.wait .tcolh { border-bottom-color: #e8904a; }
+  .tcol.review .tcolh { border-bottom-color: #e8b04a; }
   .tcol.done .tcolh { border-bottom-color: #6fc276; }
   .tcol.fail .tcolh { border-bottom-color: #d05a5a; }
   .tk { display: block; width: 100%; text-align: left; cursor: pointer; background: var(--card); border: 1px solid var(--line);
@@ -529,11 +530,11 @@
   .appr .left.urgent { color: #e07070; font-weight: 600; }
   .appr pre.code { margin: 0; }
   .appr .tid { font-size: 11px; color: var(--dim); margin-top: 6px; word-break: break-all; }
-  .appr .btns { margin-top: 8px; display: flex; gap: 8px; }
-  .appr button { border: 0; border-radius: 6px; padding: 5px 16px; font: inherit; cursor: pointer; }
+  .appr .btns, .verdict .btns { margin-top: 8px; display: flex; gap: 8px; }
+  .appr button, .verdict button { border: 0; border-radius: 6px; padding: 5px 16px; font: inherit; cursor: pointer; }
   .appr .btns.hint { color: var(--dim); font-size: 12px; }
-  .appr .yes { background: var(--ok); color: #10240f; }
-  .appr .no { background: #3a2c2c; color: #e07070; }
+  .appr .yes, .verdict .yes { background: var(--ok); color: #10240f; }
+  .appr .no, .verdict .no { background: #3a2c2c; color: #e07070; }
 
 /* ═══ 統一異常狀態 (anomaly_ui) — 四種異常同一種視覺語言 ═══
    顏色=嚴重度(L0灰/L1黃/L2橙/L3紅)，位置=影響範圍(橫幅=全域/角標=單一) */
@@ -558,6 +559,20 @@
   .tlink { font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; cursor: pointer; }
   .tlink:hover { color: var(--text); border-color: #3a404c; }
   .tlink.go { color: var(--accent); border-color: #5a4a20; }
+  /* 驗收（Paperclip 比較筆記第二批）：跑完≠被接受。卡頭一顆狀態、卡尾一塊證據＋兩顆鈕 */
+  .vchip { font-size: 11px; border-radius: 10px; padding: 0 7px; border: 1px solid; }
+  .vchip.pending { color: #e8b04a; border-color: #5a4a20; }
+  .vchip.accepted { color: var(--ok); border-color: #2c4a2e; }
+  .vchip.changes { color: #e8904a; border-color: #5a3a20; }
+  .verdict { margin: 8px 0 4px; padding: 8px 10px; border: 1px solid #5a4a20; border-radius: 8px; background: #17150f; font-size: 12px; }
+  .verdict.accepted { border-color: #2c4a2e; background: #121812; }
+  .verdict.changes { border-color: #5a3a20; }
+  .verdict .vh { font-weight: 600; margin-bottom: 4px; }
+  .verdict .ev { color: var(--dim); }
+  .verdict .ev.ok { color: var(--text); }
+  .verdict .ev.fail { color: #e07070; }
+  .verdict .ev.unverified { color: #e8b04a; }
+  .verdict .vnote { margin-top: 4px; color: #e8904a; }
   /* 還沒登入（稽核 #4 token）：整條橫在最上面，講清楚怎麼登入——不是一片靜悄悄的空名冊 */
   .needlogin { position: fixed; top: 0; left: 0; right: 0; z-index: 99; background: #5a2a2a; color: #fff;
                padding: 10px 16px; font-size: 14px; line-height: 1.6; }
@@ -1302,19 +1317,21 @@ $('cmds').addEventListener('click', e => {
 const TASK_COLS = [
   ['doing', '進行中', c => c.status === 'working' && !c.approval],
   ['wait', '等審批', c => c.status === 'working' && c.approval],
-  ['done', '完成', c => c.status === 'ok'],
+  ['review', '待驗收', c => c.status === 'ok' && c.verdict === 'pending'],
+  ['done', '完成', c => c.status === 'ok' && c.verdict !== 'pending'],
   ['fail', '失敗・中止', c => ['error', 'stopped', 'lost', 'superseded'].includes(c.status)],
 ];
 const TASK_COL_MAX = 30;
 const ORIGIN_CLS = { 老闆: 'boss', 班表: 'sched', 委派: 'dele' };
 const STATUS_MARK = { error: ' ✗ 失敗', stopped: ' 🛑 中止', lost: ' ⚠ 失聯', superseded: ' ↻ 已由續跑接手' };
+const VERDICT_MARK = { accepted: ' ✓ 已驗收', changes: ' ↺ 要求修改' };
 let taskScope = 'all';   // all＝全辦公室；me＝只看目前選的這位
 const taskCardHtml = c => `<button type="button" class="tk" data-agent="${esc(c.agent)}" data-card="${esc(String(c.id))}">
   <span class="tkwho">${esc(c.name)}${c.engine ? `<small>${esc(ENGINE_NAME[c.engine] || c.engine)}</small>` : ''}</span>
   <span class="tktask">${esc(c.task)}</span>
   <span class="tkmeta">${esc((c.day || '').slice(5).replace('-', '/'))} ${esc(c.at || '')}${
     c.origin ? `<i class="og ${ORIGIN_CLS[c.origin] || ''}">${esc(c.origin)}${c.from && agentsData[c.from] ? '・' + esc(agentsData[c.from].name) : ''}</i>` : ''
-  }${STATUS_MARK[c.status] || ''}</span></button>`;
+  }${STATUS_MARK[c.status] || ''}${VERDICT_MARK[c.verdict] || ''}</span></button>`;
 async function taskboard() {
   const box = $('tasks');
   let r;
@@ -1322,7 +1339,7 @@ async function taskboard() {
   if (!r.ok) return;
   const mine = taskScope === 'me' && selected;
   const cards = mine ? r.cards.filter(x => x.agent === selected) : r.cards;
-  const sig = JSON.stringify([taskScope, selected, cards.map(x => [x.id, x.status, x.approval, x.origin])]);
+  const sig = JSON.stringify([taskScope, selected, cards.map(x => [x.id, x.status, x.approval, x.origin, x.verdict])]);
   if (box.dataset.sig === sig) return;           // 沒變就不重畫（五秒輪一次）
   box.dataset.sig = sig;
   const who = selected && agentsData[selected] ? agentsData[selected].name : '';
@@ -2062,6 +2079,10 @@ async function inboxcard() {
       const no = document.createElement('button'); no.className = 'no'; no.title = '今天不補了，別再列'; no.textContent = '✕';
       no.onclick = e => { e.stopPropagation(); localStorage.inboxDismiss = (localStorage.inboxDismiss || '') + ',' + t.id; inboxcard(); };
       row.append(go, no);
+    } else if (t.kind === 'review') {   // 驗收要看證據：跟審批一樣不給一鍵通過，點「查看」到那張卡
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwhat">📦 ${esc(t.text)}</span>
+        <button class="yes" onclick="event.stopPropagation(); pick('${t.agent}'); openCard('${t.agent}', ${+t.card})">查看</button>`;
     } else {
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">🗓 ${esc(t.text)}</span>
@@ -2312,7 +2333,7 @@ const BADGE = { working: '⏳ 進行中', ok: '✔ 已完成', error: '✗ 失�
 const opened = new Set(), closed = new Set();
 function shouldOpen(t) {
   if (closed.has(t.id)) return false;             // 使用者手動收起最大，之後不再自動撐開
-  if (t.status === 'working') opened.add(t.id);   // 進行中自動展開，而且【黏住】——
+  if (t.status === 'working' || t.verdict === 'pending') opened.add(t.id);   // 進行中／待驗收自動展開，而且【黏住】——
   return opened.has(t.id);                        // 任務跑完也不自動收（使用者還沒看完）
 }
 const tog = (id, open) => open
@@ -3063,11 +3084,13 @@ const LANG_BY_EXT = { py: 'python', js: 'javascript', ts: 'typescript', go: 'go'
 // 同一件事的前後幾次執行（Paperclip 比較筆記第一批）：↩ 接續哪一張、→ 由哪一張接手；
 // 中止／出錯／失聯、還沒人接手的卡給一顆「↻ 接著做」——接在這張後面開一次新的執行，同一個任務底下看得到前後。
 let lastHistory = [];
+const VERDICT = { pending: '📦 待驗收', accepted: '✓ 已驗收', changes: '↺ 要求修改' };
 function cardLinks(t) {
   const out = [];
+  if (VERDICT[t.verdict]) out.push(`<span class="vchip ${t.verdict}">${VERDICT[t.verdict]}</span>`);
   if (t.prev) out.push(`<span class="tlink" title="這是同一件事的下一次執行" onclick="event.preventDefault(); event.stopPropagation(); openCard(selected, ${t.prev})">↩ 接續 #${t.prev}</span>`);
   if (t.next) out.push(`<span class="tlink" title="這件事已經接著做了" onclick="event.preventDefault(); event.stopPropagation(); openCard(selected, ${t.next})">→ 由 #${t.next} 接手</span>`);
-  else if (['stopped', 'error', 'lost'].includes(t.status) && typeof t.id === 'number' && !(agentsData[selected] || {}).busy)
+  else if ((['stopped', 'error', 'lost'].includes(t.status) || t.verdict === 'changes') && typeof t.id === 'number' && !(agentsData[selected] || {}).busy)
     out.push(`<span class="tlink go" title="接在這張後面再做一次（CLI 會接回同一段對話）" onclick="event.preventDefault(); event.stopPropagation(); resumeCard(${t.id})">↻ 接著做</span>`);
   return out.join('');
 }
@@ -3075,8 +3098,43 @@ async function resumeCard(id) {
   const t = lastHistory.find(x => x.id === id);
   if (!t) return;
   const why = { stopped: '上次被中止', error: '上次出錯', lost: '上次失聯，做到哪裡不確定' }[t.status] || '上次沒做完';
-  const task = t.task.replace(/^(🔄 續跑：|接著做：)+/, '').replace(/（上次[^）]*）$/, '');
+  const task = t.task.replace(/^(🔄 續跑：|接著做：|依老闆的修改意見修改)+/, '').replace(/（上次[^）]*）$/, '');
+  if (t.verdict === 'changes')
+    return dispatch(`依老闆的修改意見修改「${task.replace(/^「|」：.*$/g, '')}」：${t.verdict_note || '（沒寫意見——先問清楚要改什麼再動手）'}`, null, id);
   await dispatch(`接著做：${task}（${why}——先確認做到哪裡，再把沒做完的做完）`, null, id);
+}
+
+// 驗收：通過就定案；要求修改＝寫一句意見，接著派給他（接在同一個任務底下，做完再進待驗收）
+async function verdictCard(id, v) {
+  let note = '';
+  if (v === 'changes' && (note = prompt('要改什麼？（會接著派給他，接在這張後面）')) === null) return;
+  const r = await (await fetch('/office/verdict', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: selected, card: id, verdict: v, note }) })).json();
+  $('hint').textContent = !r.ok ? `⛔ ${r.error}` : v === 'accepted' ? '已驗收 ✓' : '已要求修改';
+  $('hint').classList.toggle('err', !r.ok);
+  if (r.ok && v === 'changes') {
+    const t = lastHistory.find(x => x.id === id);
+    if (t && !(agentsData[selected] || {}).busy) { Object.assign(t, { verdict: v, verdict_note: note }); await resumeCard(id); }
+    else $('hint').textContent = '已要求修改——他現在在忙，收工後按卡上的「↻ 接著做」';
+  }
+  feed(); inboxcard(); taskboard();
+}
+const EV_ICON = { ok: '✓', fail: '✗', warn: '⚠', unverified: '？' };
+function verdictBox(body, t) {
+  let vb = body.querySelector(':scope > .verdict');
+  if (!t.evidence) { if (vb) vb.remove(); return; }
+  const sig = JSON.stringify([t.verdict, t.evidence, t.verdict_note]);
+  if (vb && vb.dataset.sig === sig) return;
+  if (!vb) vb = el('div', '', 'verdict');
+  vb.dataset.sig = sig;
+  vb.className = 'verdict ' + (t.verdict || '');
+  vb.innerHTML = `<div class="vh">${esc(VERDICT[t.verdict] || '')}${t.verdict_at ? `<small>・${esc(t.verdict_at)}</small>` : ''}</div>`
+    + t.evidence.map(e => `<div class="ev ${esc(e.state)}">${EV_ICON[e.state] || '·'} ${esc(e.text)}</div>`).join('')
+    + (t.verdict_note ? `<div class="vnote">↺ ${esc(t.verdict_note)}</div>` : '')
+    + (t.verdict === 'pending' ? `<div class="btns">
+        <button class="yes" onclick="verdictCard(${+t.id}, 'accepted')">✓ 通過</button>
+        <button class="no" onclick="verdictCard(${+t.id}, 'changes')">要求修改…</button></div>` : '');
+  body.appendChild(vb);   // 放在串尾：它是這一次執行的結論
 }
 
 // 卡片同步：狀態列就地更新、只把【新到的事件】接上去。不整段重畫才有串流感，
@@ -3130,6 +3188,7 @@ function sync(el, t, bodySel, live) {
     rep.dataset.txt = want;
     renderBody(rep, want, false);
   }
+  verdictBox(body, t);
 
   el.open = shouldOpen(t);
 }
@@ -3150,7 +3209,8 @@ async function feed() {
     // 🗑 清全部：反覆測試後一天一天刪太瑣碎。放在標題列而不是每張卡上——這是「整理」
     // 不是「操作某張卡」，混進卡片動線只會讓人誤按。
     $('head').innerHTML = `<div class="headrow">${headFace(selected)}<div class="headmain">
-      <div class="who">${maxBtn()}${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>
+      <div class="who">${maxBtn()}${r.name}<span class="badge ${r.status}">${BADGE[r.status] || r.status}</span>${
+        VERDICT[r.verdict] ? ` <span class="vchip ${r.verdict}">${VERDICT[r.verdict]}</span>` : ''}
         <span class="wipe" title="清掉這位的全部工作紀錄（進行中的會保留）"
               onclick="clearAll()">🗑 清空紀錄</span></div>${headRole(selected)}</div></div>
       <div class="task">最新任務 · ${r.at}　${esc(r.task)}</div>`;

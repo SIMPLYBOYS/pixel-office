@@ -766,6 +766,8 @@ def want_emote(aid: str) -> str:
         return "mail"       # 金色信封：報表剛送出去（暫時的，過了 MAIL_HOLD 自己下來）
     if aid in watering:
         return "think"      # 空白思考泡：卡住空轉中（人已經走去飲水機了）
+    if any(c.get("verdict") == "pending" for c in history.get(aid, [])):
+        return "mail"       # 有做好的東西在等老闆驗收（跟「報表剛送出」同一個信封：東西交到你手上了）
     if memo_pending.get(aid, 0):
         # 黃寶石：他學到的東西還擺在那沒人收。放最後——這件事不急，
         # 壓過「有人在等你決定」或「額度被擋」就是排錯輕重。
@@ -1614,7 +1616,9 @@ def log_ev(aid: str, text: str, sub: dict | None = None) -> None:
 
 # 寫檔工具的參數就是產出本身：拆成「檔名 + 程式碼區塊」，比一行 JSON 好讀得多。
 # 副檔名對應 markdown 圍欄的語言標籤；沒列到的就不標（區塊照樣是等寬可捲的）。
-WRITE_TOOLS = ("write_file", "edit_file")
+# 兩個引擎的寫檔工具名不同。以前兩處同名，後定義的 CLI 那組把這組蓋掉——cogito 的寫檔一直沒排成程式碼區塊。
+COGITO_WRITE_TOOLS = {"write_file", "edit_file"}
+CLI_WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}   # 被擋＝交付物很可能沒落地
 LANGS = {"py": "python", "js": "javascript", "ts": "typescript", "go": "go", "sh": "bash",
          "html": "html", "css": "css", "json": "json", "yaml": "yaml", "yml": "yaml",
          "md": "markdown", "sql": "sql", "cs": "csharp", "rs": "rust", "java": "java"}
@@ -1629,7 +1633,7 @@ def write_tool_text(label: str, detail: str) -> str | None:
         return None      # 被截斷的 JSON 解不開很正常（超長檔案）——退回原本那行，不要吞掉事件
     if not isinstance(args, dict):
         return None
-    path = args.get("path") or args.get("file") or ""
+    path = args.get("path") or args.get("file") or args.get("file_path") or ""
     body = args.get("content") or args.get("new_string") or args.get("new") or ""
     if not isinstance(body, str) or not body.strip():
         return None
@@ -1648,7 +1652,7 @@ def tl_text(kind: str, label: str, detail: str) -> str | None:
     正好是 agent 放在訊息尾巴的行動指示（「下一步需要你確認 X」）。
     """
     if kind == "tool":
-        if label in WRITE_TOOLS and detail:
+        if label in COGITO_WRITE_TOOLS | CLI_WRITE_TOOLS and detail:
             if (block := write_tool_text(label, detail)) is not None:
                 return block
         return f"▸ {label}" + (f"｜{detail}" if detail else "")
@@ -1661,6 +1665,65 @@ def tl_text(kind: str, label: str, detail: str) -> str | None:
     if kind == "msg":
         return label  # 全文入卡。去重（sig）比正規化前 40 字、卡片事件數有上限，放寬安全
     return None
+
+
+# ── 驗收（Paperclip 比較筆記第二批）：「跑完了」≠「交付被接受」。
+# 橋從事件流順手記下產出的證據——寫了哪些檔、有沒有跑測試、測試過了沒——收工時有產出的卡進「待驗收」，
+# 通過與否只有老闆說了算。
+EVIDENCE_WRITE = COGITO_WRITE_TOOLS | CLI_WRITE_TOOLS | {"file_change", "apply_patch"}   # 後兩個是 Codex
+SHELL_TOOLS = {"bash", "Bash", "shell", "exec_command"}
+TEST_RE = re.compile(r"\b(pytest|go test|cargo test|(npm|yarn|pnpm|bun)( run)? test|jest|vitest|unittest|make test"
+                     r"|test_\w+\.py|\w+_test\.(py|go))\b")
+PATH_RE = re.compile(r'"(?:file_path|notebook_path|path|file)"\s*:\s*"([^"]+)"')   # 寫檔參數常被截斷，JSON 解不開也要撈得到檔名
+FAIL_RE = re.compile(r"\b[1-9]\d* (failed|errors?)\b|\bFAIL(ED)?\b|^panic:", re.M)
+WRITES_MAX = 50
+pending_test: set[str] = set()   # 剛送出測試指令、還在等結果的人
+
+
+def note_evidence(aid: str, kind: str, label: str, detail: str) -> None:
+    card = last_report.get(aid)
+    if not card or card.get("status") != "working" or aid in chat_mode:
+        return
+    name = SUB_RE.sub("", label)   # 子 agent 寫的檔也是這張卡的產出
+    if kind == "tool" and name in EVIDENCE_WRITE:
+        wd = str(card.get("workdir") or "").rstrip("/") + "/"
+        w = card.setdefault("writes", [])
+        for p in PATH_RE.findall(detail):
+            if (p := p.removeprefix(wd)) not in w and len(w) < WRITES_MAX:
+                w.append(p)
+    elif name in SHELL_TOOLS:
+        if kind == "tool":
+            if TEST_RE.search(detail):
+                pending_test.add(aid)
+                card["tests"] = "ran"
+        elif aid in pending_test:
+            # ponytail: 認「下一個 shell 結果」＝測試的結果；平行跑兩個 shell 可能配錯，要準就改按 tool_use_id 配對
+            pending_test.discard(aid)
+            card["tests"] = "failed" if kind == "error" or FAIL_RE.search(detail) else "passed"
+
+
+def settle_verdict(aid: str, card: dict, run: dict | None = None) -> None:
+    """收工（ok）時結算驗收，呼叫端只在 ok 時叫。有產出才進待驗收，附上證據；不自動通過——測試綠燈也不代表做對了老闆要的東西。
+    沒有產出（查資料、回答問題）就沒東西可驗，不掛。run＝班表任務的那筆（有 deliver 設定就驗報表在不在）。"""
+    if card.get("verdict"):
+        return
+    ev: list[dict] = []
+    if w := card.get("writes"):
+        ev.append({"kind": "files", "state": "ok", "text": f"寫了 {len(w)} 個檔：" + "、".join(w[:5]) + ("…" if len(w) > 5 else "")})
+    wd = str(card.get("workdir") or "")
+    # ponytail: 同步跑 git（本機幾十毫秒）；真的遇到卡住的 repo 會卡住事件迴圈，到時改 asyncio.to_thread
+    if CHANNELS_DIR and workdir_ok(wd) and (lens := git_lens(Path(wd), CHANNELS_DIR / f"office_{aid}")) and lens.get("total"):
+        ev.append({"kind": "git", "state": "ok", "text": f"{lens['repo']}（{lens['branch'] or '?'}）："
+                   f"{lens.get('stat') or str(lens['total']) + ' 個檔有變動'}，{lens.get('commits', 0)} 個 commit"})
+    if run and isinstance(spec := run["job"].get("deliver"), dict) and spec.get("file"):
+        path, why = deliver_path(aid, run["job"], run["started"])
+        ev.append({"kind": "deliver", "state": "ok" if path else "fail", "text": f"報表 {path.name} 已產出" if path else why})
+    if not ev:
+        return
+    t = card.get("tests")
+    ev.append({"kind": "tests", "state": {"passed": "ok", "failed": "fail"}.get(t, "unverified"),
+               "text": {"passed": "測試通過", "failed": "最後一次測試沒過", "ran": "跑了測試，沒等到結果"}.get(t, "沒看到跑測試——未驗證")})
+    card["verdict"], card["evidence"] = "pending", ev
 
 
 def resolve_npc(ext: str) -> str | None:
@@ -1729,6 +1792,8 @@ async def office_event(ev: dict):
     if kind == "error":
         await focus([aid], CAM_FAILURE)   # 出事了，鏡頭過去
 
+    if kind in ("tool", "result", "error"):   # 要在 project_sub 之前：子 agent 的事件在那裡就被接走了
+        note_evidence(aid, kind, label, str(ev.get("detail") or ""))
     if await project_sub(aid, kind, label, ev.get("detail", "")):
         return {"ok": True}
 
@@ -1760,6 +1825,7 @@ async def office_event(ev: dict):
     if kind == "start":
         busy.add(aid)
         stopped.discard(aid)   # 新任務＝上一次中止翻篇，別讓它吃掉這張卡的收尾
+        pending_test.discard(aid)   # 上一件沒等到的測試結果，別記到這件頭上
         notify("roster")
         if await is_chat(label) and last_report.get(aid):
             # 閒聊（「nice job」「辛苦了」）不是任務：不開卡、不起身走工位，
@@ -1867,6 +1933,9 @@ async def office_event(ev: dict):
             await goto(aid, desk)   # 閒聊結束：轉回去繼續坐著（move_to 會清掉轉頭的姿勢）
         chat_mode.discard(aid)
         if not chatting:  # 閒聊不改任務卡狀態（那張卡早就完成了）
+            # 驗收結算放在關卡【之前】：它要跑 git，放在關卡與放人之間，外面就會看到「卡已完成、人還在忙」
+            if label == "ok" and (c1 := last_report.get(aid)) and c1["status"] == "working":
+                settle_verdict(aid, c1, sched_running.get(aid))   # 徽章在下面的 sync_emote 一起換
             close_card(aid, "ok" if label == "ok" else "error")
             card = last_report.get(aid)
             if card and label != "ok" and ev.get("detail"):
@@ -3226,9 +3295,6 @@ def cli_session_args(aid: str, cwd: Path) -> list[str]:
     return ["--resume", sid] if known else ["--session-id", sid]
 
 
-WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}   # 被擋＝交付物很可能沒落地
-
-
 def cli_done_events(d: dict) -> list[dict]:
     """CLI 的 result → 收工事件。is_error 只說 CLI 行程有沒有炸，不說任務有沒有交付。
 
@@ -3241,7 +3307,7 @@ def cli_done_events(d: dict) -> list[dict]:
     寧可把一張其實成功的卡標成有疑慮，也不要把一張沒交付的卡標成完成。
     """
     denials = [str(x.get("tool_name") or "?") for x in (d.get("permission_denials") or []) if isinstance(x, dict)]
-    blocked_write = [t for t in denials if t in WRITE_TOOLS]
+    blocked_write = [t for t in denials if t in CLI_WRITE_TOOLS]
     label = "error" if (d.get("is_error") or blocked_write) else "ok"
     out: list[dict] = []
     if denials:
@@ -4369,6 +4435,11 @@ def inbox_items(limit: int = 60) -> dict:
     if k and k.get("status") == "ok" and "開工" in str(k.get("report") or "") + " ".join(str(e.get("text", "")) for e in k.get("events", [])[-3:]):
         todo.append({"id": f"start:{k['id']}", "kind": "ask_start", "agent": KANBAN, "name": agents[KANBAN].name if KANBAN in agents else "看板",
                      "card": k["id"], "text": "板子開好了，主持人在等你說開工", "at": k.get("at", "")})
+    for aid, cards in history.items():   # 做好了、等你驗收
+        for c in cards:
+            if c.get("verdict") == "pending" and aid in agents:
+                todo.append({"id": f"review:{aid}:{c['id']}", "kind": "review", "agent": aid, "name": agents[aid].name,
+                             "card": c["id"], "text": f"「{str(c.get('task') or '')[:60]}」做好了，等你驗收", "at": c.get("end", "")})
     now_t = time.localtime()
     today_s = time.strftime("%Y-%m-%d", now_t)
     for j in missed_jobs(now_t):   # 到點沒跑的班表：橋當時不在。要不要補跑是老闆的決定
@@ -4776,10 +4847,32 @@ def office_tasks():
                         "task": str(c.get("task") or "")[:160], "status": c.get("status"),
                         "day": c.get("day", ""), "at": c.get("at", ""), "end": c.get("end", ""),
                         "engine": c.get("engine") or "",   # 早期的卡沒記引擎：留空，不猜
-                        "origin": card_origin(c), "from": c.get("from", ""),
+                        "origin": card_origin(c), "from": c.get("from", ""), "verdict": c.get("verdict", ""),
                         "approval": c.get("status") == "working" and aid in pending_approval and last_report.get(aid) is c})
     out.sort(key=lambda x: (x["day"], x["at"]), reverse=True)
     return {"ok": True, "cards": out, "per_agent": 20}
+
+
+@app.post("/office/verdict")
+async def office_verdict(d: dict):
+    """老闆驗收：accepted（通過）／changes（要求修改，note 是修改意見）。只收待驗收的卡——
+    已經定案的不准改口：帳上已經有一筆了，要再改就派「接著做」，新的那次執行會再進待驗收。"""
+    aid, v, note = str(d.get("agent") or ""), d.get("verdict"), str(d.get("note") or "").strip()[:500]
+    cid = d.get("card")
+    card = find_card(aid, cid) if isinstance(cid, int) and not isinstance(cid, bool) else None
+    if v not in ("accepted", "changes"):
+        return {"ok": False, "error": "verdict 只能是 accepted 或 changes"}
+    if card is None or card.get("verdict") != "pending":
+        return {"ok": False, "error": "那張卡不在待驗收（可能已經驗過了）"}
+    card["verdict"], card["verdict_at"] = v, time.strftime("%m-%d %H:%M")
+    if note:
+        card["verdict_note"] = note
+    card["events"].append({"at": time.strftime("%H:%M:%S"),
+                           "text": "✅ 老闆驗收通過" if v == "accepted" else "↺ 老闆要求修改" + (f"：{note}" if note else "")})
+    audit("task.verdict", aid, card=card["id"], task_id=card.get("task_id"), verdict=v, note=note)
+    notify("agent", aid)
+    await sync_emote(aid)
+    return {"ok": True}
 
 
 def skill_frontmatter(path: Path) -> dict[str, str]:
@@ -4900,8 +4993,8 @@ async def office_dispatch(d: dict):
     # 同一個任務底下看得到前後每一次；CLI 本來就接回同一段對話，這裡補的是【卡片層】的關聯。
     if (rid := d.get("resume")) is not None:
         prev = find_card(aid, rid) if isinstance(rid, int) and not isinstance(rid, bool) else None
-        if prev is None or prev["status"] not in ("stopped", "error", "lost", "superseded"):
-            return {"ok": False, "error": "那張卡不在，或不是中止／出錯／失聯的——沒有東西可以接著做"}
+        if prev is None or (prev["status"] not in ("stopped", "error", "lost", "superseded") and prev.get("verdict") != "changes"):
+            return {"ok": False, "error": "那張卡不在，或不是中止／出錯／失聯／要求修改的——沒有東西可以接著做"}
         pending_resume[aid] = (prev["id"], time.monotonic())
     # 插話只在工作中有意義。閒著時不代發成新任務——那會把「糾正」靜默升級成「開工」。
     if verb == "/steer":

@@ -545,6 +545,7 @@ def run() -> None:
     team_setup()
     late_done_race()
     task_chain()
+    verdict_flow()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
           "回合寫入工作串、頻道派工、人設同步、提示音、清除歷史）")
 
@@ -4967,6 +4968,106 @@ def task_chain() -> None:
     finally:
         main.STATE_FILE.unlink(missing_ok=True)
         main.busy.discard("p12"); main.busy.discard("p17"); main.work_last.clear()
+
+
+def verdict_flow() -> None:
+    """驗收與證據（Paperclip 比較筆記第二批）：有產出才進待驗收、證據照實寫、老闆說了才算；要求修改就接著做。"""
+    aid = "p07"
+    main.busy.discard(aid); main.stopped.discard(aid); main.engine_sent.pop(aid, None)
+    for cs in main.history.values():   # 前面測試留下的待驗收卡會讓信封徽章一直掛著
+        for x in cs:
+            x.pop("verdict", None)
+    old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(_tempfile.mkdtemp()).resolve()
+    ws = main.CHANNELS_DIR / f"office_{aid}"
+    ws.mkdir(parents=True, exist_ok=True)
+    try:
+        _verdict_flow(aid, ws)
+    finally:
+        main.CHANNELS_DIR = old_ch
+        main.sched_running.pop(aid, None)
+
+
+def _verdict_flow(aid: str, ws: Path) -> None:
+    verdict = lambda c, card, v, note="": c.post("/office/verdict", json={"agent": aid, "card": card["id"], "verdict": v, "note": note}).json()
+    with TestClient(main.app) as c:
+        # ① 寫了檔、沒跑測試：待驗收，測試那條明講「未驗證」。子 agent 寫的也算；參數被截斷也撈得到檔名
+        post(c, agent=aid, kind="start", label="加一個 API", detail=str(ws))
+        a = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Write", detail=json.dumps({"file_path": f"{ws}/api.py", "content": "x = 1"}))
+        post(c, agent=aid, kind="tool", label="[Subagent:阿海] edit_file", detail='{"path": "docs/api.md", "new_string": "被截斷的')
+        post(c, agent=aid, kind="done", label="ok")
+        assert a["writes"] == ["api.py", "docs/api.md"], a.get("writes")
+        assert a["verdict"] == "pending", a
+        assert {e["kind"]: e["state"] for e in a["evidence"]} == {"files": "ok", "tests": "unverified"}, a["evidence"]
+        assert main.want_emote(aid) == "mail", "待驗收要掛信封"
+        todo = c.get("/office/inbox").json()["todo"]
+        assert any(t["kind"] == "review" and t["card"] == a["id"] for t in todo), todo
+        assert next(t for t in c.get("/office/tasks").json()["cards"] if t["id"] == a["id"])["verdict"] == "pending"
+        # ② 通過一次就定案，不准改口；帳上留一筆
+        assert verdict(c, a, "accepted")["ok"]
+        assert a["verdict"] == "accepted" and main.want_emote(aid) != "mail"
+        assert verdict(c, a, "changes")["ok"] is False, "定案的卡不該還能改口"
+        assert verdict(c, a, "maybe")["ok"] is False
+        last = main.audit_recent(aid, 1)[0]
+        assert last["kind"] == "task.verdict" and last["verdict"] == "accepted" and last["card"] == a["id"], last
+        # ③ 跑了測試：沒過就照實寫
+        post(c, agent=aid, kind="start", label="修 bug")
+        b = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Edit", detail=json.dumps({"file_path": "app.py", "new_string": "y"}))
+        post(c, agent=aid, kind="tool", label="Bash", detail=json.dumps({"command": "pytest -q"}))
+        post(c, agent=aid, kind="result", label="Bash", detail="1 failed, 3 passed in 0.2s")
+        post(c, agent=aid, kind="done", label="ok")
+        assert b["tests"] == "failed" and b["evidence"][-1] == {"kind": "tests", "state": "fail", "text": "最後一次測試沒過"}, b
+        # ④ 要求修改 → 接著做：新的一次接在同一個任務底下，做完再進待驗收（Codex 的 shell／file_change 也認）
+        assert verdict(c, b, "changes", "測試要過")["ok"] and b["verdict_note"] == "測試要過"
+        c.post("/office/dispatch", json={"agent": aid, "text": "依老闆的修改意見：測試要過", "resume": b["id"]})
+        assert aid in main.pending_resume, "要求修改的卡應該可以接著做"
+        post(c, agent=aid, kind="start", label="依老闆的修改意見：測試要過")
+        b2 = main.last_report[aid]
+        assert b2["prev"] == b["id"] and b2["task_id"] == b["task_id"] and b["verdict"] == "changes", (b, b2)
+        post(c, agent=aid, kind="tool", label="file_change", detail='{"changes": [{"path": "app.py", "kind": "update"}]}')
+        post(c, agent=aid, kind="tool", label="shell", detail="go test ./...")
+        post(c, agent=aid, kind="result", label="shell", detail="ok  \tpkg\t0.3s")
+        post(c, agent=aid, kind="done", label="ok")
+        assert b2["verdict"] == "pending" and b2["tests"] == "passed" and b2["writes"] == ["app.py"], b2
+        assert verdict(c, b2, "accepted")["ok"]
+        # ⑤ 沒有產出（只讀）沒東西可驗；出錯的卡也不進待驗收
+        post(c, agent=aid, kind="start", label="查一下 a.py 在做什麼")
+        r = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Read", detail='{"file_path": "a.py"}')
+        post(c, agent=aid, kind="done", label="ok")
+        assert "verdict" not in r, r
+        post(c, agent=aid, kind="start", label="寫到一半炸了")
+        e = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Write", detail='{"file_path": "x.py"}')
+        post(c, agent=aid, kind="done", label="error")
+        assert "verdict" not in e, e
+        # ⑥ 掛進來的 worktree：跟出發點比，改了幾個檔、幾個 commit 寫進證據（沒有 Write 事件也看得到——例如 shell 裡改的）
+        wt = ws / "demo-app"
+        wt.mkdir(exist_ok=True)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"], ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=wt, check=True)
+        (wt / "app.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "config", main.GIT_BASE_KEY, sha], cwd=wt, check=True)
+        post(c, agent=aid, kind="start", label="改 app.py", detail=str(wt))
+        g = main.last_report[aid]
+        (wt / "app.py").write_text("x = 2\n")
+        post(c, agent=aid, kind="done", label="ok")
+        gv = next((x for x in g.get("evidence", []) if x["kind"] == "git"), None)
+        assert gv and "demo-app" in gv["text"] and "0 個 commit" in gv["text"], g.get("evidence")
+        assert verdict(c, g, "accepted")["ok"]
+        # ⑦ 班表任務的報表沒產出：證據標紅，還是進待驗收（老闆要看到）
+        main.sched_running[aid] = {"job": {"name": "日報", "deliver": {"file": "report-{date}.md"}}, "started": time.time()}
+        post(c, agent=aid, kind="start", label="寫日報")
+        h = main.last_report[aid]
+        post(c, agent=aid, kind="tool", label="Write", detail='{"file_path": "notes.md"}')
+        post(c, agent=aid, kind="done", label="ok")
+        dv = next(x for x in h["evidence"] if x["kind"] == "deliver")
+        assert h["verdict"] == "pending" and dv["state"] == "fail" and "沒有產出" in dv["text"], h["evidence"]
+        h.pop("verdict")
 
 
 if __name__ == "__main__":
