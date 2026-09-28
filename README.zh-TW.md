@@ -58,12 +58,14 @@ cd backend
   接真工作用這個，不燒 API、狀態畫面也不被閒逛污染。
 - 註解掉該行＝**生活模擬**：每個人有一天的行程，碰到同事會聊幾句，會記事、有人際關係、會反思
   （Generative Agents 的骨架）；真的工作一來立刻蓋過生活。模型是 Claude Haiku 4.5，為成本設計：
-  行程一次排三小時、照表走位不花錢；一段對話整段一次呼叫；累積夠了才反思。有畫面連著才過日子（沒人看就不花錢），
-  八個人一天約 $0.3–1，看畫面開多久、聊得多頻繁。
-  用的是 `ANTHROPIC_API_KEY`（API 額度，不是訂閱）。
-  - `OFFICE_LIFE_BUDGET_USD`（預設 `1.0`）：每天上限，到了就改走規則排的行程、不聊天。
+  行程一次排三小時、照表走位不花錢；一段對話整段一次呼叫；累積夠了才反思。有畫面連著才過日子（沒人看就不花錢）。
+  - 預設走 **Claude Code CLI、用訂閱額度**（每次一個 `claude -p`、不給工具，跟 Claude Code 員工同一個 office profile
+    與登入；`ANTHROPIC_API_KEY` 不會帶下去）。一次約 $0.013 的 API 等值額度、約 7 秒。
+    `OFFICE_LIFE_ENGINE=api` 改用 `ANTHROPIC_API_KEY`（API 額度）。
+  - `OFFICE_LIFE_BUDGET_USD`（預設 `1.0`）：每天上限（走 CLI 時是 API 等值），到了就改走規則排的行程、不聊天。
+    訂閱回「usage limit」時暫停 30 分鐘。
   - `OFFICE_LIFE_MODEL`（預設 `claude-haiku-4-5`）：`agent.py` 裡的單價是 Haiku 的，換模型要跟著改。
-  - 沒有 API key（或額度用完）時退回規則排的行程、不聊天。
+  - Claude Code 與 API key 都沒有時，退回規則排的行程、不聊天。
   - 外殼的 🌱 生活分頁看得到每個人的行程、人際、心得與最近的閒聊。閒聊可以提記憶裡真的做過的工作，
     但被要求不准編造；人物動作不是工作的證據。
 - 判準：啟動連上 Unity 後印「啟動 N 個 agent（純投影…）」或「生活模擬（claude-haiku-4-5…）」即生效；改 `.env` 後要重啟 uvicorn。

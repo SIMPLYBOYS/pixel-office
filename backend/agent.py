@@ -2,9 +2,12 @@
 
 生活模擬（OFFICE_MODE 不是 projection 時）照 Generative Agents 的骨架，但為了成本改寫：
 - 行程一次排三小時，照表走位【不花錢】；只有排行程、一段對話（兩人整段一次寫完）、反思才呼叫模型。
-- 模型預設 Haiku 4.5。每次都強制用工具回傳，回來的東西一律驗過才用（地點、人名不在清單上就丟掉）。
+- 模型預設 Haiku 4.5。每次都要結構化的回答，回來的東西一律驗過才用（地點、人名不在清單上就丟掉）。
+- 兩條路叫模型：Claude Code CLI（CliBrain，走訂閱額度，預設）或 Anthropic API（API 額度）。
 - 記憶的重要度用規則打分，不另外問模型（原作每則記憶問一次，太貴）。
 """
+import asyncio
+import json
 import math
 import os
 import time
@@ -21,10 +24,12 @@ PLAN_MIN, PLAN_MAX = 5, 45   # 行程一段幾分鐘
 PLAN_TOTAL = 240             # 一份行程最長幾分鐘
 POSES = ["", "看書", "講電話", "打盹"]
 
-LIFE_RULES = """你在一個像素辦公室模擬裡扮演一位員工。這裡演的是【生活】：喝水、聊天、休息、走動、整理桌面。
-真正的工作由系統另外派發，會出現在記憶裡（例如「接到工作任務「X」」「完成了工作任務「X」」）。
-- 可以聊記憶裡真的發生過的工作；不要編造沒做過的工作、進度或成果。
-- 說話用繁體中文常用字，口語、簡短，符合人設的說話風格。"""
+LIFE_RULES = """你在一個像素辦公室模擬裡扮演一位員工。這裡演的是【生活】：喝水、聊天、休息、走動、整理桌面、看窗外、伸展。
+真正的工作由系統另外派發，會出現在記憶裡（例如「接到工作任務「X」」「完成了工作任務「X」」「老闆驗收通過了「X」」）。
+- 工作的事只能提記憶裡真的有的：任務名稱、完成或中斷、老闆的評語。不要編造任何工作內容、進度，
+  也不要說系統、專案、客戶的狀況——看畫面的人會把它當成真的。
+- 行程裡坐在自己座位的時段，寫成生活的小事（整理桌面、喝咖啡、回訊息、發呆），不要寫成在做某項工作。
+- 說話用繁體中文常用字，口語、簡短（一句 20 字內），符合人設的說話風格。"""
 
 
 def usage_cost(u) -> float:
@@ -34,8 +39,54 @@ def usage_cost(u) -> float:
             + g("cache_creation_input_tokens") * PRICE["cache_w"] + g("cache_read_input_tokens") * PRICE["cache_r"]) / 1e6
 
 
+class CliLifeError(Exception):
+    """CLI 那條路沒拿到答案（逾時、沒登入、額度用完、回的不是 JSON）。cost＝就算失敗也燒掉的 API 等值。"""
+    def __init__(self, msg: str, cost: float = 0.0):
+        super().__init__(msg)
+        self.cost = cost
+
+
+CLI_TIMEOUT = 120.0
+
+
+class CliBrain:
+    """用 Claude Code CLI（訂閱額度）回答生活模擬的三種問題：一次 `claude -p`、不給任何工具、不接 MCP、
+    系統提示換成 LIFE_RULES（Claude Code 自己那份很長）、思考關掉、--json-schema 要結構化輸出、不留 session。
+    提示從 stdin 送（人設與記憶可能很長，也不必出現在 ps 上）。
+    env 由呼叫端給（main.agent_env()：白名單，ANTHROPIC_* 不在裡面——有 API key 的話 CLI 會改走 API 計費）。
+    cwd 要是個空目錄：Claude Code 會從 cwd 往上找 CLAUDE.md 塞進 context。
+    花費＝CLI 回報的 total_cost_usd：訂閱不按次計費，這是「換算成 API 會是多少」，拿來當額度的守門數字。
+    ponytail: 每次都起一個 Claude Code 行程（約 5–7 秒、每次約 4k token 的固定開銷，Haiku 的快取門檻 4096 構不到）；
+    要更省就換 API（OFFICE_LIFE_ENGINE=api）。"""
+
+    def __init__(self, cmd: str, env: dict, cwd: str):
+        self.cmd, self.env, self.cwd = cmd, env, cwd
+
+    async def ask(self, prompt: str, tool: dict) -> tuple[dict | None, float]:
+        argv = [self.cmd, "-p", "--model", LIFE_MODEL, "--output-format", "json", "--tools", "", "--strict-mcp-config",
+                "--system-prompt", LIFE_RULES, "--json-schema", json.dumps(tool["input_schema"], ensure_ascii=False),
+                "--no-session-persistence", "--disable-slash-commands", "--settings", '{"alwaysThinkingEnabled": false}']
+        proc = await asyncio.create_subprocess_exec(*argv, cwd=self.cwd, env=self.env, stdin=asyncio.subprocess.PIPE,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=CLI_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise CliLifeError(f"CLI 超過 {CLI_TIMEOUT:.0f} 秒沒回")
+        try:
+            d = json.loads(out)
+        except ValueError:
+            raise CliLifeError(f"CLI 回的不是 JSON（退出碼 {proc.returncode}）：{err.decode(errors='replace')[:200]}")
+        cost = float(d.get("total_cost_usd") or 0) if isinstance(d, dict) else 0.0
+        if not isinstance(d, dict) or d.get("is_error") or not isinstance(d.get("structured_output"), dict):
+            raise CliLifeError(str((d or {}).get("result") or (d or {}).get("subtype") or "沒有結構化輸出")[:200], cost)
+        return d["structured_output"], cost
+
+
 async def ask(client, prompt: str, tool: dict) -> tuple[dict | None, float]:
-    """強制用這個工具回答；回 (工具參數, 花費)。"""
+    """照 tool 的 schema 回答；回 (參數, 花費)。client 是 CliBrain 就走 CLI，否則是 Anthropic SDK 的 client。"""
+    if isinstance(client, CliBrain):
+        return await client.ask(prompt, tool)
     # Haiku 4.5 不收 effort（會 400），強制工具（tool_choice=tool）照常可用。max_tokens 留寬：碰頂時工具參數會被截斷
     r = await client.messages.create(
         model=LIFE_MODEL, max_tokens=2048, system=LIFE_RULES, tools=[tool],
@@ -46,7 +97,13 @@ async def ask(client, prompt: str, tool: dict) -> tuple[dict | None, float]:
 
 
 def clip(s, n: int) -> str:
-    return str(s or "").strip().replace("\n", " ")[:n]
+    """剪到 n 字內。模型常寫得比要求長：優先切在標點（切出來的還是一句話），切不到才硬剪、補「…」——
+    直接從中間剪會變成「先想好 rol」這種半個字（實測）。"""
+    s = str(s or "").strip().replace("\n", " ")
+    if len(s) <= n:
+        return s
+    cut = max(s.rfind(p, 0, n) for p in "，。！？；、,.!?")
+    return s[:cut] if cut >= n // 2 else s[:n - 1] + "…"
 
 
 class Agent:
@@ -132,10 +189,11 @@ class Agent:
                     "type": "array", "items": {"type": "object", "required": ["minutes", "place", "activity"], "properties": {
                         "minutes": {"type": "integer", "description": f"這一段幾分鐘（{PLAN_MIN}–{PLAN_MAX}）"},
                         "place": {"type": "string", "enum": places},
-                        "activity": {"type": "string", "description": "在做什麼（15 字內）"},
+                        "activity": {"type": "string", "description": "在做什麼（15 字內，生活的事）"},
                         "pose": {"type": "string", "enum": POSES, "description": "動作（空＝坐著或站著）"},
                         "with": {"type": "string", "enum": [""] + list(mates), "description": "想找誰聊（空＝自己一個人）"},
                         "say": {"type": "string", "description": "開始這段時隨口說的一句（12 字內，多半留空）"}}}}}}}
+        # 剪的長度比要求寬一點：要求 15／12 字、容許 20／16——模型常多寫幾個字，差一點就剪掉太可惜
         mates_s = "；".join(f"{n}（{v}）" for n, v in mates.items()) or "（沒有）"
         prompt = (f"現在是 {now}。幫{self.name}排接下來約三小時的生活行程。\n"
                   f"人設：{self.profile}\n可以去的地方：{'、'.join(places)}\n同事：{mates_s}\n"
@@ -144,16 +202,16 @@ class Agent:
         args, cost = await ask(client, prompt, tool)
         steps, total = [], 0
         for s in (args or {}).get("steps") or []:
-            if not isinstance(s, dict) or s.get("place") not in places or not clip(s.get("activity"), 15):
+            if not isinstance(s, dict) or s.get("place") not in places or not clip(s.get("activity"), 20):
                 continue   # 地點不在清單上＝走不過去，丟掉
             m = max(PLAN_MIN, min(PLAN_MAX, int(s.get("minutes") or PLAN_MIN)))
             if total + m > PLAN_TOTAL:
                 break
             total += m
-            steps.append({"minutes": m, "place": s["place"], "activity": clip(s.get("activity"), 15),
+            steps.append({"minutes": m, "place": s["place"], "activity": clip(s.get("activity"), 20),
                           "pose": s.get("pose") if s.get("pose") in POSES else "",
                           "with": s.get("with") if s.get("with") in mates else "",
-                          "say": clip(s.get("say"), 12)})
+                          "say": clip(s.get("say"), 16)})
         return steps or None, cost
 
     async def chat(self, client, other: "Agent", place: str, now: str) -> tuple[dict | None, float]:

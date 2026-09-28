@@ -5150,7 +5150,7 @@ def life_sim() -> None:
     import httpx
     a, b = main.agents["p05"], main.agents["p07"]
     saved = (main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT, main.LIFE_BUDGET,
-             set(main.in_world), dict(main.life_spend), dict(main.life_pause))
+             set(main.in_world), dict(main.life_spend), dict(main.life_pause), main.LIFE_ENGINE, main.CLI_CMD)
     sent: list[dict] = []
 
     async def fake_send(cmd):
@@ -5173,6 +5173,7 @@ def life_sim() -> None:
         "reflect": {"insights": ["我好像很怕冷", ""]}})
     try:
         main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT = fake, False, fake_send, fake_walk, 0
+        main.LIFE_ENGINE = "api"   # ①–⑩ 走 API（假 client）；⑪ 換 CLI
         main.LIFE_BUDGET = 1.0
         main.life_spend.update(day="", usd=0.0); main.life_pause.update(until=0.0, warned=False)
         main.in_world.clear(); main.in_world.update({"p05", "p07"})
@@ -5299,8 +5300,53 @@ def life_sim() -> None:
         finally:
             main.life_loop = old_ll
         assert went == ["p05"], went
+
+        # ⑪ 走 Claude Code CLI（訂閱額度，預設）：一次 claude -p、不給工具、不接 MCP、要結構化輸出、提示從 stdin 送；
+        #    API key 絕不能帶下去（帶了 CLI 會改走 API 計費）。訂閱額度用完要停久一點
+        tmpd = Path(_tempfile.mkdtemp())
+        fake_cli, log, fail = tmpd / "claude", tmpd / "argv.jsonl", tmpd / "fail"
+        fake_cli.write_text(f"""#!{sys.executable}
+import json, os, sys
+schema = json.loads(sys.argv[sys.argv.index("--json-schema") + 1])
+open({str(log)!r}, "a").write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read(), "cwd": os.getcwd(),
+                                         "key": "ANTHROPIC_API_KEY" in os.environ}}, ensure_ascii=False) + "\\n")
+if os.path.exists({str(fail)!r}):
+    print(json.dumps({{"type": "result", "is_error": True, "result": "Claude AI usage limit reached", "total_cost_usd": 0.001}}))
+    sys.exit(1)
+out = {{"insights": ["走訂閱也會反思"]}} if "insights" in schema["properties"] else {{"steps": []}}
+print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "structured_output": out, "total_cost_usd": 0.0123}}))
+""", encoding="utf-8")
+        fake_cli.chmod(0o755)
+        had_key = "ANTHROPIC_API_KEY" in os.environ
+        os.environ.setdefault("ANTHROPIC_API_KEY", "sk-must-not-leak")
+        main.CLI_CMD, main.LIFE_ENGINE = str(fake_cli), ""
+        try:
+            assert main.life_engine() == "cli", "有 CLI 就預設走訂閱"
+            main.life_spend["usd"] = 0.0
+            a2.since_reflect = 99
+            asyncio.run(main.life_reflect(a2))
+            assert a2.memory[-1]["text"] == "心得：走訂閱也會反思" and abs(main.life_spend["usd"] - 0.0123) < 1e-9, main.life_spend
+            call = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+            argv = call["argv"]
+            assert argv[0] == "-p" and argv[argv.index("--tools") + 1] == "" and "--strict-mcp-config" in argv, argv
+            assert argv[argv.index("--model") + 1] == "claude-haiku-4-5" and "--no-session-persistence" in argv, argv
+            assert "--system-prompt" in argv and a2.name in call["stdin"], "系統提示要換掉、提示從 stdin 送"
+            assert call["key"] is False, "ANTHROPIC_API_KEY 帶給了 CLI：會改走 API 計費"
+            assert Path(call["cwd"]).resolve() == main.LIFE_CWD.resolve(), "要在空目錄跑，免得撿到 CLAUDE.md"
+            fail.touch()
+            a2.since_reflect = 99
+            n0 = len(a2.memory)
+            asyncio.run(main.life_reflect(a2))
+            assert len(a2.memory) == n0 and main.life_pause["until"] > time.monotonic() + 1000, main.life_pause
+            assert abs(main.life_spend["usd"] - 0.0133) < 1e-9, "失敗也燒掉的 API 等值要算進去"
+            with TestClient(main.app) as c:
+                assert c.get("/office/life").json()["engine"] == "cli"
+        finally:
+            if not had_key:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
     finally:
         (main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT, main.LIFE_BUDGET) = saved[:6]
+        main.LIFE_ENGINE, main.CLI_CMD = saved[9], saved[10]
         main.in_world.clear(); main.in_world.update(saved[6])
         main.life_spend.clear(); main.life_spend.update(saved[7]); main.life_pause.update(saved[8])
         main.STATE_FILE.unlink(missing_ok=True)

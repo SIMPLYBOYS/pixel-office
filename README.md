@@ -68,11 +68,14 @@ The mode comes from `OFFICE_MODE` in `backend/.env` (loaded automatically by `lo
   run into, remembers things, forms relationships, and reflects (Generative Agents style). Real work still
   overrides life instantly. It runs on Claude Haiku 4.5 and is built for cost: an itinerary covers three hours
   and walking it costs nothing; a whole conversation is one call; reflection only happens when enough has piled up.
-  Life only runs while a screen is connected (no viewer, no spending); eight people cost roughly $0.3–1 a day depending on
-  how long the office is on screen and how often they chat. It uses `ANTHROPIC_API_KEY` (API credit, not a subscription).
-  - `OFFICE_LIFE_BUDGET_USD` (default `1.0`): daily cap. Past it, people follow rule-based itineraries and stop chatting.
+  Life only runs while a screen is connected (no viewer, no spending).
+  - By default the model calls go through the **Claude Code CLI on your subscription** (one `claude -p` per call, no tools,
+    same office profile and login as the Claude Code employees; `ANTHROPIC_API_KEY` is never passed down). Each call is
+    about $0.013 of API-equivalent quota (~7 s). `OFFICE_LIFE_ENGINE=api` uses `ANTHROPIC_API_KEY` instead (API credit).
+  - `OFFICE_LIFE_BUDGET_USD` (default `1.0`): daily cap, in API-equivalent dollars on the CLI path. Past it, people follow
+    rule-based itineraries and stop chatting. A "usage limit" from the subscription pauses calls for 30 minutes.
   - `OFFICE_LIFE_MODEL` (default `claude-haiku-4-5`): the per-token prices in `agent.py` are Haiku's; update them if you switch.
-  - Without an API key (or with no credit left), it falls back to rule-based itineraries and no chatting.
+  - With neither Claude Code nor an API key, it falls back to rule-based itineraries and no chatting.
   - The shell's 🌱 tab shows each person's itinerary, relationships, reflections and recent chats. Chats may mention
     real work from memory, but are told never to invent work; character movement is never evidence of work.
 - How to tell it took effect: once Unity connects, the log prints 「啟動 N 個 agent（純投影…）」

@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import hmac
 import secrets
 import uuid
@@ -41,7 +42,7 @@ from fastapi.staticfiles import StaticFiles
 
 load_dotenv()  # 讀 backend/.env（ANTHROPIC_API_KEY=...），已 gitignore。要在 import agent 之前：OFFICE_LIFE_MODEL 在那裡載入時就讀
 
-from agent import Agent, LIFE_MODEL  # noqa: E402
+from agent import Agent, CliBrain, CliLifeError, LIFE_MODEL  # noqa: E402
 
 app = FastAPI()
 
@@ -363,8 +364,10 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
     if PROJECTION:
         mode = "純投影（生活大腦停用，idle 走動）"
     else:
-        mode = (f"生活模擬（{LIFE_MODEL}，每天上限 ${LIFE_BUDGET:g}）" if client
-                else "生活模擬（沒有 API key：照規則排行程、不聊天）")
+        eng = life_engine()
+        mode = (f"生活模擬（Claude Code 訂閱・{LIFE_MODEL}，每天上限 API 等值 ${LIFE_BUDGET:g}）" if eng == "cli"
+                else f"生活模擬（API・{LIFE_MODEL}，每天上限 ${LIFE_BUDGET:g}）" if eng == "api"
+                else "生活模擬（沒有 Claude Code 也沒有 API key：照規則排行程、不聊天）")
     print(f"啟動 {len(agents)} 個 agent（{mode}），{len(waypoints)} 個互動點")
 
 
@@ -499,7 +502,7 @@ async def agent_loop(a: Agent, tools: list | None = None) -> None:
 # 生活是生活、工作是工作：閒聊只准提記憶裡真的做過的工作（LIFE_RULES），人物動作不是工作的證據。
 LIFE_BUDGET = float(os.environ.get("OFFICE_LIFE_BUDGET_USD") or 1.0)   # 每天最多花幾美元；到了就改走規則排的行程、不聊天
 LIFE_TICK = 30.0     # 同一段行程裡多久看一次（有沒有被派工、這段結束了沒）
-CHAT_GAP = 90.0      # 全辦公室兩段閒聊至少隔幾秒（熱鬧與成本的平衡）
+CHAT_GAP = 240.0     # 全辦公室兩段閒聊至少隔幾秒（熱鬧與成本的平衡：CLI 一段約 $0.013 API 等值，一小時最多 15 段）
 PAIR_GAP = 1200.0    # 同一對人多久才再聊（別一直黏著同一個人）
 CHAT_CHANCE = 0.35   # 在茶水間這類地方遇到有空的同事，聊起來的機率
 REFLECT_AT = 40      # 累積多少重要度就反思一次（聊天 5、工作 6、瑣事 1）
@@ -525,8 +528,29 @@ life_sem = asyncio.Semaphore(2)         # 同時最多兩個生活呼叫：一�
 life_pause = {"until": 0.0, "warned": False}
 
 
+LIFE_ENGINE = os.environ.get("OFFICE_LIFE_ENGINE", "").strip().lower()   # cli（訂閱，預設）／api（API key）
+LIFE_CWD = Path(tempfile.gettempdir()) / "pixel-office-life"   # CLI 的工作目錄：空的，免得它往上撿到 CLAUDE.md
+
+
+def life_engine() -> str:
+    """生活模擬叫模型走哪條路：預設 Claude Code CLI（訂閱額度，跟員工同一個 office profile 的登入）；
+    OFFICE_LIFE_ENGINE=api 或找不到 CLI 才用 ANTHROPIC_API_KEY。兩條都沒有＝""（規則排的行程、不聊天）。"""
+    if PROJECTION:
+        return ""
+    if LIFE_ENGINE != "api" and cli_available():
+        return "cli"
+    return "api" if client is not None else ""
+
+
 def life_on() -> bool:
-    return not PROJECTION and client is not None
+    return bool(life_engine())
+
+
+def life_brain():
+    if life_engine() == "cli":
+        LIFE_CWD.mkdir(exist_ok=True)
+        return CliBrain(CLI_CMD, agent_env(), str(LIFE_CWD))   # agent_env：白名單，ANTHROPIC_* 不帶——帶了 CLI 會改走 API 計費
+    return client
 
 
 def life_budget_left() -> bool:
@@ -557,6 +581,12 @@ async def life_call(fn):
         except anthropic.APIConnectionError:
             life_pause["until"] = time.monotonic() + 60
             print("⚠ 生活模擬連不上 API，一分鐘後再試")
+            return None
+        except CliLifeError as e:
+            # 訂閱額度用完（「usage limit」）要等好幾個小時才重置：停久一點，別每分鐘去撞一次
+            life_spend["usd"] += e.cost
+            life_pause["until"] = time.monotonic() + (1800 if "limit" in str(e).lower() else 300)
+            print(f"⚠ 生活模擬的 CLI 呼叫失敗（{str(e)[:150]}）——先暫停，這段時間走規則排的行程")
             return None
     life_spend["usd"] += cost
     _dirty = True
@@ -609,7 +639,7 @@ async def life_replan(a: Agent) -> None:
     mates = {o.name: (a.relations.get(oid) or {}).get("note") or o.role
              for oid, o in npcs().items() if oid != a.id and oid in in_world}
     places = life_places(a.id)
-    steps = await life_call(lambda: a.make_plan(client, life_now(), places, mates))
+    steps = await life_call(lambda: a.make_plan(life_brain(), life_now(), places, mates))
     a.plan = {"at": time.time(), "steps": steps or fallback_plan(a.id), "llm": bool(steps)}
     notify("life", a.id)
 
@@ -645,7 +675,7 @@ async def life_chat(a: Agent, b: Agent, place: str) -> bool:
             await walk(a, side)
         elif seats := next((p for p in CHAT_SEATS if p[0] in waypoint_list and not set(p) & taken), None):
             await asyncio.gather(walk(a, seats[0]), walk(b, seats[1]))
-        res = await life_call(lambda: a.chat(client, b, place, life_now()))
+        res = await life_call(lambda: a.chat(life_brain(), b, place, life_now()))
         if not res:
             return False
         said = []
@@ -702,7 +732,7 @@ async def life_do(a: Agent, step: dict, quiet: bool = False) -> None:
 
 async def life_reflect(a: Agent) -> None:
     a.since_reflect = 0
-    for x in await life_call(lambda: a.reflect(client)) or []:
+    for x in await life_call(lambda: a.reflect(life_brain())) or []:
         a.remember(f"心得：{x}", imp=8, kind="reflect")
     a.since_reflect = 0   # 心得本身不再算進下一輪
 
@@ -5785,7 +5815,7 @@ def office_life(agent: str = ""):
                 "chatting": a.id in life_chatting}
     name = lambda x: agents[x].name if x in agents else x
     return {"ok": True, "mode": "projection" if PROJECTION else "life", "on": life_on(), "model": LIFE_MODEL,
-            "has_key": client is not None, "spend": round(life_spend["usd"], 4), "budget": LIFE_BUDGET,
+            "engine": life_engine(), "spend": round(life_spend["usd"], 4), "budget": LIFE_BUDGET,
             "paused": time.monotonic() < life_pause["until"],
             "agents": {aid: one(a) for aid, a in npcs().items() if not agent or aid == agent},
             "chats": [{**c, "a_name": name(c["a"]), "b_name": name(c["b"])} for c in reversed(life_log)
