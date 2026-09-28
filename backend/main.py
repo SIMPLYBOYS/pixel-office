@@ -504,6 +504,7 @@ LIFE_BUDGET = float(os.environ.get("OFFICE_LIFE_BUDGET_USD") or 1.0)   # 每天�
 LIFE_TICK = 30.0     # 同一段行程裡多久看一次（有沒有被派工、這段結束了沒）
 CHAT_GAP = 240.0     # 全辦公室兩段閒聊至少隔幾秒（熱鬧與成本的平衡：CLI 一段約 $0.013 API 等值，一小時最多 15 段）
 PAIR_GAP = 1200.0    # 同一對人多久才再聊（別一直黏著同一個人）
+CHAT_IDLE = 600.0    # 辦公室這麼久沒人聊天，就有人起身去找同事聊兩句（一開機也是：先有人打招呼）
 CHAT_CHANCE = 0.35   # 在茶水間這類地方遇到有空的同事，聊起來的機率
 REFLECT_AT = 40      # 累積多少重要度就反思一次（聊天 5、工作 6、瑣事 1）
 OWN_DESK = "自己的座位"
@@ -722,12 +723,28 @@ async def life_do(a: Agent, step: dict, quiet: bool = False) -> None:
         await pose(a.id, p)
     if quiet:
         return
-    if step.get("say"):
+    if step.get("say") and step["place"] != OWN_DESK:
+        # 坐在座位上的自言自語不冒泡：實測 Haiku 在座位時段寫的多半像在工作（「Debug 到這點，得重構這段」
+        # 「先看 log，有沒有掛的地方」），冒在畫面上會被當成真的在做事——規則寫了它也不太理。茶水間這類地方說的才是生活
         await send_cmd({"agent_id": a.id, "action": "say", "channel": "public", "text": step["say"]})
     if step["place"] in SOCIAL and random.random() < CHAT_CHANCE:
         near = [o for oid, o in npcs().items() if chat_free(a, o) and (s := life_step(o)) and s[1]["place"] in SOCIAL]
         if near:
             await life_chat(a, random.choice(near), step["place"])
+
+
+async def life_ambient(a: Agent) -> bool:
+    """辦公室太安靜（CHAT_IDLE 都沒人聊，一開機也算）：這個人起身去找一位有空的同事聊兩句，聊完回去做自己那段。
+    不能只靠「兩個人剛好同時在茶水間」或行程排到找誰——八個人要等二、三十分鐘才碰得上一次，
+    看畫面的人會以為生活模擬沒在動（實際回報）。每個人每一輪 25% 的機會，誰先搶到誰去；CHAT_GAP 仍然管著上限。"""
+    if time.monotonic() - last_chat["at"] < CHAT_IDLE or random.random() >= 0.25:
+        return False
+    mates = [o for o in npcs().values() if chat_free(a, o)]
+    if not mates or not await life_chat(a, random.choice(mates), "辦公室"):
+        return False
+    life_cur.pop(a.id, None)   # 走回自己這一段的位子
+    life_quiet.add(a.id)
+    return True
 
 
 async def life_reflect(a: Agent) -> None:
@@ -753,6 +770,8 @@ async def life_loop(a: Agent) -> None:
             quiet = a.id in life_quiet
             life_quiet.discard(a.id)
             await life_do(a, step, quiet)
+        elif a.id not in busy:
+            await life_ambient(a)
         if a.since_reflect >= REFLECT_AT:
             await life_reflect(a)
         await asyncio.sleep(max(1.0, min(end - time.time(), LIFE_TICK)))

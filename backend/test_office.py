@@ -5198,7 +5198,12 @@ def life_sim() -> None:
         n0 = len(fake.calls)
         sent.clear(); asyncio.run(main.life_do(a, step))
         assert {"agent_id": "p05", "action": "use", "target": "book"} in sent, sent
-        assert {"agent_id": "p05", "action": "say", "channel": "public", "text": "來整理一下"} in sent, sent
+        assert not any(c["action"] == "say" for c in sent), f"座位上的自言自語不冒泡（多半像在工作）：{sent}"
+        sent.clear()
+        main.last_chat["at"] = time.monotonic()   # 別讓茶水間那段剛好聊起來
+        asyncio.run(main.life_do(a, {"minutes": 5, "place": "飲水機", "activity": "裝水", "say": "先來杯水"}))
+        assert {"agent_id": "p05", "action": "say", "channel": "public", "text": "先來杯水"} in sent, sent
+        main.last_chat["at"] = -1e9
         assert len(fake.calls) == n0, "照表走位不該呼叫模型"
         a.plan = {"at": time.time() - 99999, "steps": steps}
         assert main.life_step(a) is None, "行程走完了要重排"
@@ -5246,6 +5251,19 @@ def life_sim() -> None:
             main.walk, main.waypoint_list = fake_walk, old_wl
             main.in_world.discard("p10"); main.occupied.pop("p05", None)
 
+        # ④-3 辦公室太安靜（一開機也算）：有人起身去找同事聊兩句，聊完回去做自己那段；剛聊過就不會
+        main.last_chat["at"] = -1e9; main.pair_chat.clear()
+        old_rand = main.random
+        main.random = type("R", (), {"random": staticmethod(lambda: 0.0), "choice": staticmethod(lambda xs: xs[0])})
+        try:
+            n0 = len(fake.calls)
+            assert asyncio.run(main.life_ambient(a)) is True and len(fake.calls) == n0 + 1
+            assert "p05" in main.life_quiet and "p05" not in main.life_cur, "聊完要走回自己這一段"
+            assert asyncio.run(main.life_ambient(a)) is False, "剛聊過：還不夠安靜"
+        finally:
+            main.random = old_rand
+            main.life_quiet.discard("p05")
+
         # ⑤ 反思：空的心得丟掉，心得的重要度最高
         a.since_reflect = 99
         asyncio.run(main.life_reflect(a))
@@ -5280,6 +5298,7 @@ def life_sim() -> None:
 
         # ⑨ 重啟不失憶、名冊重載（團隊設定存檔）也不失憶
         a.plan = {"at": time.time(), "steps": steps}
+        score = a.relations["p07"]["score"]
         main.save_state()
         main.life_saved.clear()
         main.load_state()
@@ -5287,7 +5306,7 @@ def life_sim() -> None:
         main.life_saved.clear()
         main.load_roster()
         a2 = main.agents["p05"]
-        assert a2 is not a and a2.relations.get("p07", {}).get("score") == 1 and a2.plan["steps"], "重載名冊把心智弄丟了"
+        assert a2 is not a and a2.relations.get("p07", {}).get("score") == score and a2.plan["steps"], "重載名冊把心智弄丟了"
 
         # ⑩ 生活模擬模式：生活迴圈交給 life_loop（純投影模式才是零成本 idle）
         went = []
