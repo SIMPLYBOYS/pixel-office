@@ -1693,7 +1693,11 @@ function paintEffortRow(workingNow) {
   const reset = modelInfo.reset || 'reset';
   if (!engCaps(eng).effort) {
     sel.innerHTML = '<option value="">—</option>'; sel.dataset.sig = ''; sel.disabled = true;
-    $('effortNote').textContent = `${engCaps(eng).name || eng} 的派工入口不收思考力度——改選別的引擎才能指定`;
+    // 沒有這個欄位（undefined）≠ 引擎不收（false）：網頁檔每次從磁碟讀、橋行程沒重啟時，新網頁會配到舊後端
+    // （實際回報：「思考力度還是不可選」——橋比這個功能早啟動）。講清楚要重啟，別誤報成引擎不支援
+    $('effortNote').textContent = engCaps(eng).effort === undefined
+      ? '⚠ 橋還是舊版（沒回報思考力度的資料）——重啟橋就能選'
+      : `${engCaps(eng).name || eng} 的派工入口不收思考力度——改選別的引擎才能指定`;
     return;
   }
   const codex = eng === 'codex', cogito = eng === 'cogito';
