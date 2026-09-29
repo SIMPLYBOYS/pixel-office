@@ -369,8 +369,12 @@ def start_agents(agent_ids: list[str], waypoints: list[str]) -> None:
         mode = "純投影（生活大腦停用，idle 走動）"
     else:
         eng = life_engine()
-        mode = (f"生活模擬（Claude Code 訂閱・{LIFE_MODEL}，每天上限 API 等值 ${LIFE_BUDGET:g}）" if eng == "cli"
-                else f"生活模擬（API・{LIFE_MODEL}，每天上限 ${LIFE_BUDGET:g}）" if eng == "api"
+        hrs = f"，{LIFE_HOURS} 點才叫模型" if LIFE_HOURS else ""
+        if LIFE_HOURS and not re.fullmatch(r"([01]?\d|2[0-4])-([01]?\d|2[0-4])", LIFE_HOURS):
+            print(f"⚠ OFFICE_LIFE_HOURS={LIFE_HOURS!r} 看不懂（要寫成 9-19 這樣）——當作整天")
+            hrs = ""
+        mode = (f"生活模擬（Claude Code 訂閱・{LIFE_MODEL}，每天上限 API 等值 ${LIFE_BUDGET:g}{hrs}）" if eng == "cli"
+                else f"生活模擬（API・{LIFE_MODEL}，每天上限 ${LIFE_BUDGET:g}{hrs}）" if eng == "api"
                 else "生活模擬（沒有 Claude Code 也沒有 API key：照規則排行程、不聊天）")
     print(f"啟動 {len(agents)} 個 agent（{mode}），{len(waypoints)} 個互動點")
 
@@ -505,6 +509,9 @@ async def agent_loop(a: Agent, tools: list | None = None) -> None:
 # 真的工作永遠蓋過生活：被派工的人（busy）立刻停下，話說到一半也散。
 # 生活是生活、工作是工作：閒聊只准提記憶裡真的做過的工作（LIFE_RULES），人物動作不是工作的證據。
 LIFE_BUDGET = float(os.environ.get("OFFICE_LIFE_BUDGET_USD") or 1.0)   # 每天最多花幾美元；到了就改走規則排的行程、不聊天
+# 只在這段時間呼叫模型（排行程、閒聊、反思），例 9-19；跨午夜寫 22-6；空＝整天。時段外大家照規則排的行程待在辦公室。
+# 走 CLI 時花的是訂閱額度（跟你自己的 Claude Code、員工共用）——畫面開整晚也不該半夜把它燒掉（2026-09-29 早上 10 點前就用完 $1）
+LIFE_HOURS = os.environ.get("OFFICE_LIFE_HOURS", "").strip()
 LIFE_TICK = 30.0     # 同一段行程裡多久看一次（有沒有被派工、這段結束了沒）
 CHAT_GAP = 240.0     # 全辦公室兩段閒聊至少隔幾秒（熱鬧與成本的平衡：CLI 一段約 $0.013 API 等值，一小時最多 15 段）
 PAIR_GAP = 1200.0    # 同一對人多久才再聊（別一直黏著同一個人）
@@ -558,6 +565,16 @@ def life_brain():
     return client
 
 
+def life_hours_ok(now: time.struct_time | None = None) -> bool:
+    """現在是不是「過生活」的時段（OFFICE_LIFE_HOURS）。沒設或寫錯＝整天（寫錯啟動時會講）。"""
+    try:
+        a, b = (int(x) for x in LIFE_HOURS.split("-", 1))
+    except ValueError:
+        return True
+    h = (now or time.localtime()).tm_hour
+    return a <= h < b if a <= b else (h >= a or h < b)
+
+
 def life_budget_left() -> bool:
     today = time.strftime("%Y-%m-%d")
     if life_spend["day"] != today:
@@ -570,7 +587,7 @@ async def life_call(fn):
     """生活模擬的每一次模型呼叫都走這裡：沒 key、今天預算用完、剛出錯在冷卻中就不叫——回 None，
     呼叫端退回不花錢的做法（規則排的行程、不聊天）。SDK 本身已重試過 429／5xx／連線錯誤兩次，到這裡的都是持續性的。"""
     global _dirty
-    if not life_on() or not life_budget_left() or time.monotonic() < life_pause["until"]:
+    if not life_on() or not life_budget_left() or not life_hours_ok() or time.monotonic() < life_pause["until"]:
         return None
     async with life_sem:
         try:
@@ -654,7 +671,7 @@ def chat_free(a: Agent, b: Agent) -> bool:
     now = time.monotonic()
     return (b.id in in_world and a.id != b.id and not {a.id, b.id} & (busy | life_chatting)
             and now - last_chat["at"] >= CHAT_GAP and now - pair_chat.get(frozenset((a.id, b.id)), -1e9) >= PAIR_GAP
-            and life_on() and life_budget_left() and now >= life_pause["until"])
+            and life_on() and life_budget_left() and life_hours_ok() and now >= life_pause["until"])
 
 
 async def life_chat(a: Agent, b: Agent, place: str) -> bool:
@@ -752,8 +769,10 @@ async def life_ambient(a: Agent) -> bool:
 
 
 async def life_reflect(a: Agent) -> None:
-    a.since_reflect = 0
-    for x in await life_call(lambda: a.reflect(life_brain())) or []:
+    insights = await life_call(lambda: a.reflect(life_brain()))
+    if insights is None:
+        return   # 沒叫到模型（下班時間、預算用完、冷卻中）：累積的重要度留著，叫得到時再反思
+    for x in insights:
         a.remember(f"心得：{x}", imp=8, kind="reflect")
     a.since_reflect = 0   # 心得本身不再算進下一輪
 
@@ -5913,6 +5932,7 @@ def office_life(agent: str = ""):
     name = lambda x: agents[x].name if x in agents else x
     return {"ok": True, "mode": "projection" if PROJECTION else "life", "on": life_on(), "model": LIFE_MODEL,
             "engine": life_engine(), "spend": round(life_spend["usd"], 4), "budget": LIFE_BUDGET,
+            "hours": LIFE_HOURS, "off_hours": not life_hours_ok(),
             "paused": time.monotonic() < life_pause["until"],
             "agents": {aid: one(a) for aid, a in npcs().items() if not agent or aid == agent},
             "chats": [{**c, "a_name": name(c["a"]), "b_name": name(c["b"])} for c in reversed(life_log)

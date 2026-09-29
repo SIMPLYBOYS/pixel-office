@@ -66,6 +66,8 @@ cd backend
     `OFFICE_LIFE_ENGINE=api` 改用 `ANTHROPIC_API_KEY`（API 額度）。
   - `OFFICE_LIFE_BUDGET_USD`（預設 `1.0`）：每天上限（走 CLI 時是 API 等值），到了就改走規則排的行程、不聊天。
     訂閱回「usage limit」時暫停 30 分鐘。
+  - `OFFICE_LIFE_HOURS`（例 `9-19`，跨午夜寫 `22-6`；預設整天）：只在這段時間呼叫模型。時段外照規則排的行程待著、
+    不聊天——畫面開整晚也不會半夜把額度用掉。
   - `OFFICE_LIFE_MODEL`（預設 `claude-haiku-4-5`）：`agent.py` 裡的單價是 Haiku 的，換模型要跟著改。
   - Claude Code 與 API key 都沒有時，退回規則排的行程、不聊天。
   - 外殼的 🌱 生活分頁看得到每個人的行程、人際、心得與最近的閒聊。閒聊可以提記憶裡真的做過的工作，

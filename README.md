@@ -77,6 +77,8 @@ The mode comes from `OFFICE_MODE` in `backend/.env` (loaded automatically by `lo
     about $0.013 of API-equivalent quota (~7 s). `OFFICE_LIFE_ENGINE=api` uses `ANTHROPIC_API_KEY` instead (API credit).
   - `OFFICE_LIFE_BUDGET_USD` (default `1.0`): daily cap, in API-equivalent dollars on the CLI path. Past it, people follow
     rule-based itineraries and stop chatting. A "usage limit" from the subscription pauses calls for 30 minutes.
+  - `OFFICE_LIFE_HOURS` (e.g. `9-19`, or `22-6` across midnight; default all day): only call the model in these hours.
+    Outside them people follow rule-based itineraries and don't chat, so a screen left open overnight doesn't use up quota.
   - `OFFICE_LIFE_MODEL` (default `claude-haiku-4-5`): the per-token prices in `agent.py` are Haiku's; update them if you switch.
   - With neither Claude Code nor an API key, it falls back to rule-based itineraries and no chatting.
   - The shell's 🌱 tab shows each person's itinerary, relationships, reflections and recent chats. Chats may mention

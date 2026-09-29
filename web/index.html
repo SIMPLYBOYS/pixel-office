@@ -2090,6 +2090,7 @@ async function lifecard(id) {
   // 走 CLI 是訂閱額度：不按次計費，花費是「換算成 API 會是多少」——標成 API 等值，別長得像真的扣了錢
   const equiv = r.engine === 'cli' ? 'API 等值 ' : '';
   const state = !r.engine ? '沒有 Claude Code 也沒有 API key：照規則排行程、不聊天'
+    : r.off_hours ? `下班時間（${r.hours} 點以外）：照規則排行程、不聊天、不花額度`
     : r.spend >= r.budget ? `今天的上限用完了（${equiv}$${r.spend.toFixed(3)}）：改走規則排的行程、不聊天`
     : r.paused ? '模型呼叫出錯，暫停一下再試（見橋的 log）'
     : `${r.engine === 'cli' ? 'Claude Code 訂閱' : 'API'}・${r.model}・今天 ${equiv}$${r.spend.toFixed(3)} / $${r.budget}`;

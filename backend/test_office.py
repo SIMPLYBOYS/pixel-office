@@ -5350,6 +5350,33 @@ def life_sim() -> None:
         assert len(fake.calls) == n0 and a.plan["llm"] is False and a.plan["steps"], "超過預算：不呼叫、走規則排的行程"
         main.life_spend["usd"] = 0.0
 
+        # ⑥-2 上班時間（OFFICE_LIFE_HOURS）：時段外不叫模型、不聊天；反思沒做就留著累積，上班再做
+        old_hours = main.LIFE_HOURS
+        try:
+            lt = lambda h: time.struct_time((2026, 9, 29, h, 0, 0, 1, 272, -1))
+            main.LIFE_HOURS = "9-19"
+            assert main.life_hours_ok(lt(9)) and main.life_hours_ok(lt(18)), "時段內"
+            assert not main.life_hours_ok(lt(19)) and not main.life_hours_ok(lt(3)), "19 點下班、半夜不過生活"
+            main.LIFE_HOURS = "22-6"
+            assert main.life_hours_ok(lt(23)) and main.life_hours_ok(lt(2)) and not main.life_hours_ok(lt(7)), "跨午夜"
+            main.LIFE_HOURS = "亂寫"
+            assert main.life_hours_ok(lt(3)), "寫錯＝整天"
+            main.LIFE_HOURS = "0-0"   # 沒有任何一個小時在裡面：把「現在」變成下班時間
+            n0 = len(fake.calls)
+            asyncio.run(main.life_replan(a))
+            assert len(fake.calls) == n0 and a.plan["llm"] is False and a.plan["steps"], "下班時間不叫模型、走規則排的行程"
+            main.last_chat["at"] = -1e9; main.pair_chat.clear()
+            assert not main.chat_free(a, b), "下班時間不聊天"
+            a.since_reflect = 99
+            asyncio.run(main.life_reflect(a))
+            assert a.since_reflect == 99 and len(fake.calls) == n0, "沒叫到模型：累積的重要度要留著，上班再反思"
+            with TestClient(main.app) as c:
+                r = c.get("/office/life").json()
+                assert r["off_hours"] is True and r["hours"] == "0-0", r
+        finally:
+            main.LIFE_HOURS = old_hours
+            a.since_reflect = 0
+
         # ⑦ 出錯冷卻：額度不足／key 不對這類 4xx 改了設定才會好——十分鐘內不再叫
         fake.raise_ = anthropic_error(401)
         asyncio.run(main.life_replan(a))
