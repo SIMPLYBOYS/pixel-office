@@ -476,6 +476,12 @@ def main():
     # 桌面右端拿掉，桌子收在她身旁——她從左書架裡的崗位往東跨一格就出得去（RoomBuilder 的 West (3,3)(4,3) 同步打開）。
     # (清掉的欄 x0–x1, 收邊：把原本桌子右端的描邊欄 src 貼到新的右端欄 dst，列 y0–y1)
     D1_CUTS = {"obj_03": (54, 64, 61, 53, 41, 56)}
+    # 她的筆電：洞挖到了筆電上蓋的上半截——她一直站著時擋得住，會走動之後就露出半台螢幕（2026-09-29 實際回報）。
+    # 從原圖把上蓋補回來（x0,y0,x1,y1，含左不含右）；她在崗位時頭肩露在筆電上方，跟原畫那位西裝男一樣。
+    D1_RESTORE = {"obj_03": (36, 36, 48, 41)}
+    # 椅子：原圖那張辦公椅在櫃檯最左邊（原畫另一個位子的），她的崗位反而沒椅子（同日回報「椅子位置不對」）。
+    # 從叢集裡拿掉（外框 x0,y0,x1,y1），拆成獨立的一件 d1_obj_03_chair 擺到崗位後面，見下面 d1("obj_03", …) 之後。
+    D1_CHAIR = {"obj_03": (0, 10, 16, 33)}
 
     def d1_sprite(obj):
         im = read_png(f"{D1}/{obj}.png")
@@ -487,6 +493,19 @@ def main():
                     im[y][x] = im[y - dy][x] if 0 <= y - dy < len(im) else (0, 0, 0, 0)
         if obj in D1_HOLES:
             x0, y0, x1, y1 = D1_HOLES[obj]
+            im = [r[:] for r in im]
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    im[y][x] = (0, 0, 0, 0)
+        raw = read_png(f"{D1}/{obj}.png")   # 沒補丁、沒挖洞的原圖（補回筆電用）
+        if obj in D1_RESTORE:
+            x0, y0, x1, y1 = D1_RESTORE[obj]
+            im = [r[:] for r in im]
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    im[y][x] = raw[y][x]
+        if obj in D1_CHAIR:
+            x0, y0, x1, y1 = D1_CHAIR[obj]
             im = [r[:] for r in im]
             for y in range(y0, y1):
                 for x in range(x0, x1):
@@ -521,6 +540,15 @@ def main():
     # 連通元件掃描把整叢當一件抽出來，天生就有層次與交疊。
     # 它 4.5 格高，上緣會壓在北牆上——那是對的，書架本來就靠牆。碰撞只看底邊那一列。
     d1("obj_03", 1, 4)
+    # 總機的椅子（從櫃檯叢集拆出來，見 D1_CHAIR）：擺在她崗位正後方——崗位腳底在 (60,49)，椅子底邊 48：
+    # Y-sort 在她後面、在櫃檯（底邊 80）後面，只從書架的洞裡看得到椅背；她離開時就是一張空椅子。
+    # 它是崗位後面的陳設、不是讓人走進去坐的座位：名字刻意不帶 chair（帶了會被當座位驗「那格要可走」），
+    # 也不佔地板格（NO_BLOCK）——她的崗位本來就不在格心，由 RoomBuilder.Nudge 對準。
+    cx0, cy0, cx1, cy1 = D1_CHAIR["obj_03"]
+    chair = [row[cx0:cx1] for row in read_png(f"{D1}/obj_03.png")[cy0:cy1]]
+    chair_img, _, _ = crop_opaque(chair)
+    place_px("d1_obj_03_seat", chair_img, 60 - len(chair_img[0]) // 2, 48 - len(chair_img))
+    NO_BLOCK.add("d1_obj_03_seat")
     # 房間補妝（同樣照 D1 原型）：音響擺書架頂上（D1 的相對位置原樣平移）、圖表螢幕掛磚牆、
     # 東北角一盆植栽。音響與圖表都壓在櫃檯書架的上緣，Y-sort 會讓櫃檯蓋掉它們——
     # 所以進 TOPS（RoomBuilder 給 sortingOrder 1）。位置刻意避開總機小姐：
