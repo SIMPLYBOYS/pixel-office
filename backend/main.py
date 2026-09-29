@@ -310,10 +310,15 @@ def load_roster() -> None:
         arrived.pop(aid, None)
     for aid in wanted:
         old, agents[aid] = agents.get(aid), Agent(aid, TEAM_DIR)
-        if old is not None and old.name == agents[aid].name:
-            agents[aid].load_life(old.life_state())   # 同一個人：記憶、人際、行程照舊（換了人就從頭認識大家）
-        elif isinstance(saved := life_saved.pop(aid, None), dict):
+        # 生活的心智從哪接：狀態檔讀進來的（life_saved）優先，其次是記憶體裡同一個人的（團隊設定存檔後重載）。
+        # 順序不能反：啟動時名冊會載【兩次】（模組中段一次、load_state 之後一次），第一次建出來的是空的——
+        # 以前先看記憶體那份，於是拿空的蓋掉存檔，每重啟一次生活記憶就全沒了（2026-09-29 實際踩到）。
+        # 換了人（名字不同）就從頭認識大家；舊存檔沒記名字的照收。
+        saved = life_saved.pop(aid, None)
+        if isinstance(saved, dict) and saved.get("name", agents[aid].name) == agents[aid].name:
             agents[aid].load_life(saved)
+        elif old is not None and old.name == agents[aid].name:
+            agents[aid].load_life(old.life_state())
         arrived.setdefault(aid, asyncio.Event())
         # 閒置計時從【現在】起算：預設 0.0 的話，「從沒接過任務」會被算成「閒了很久」，
         # 於是一開機全員直接回工位趴著，再也不會走動（實測到的）。

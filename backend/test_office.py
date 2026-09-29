@@ -5372,15 +5372,33 @@ def life_sim() -> None:
 
         # ⑨ 重啟不失憶、名冊重載（團隊設定存檔）也不失憶
         a.plan = {"at": time.time(), "steps": steps}
-        score = a.relations["p07"]["score"]
+        score, last = a.relations["p07"]["score"], a.memory[-1]["text"]
         main.save_state()
         main.life_saved.clear()
+        # 照【真實的啟動順序】重來一次：模組中段先載一次名冊（建出空的人）→ load_state → 再載一次名冊。
+        # 以前的測試只載一次，沒抓到第二次載名冊拿空的蓋掉存檔（每重啟一次記憶全沒，2026-09-29 實際踩到）
+        for x in list(main.npcs()):
+            main.agents.pop(x)
+        main.load_roster()
         main.load_state()
-        assert main.life_saved["p05"]["mem"][-1]["text"] == a.memory[-1]["text"], "狀態檔裡要有生活的心智"
-        main.life_saved.clear()
+        assert main.life_saved["p05"]["mem"][-1]["text"] == last and main.life_saved["p05"]["name"] == a.name, "狀態檔裡要有生活的心智"
         main.load_roster()
         a2 = main.agents["p05"]
-        assert a2 is not a and a2.relations.get("p07", {}).get("score") == score and a2.plan["steps"], "重載名冊把心智弄丟了"
+        assert a2 is not a and a2.memory and a2.memory[-1]["text"] == last, "重啟後記憶被空的蓋掉了"
+        assert a2.relations.get("p07", {}).get("score") == score and a2.plan["steps"], "重啟後人際／行程不見了"
+        main.save_state()
+        assert json.loads(main.STATE_FILE.read_text(encoding="utf-8"))["life"]["p05"]["mem"][-1]["text"] == last, "存回去的要是接回來的那份"
+        # 團隊設定存檔（執行中重載名冊）：記憶體裡同一個人的照舊
+        main.load_roster()
+        assert main.agents["p05"].memory[-1]["text"] == last, "團隊設定重載把心智弄丟了"
+        # 工位換了人：存檔裡那份是前一個人的，不接
+        main.life_saved["p05"] = {**a2.life_state(), "name": "別人"}
+        main.agents.pop("p05")
+        main.load_roster()
+        assert not main.agents["p05"].memory, "換了人卻接到前一個人的記憶"
+        main.life_saved.pop("p05", None)
+        a2 = main.agents["p05"]
+        a2.load_life({**a.life_state()})
 
         # ⑩ 生活模擬模式：生活迴圈交給 life_loop（純投影模式才是零成本 idle）
         went = []

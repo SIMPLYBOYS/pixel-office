@@ -176,7 +176,8 @@ class Agent:
             r["note"] = note
 
     def life_state(self) -> dict:
-        return {"mem": self.memory, "rel": self.relations, "plan": self.plan, "since": self.since_reflect}
+        # name：工位換了人時，存檔裡那份心智是前一個人的——載入時比對，不同就不接
+        return {"name": self.name, "mem": self.memory, "rel": self.relations, "plan": self.plan, "since": self.since_reflect}
 
     def load_life(self, d: dict) -> None:
         self.memory = [m for m in d.get("mem") or [] if isinstance(m, dict) and "text" in m][-MEM_MAX:]
