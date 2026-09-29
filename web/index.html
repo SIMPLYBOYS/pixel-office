@@ -1682,7 +1682,8 @@ function paintCodexModelRow(workingNow) {
 
 // 思考力度（effort）：Claude Code 的 --effort、Codex 的 model_reasoning_effort。跟模型同一套——選了記住（各引擎各一份）、
 // 「還原」收回；沒選＝引擎自己的預設。Codex 的等級看型號（它自己的清單寫的：gpt-5.5 只到 xhigh、新的到 ultra）。
-// cogito 的派工入口還不收：整排停用、講清楚，不讓人選了沒作用。
+// cogito：等級看它回報的型號資料（Claude 型號的 efforts 來自官方 capabilities）；型號不收就只剩「預設」。
+// 能力表說某個引擎不收（effort=false）：整排停用、講清楚，不讓人選了沒作用。
 const EFFORT_NAME = { minimal: '最省', low: '低', medium: '中', high: '高', xhigh: '很高', max: '最高', ultra: '極限' };
 function paintEffortRow(workingNow) {
   const row = $('effortRow'), sel = $('effortSel');
@@ -1692,20 +1693,24 @@ function paintEffortRow(workingNow) {
   const reset = modelInfo.reset || 'reset';
   if (!engCaps(eng).effort) {
     sel.innerHTML = '<option value="">—</option>'; sel.dataset.sig = ''; sel.disabled = true;
-    $('effortNote').textContent = `${engCaps(eng).name || eng} 的派工入口還不收思考力度（要改 ${engCaps(eng).name || eng}）——改選 Claude Code 或 Codex 才能指定`;
+    $('effortNote').textContent = `${engCaps(eng).name || eng} 的派工入口不收思考力度——改選別的引擎才能指定`;
     return;
   }
-  const codex = eng === 'codex';
-  const picked = (codex ? modelInfo.codex_effort : modelInfo.cli_effort)?.[selected] || '';
-  let levels = modelInfo.cli_efforts || [], dflt = '', model = '';
-  if (codex) {
+  const codex = eng === 'codex', cogito = eng === 'cogito';
+  const picked = (codex ? modelInfo.codex_effort : cogito ? modelInfo.cogito_effort : modelInfo.cli_effort)?.[selected] || '';
+  const engName = codex ? 'Codex' : cogito ? 'cogito' : 'Claude Code';
+  let levels = modelInfo.cli_efforts || [], dflt = '', model = '', none = false;
+  if (codex || cogito) {
     const m = $('modelSel').value;
-    model = m && m !== reset ? m : (modelInfo.codex_effective?.[selected] || modelInfo.codex_default || '');
-    const info = (modelInfo.codex_list || []).find(x => x.id === model);
-    levels = info?.efforts?.length ? info.efforts : ['low', 'medium', 'high'];   // 查不到型號：只給大家都有的三級
-    dflt = info?.default_effort || '';
+    model = m && m !== reset ? m
+      : codex ? (modelInfo.codex_effective?.[selected] || modelInfo.codex_default || '')
+      : (modelInfo.effective?.[selected] || modelInfo.cogito_default || '');
+    const info = (codex ? modelInfo.codex_list : modelInfo.models || []).find(x => x.id === model);
+    none = !!info && Array.isArray(info.efforts) && !info.efforts.length && cogito;   // cogito 說這個型號明確不收（例：Haiku）
+    levels = info?.efforts?.length ? info.efforts : none ? [] : ['low', 'medium', 'high'];   // 查不到型號：只給大家都有的三級
+    dflt = codex ? (info?.default_effort || '') : '';
   }
-  const want = [['', `${codex ? 'Codex' : 'Claude Code'} 預設${dflt ? `（${EFFORT_NAME[dflt] || dflt}）` : ''}`]]
+  const want = [['', `${engName} 預設${dflt ? `（${EFFORT_NAME[dflt] || dflt}）` : ''}`]]
     .concat(levels.map(l => [l, `${EFFORT_NAME[l] || l}（${l}）`]));
   if (picked && !levels.includes(picked)) want.push([picked, `${picked}（這個型號不收，會用預設）`]);
   if (picked) want.push([reset, '↺ 還原預設']);
@@ -1718,11 +1723,12 @@ function paintEffortRow(workingNow) {
   sel.disabled = workingNow;
   sel.onchange = () => updateComposer();
   const pick = sel.value;
-  $('effortNote').textContent =
+  $('effortNote').textContent = (
     pick === reset ? '這次派工收回選過的力度，改用預設'
     : pick && pick !== picked ? `這次派工改用 ${pick}——會記住，之後可選「還原」收回`
     : pick ? `目前會用 ${pick}`
-    : `沒指定：交給 ${codex ? 'Codex' + (model ? `（${model}）` : '') : 'Claude Code'} 自己的預設`;
+    : `沒指定：交給 ${engName}${model ? `（${model}）` : ''} 自己的預設`)
+    + (none ? `　（${model} 不收思考力度：選了也不會送）` : '');
 }
 
 function paintModelRow(a, workingNow) {

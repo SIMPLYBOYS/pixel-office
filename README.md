@@ -20,7 +20,8 @@ same machine it sends the bridge token automatically. The event protocol is spec
 [docs/office-protocol.md](https://github.com/SIMPLYBOYS/cogito-agent/blob/main/docs/office-protocol.md).
 The Claude Code and Codex engines work without cogito. The shell's ⚙ dispatch settings pick the engine, model and
 thinking effort per employee (remembered until reset): Claude Code's `--effort` (low–max), Codex's `model_reasoning_effort`
-(the levels each model lists). cogito's task endpoint doesn't take an effort yet.
+(the levels each model lists), and cogito's `/task` `effort` (Claude models only get it when the model supports it, per the
+official capabilities; OpenAI-compatible endpoints get `reasoning_effort`).
 
 ## Video tour
 

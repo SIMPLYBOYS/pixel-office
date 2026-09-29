@@ -2351,6 +2351,14 @@ def model_per_agent() -> None:
             c.post("/office/dispatch", json={"agent": "p19", "text": "還原", "model": main.MODEL_RESET})
             assert sent[-1]["model"] == main.MODEL_RESET and "p19" not in main.cogito_pick, sent[-1]
             assert c.get("/office/models").json()["effective"]["p19"] == "", "還原後回到 cogito 預設"
+            # 思考力度（cogito /task 的 effort，2026-09-29 cogito 那邊接上）：選了就送、會記住；還原送 reset；清掉後不再送
+            main.effort_sent.pop("p19", None); main.cogito_effort_pick.pop("p19", None)
+            for body, want in (({"text": "想深一點", "effort": "xhigh"}, "xhigh"), ({"text": "沒選力度"}, "xhigh"),
+                               ({"text": "還原", "effort": main.MODEL_RESET}, main.MODEL_RESET), ({"text": "之後"}, None)):
+                main.busy.discard("p19")
+                c.post("/office/dispatch", json={"agent": "p19", **body})
+                assert sent[-1].get("effort") == want, (body, sent[-1])
+            assert "p19" not in main.cogito_effort_pick and c.get("/office/models").json()["engine_caps"]["cogito"]["effort"] is True
             # Claude Code 那份：人設或誤選的 GPT 都不帶給 Claude Code
             main.cogito_pick["p01"] = "gpt-5.6-sol"
             old_p = main.agents["p01"].persona.get("model")

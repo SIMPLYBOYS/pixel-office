@@ -4895,8 +4895,8 @@ def engine_of(aid: str, override: str = "") -> str:
 # resume：接回上次的對話（cogito 斷點續跑、CLI --resume、Codex 接回 thread）；approval：高危操作停下來等老闆；
 # steer：工作中插話；subagents：派子 agent（看板主持人一定要）。
 ENGINE_CAPS = {
-    # effort：派工時能不能指定思考力度（Claude Code --effort、Codex model_reasoning_effort；cogito 的 /task 目前不收）
-    ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": False},
+    # effort：派工時能不能指定思考力度（Claude Code --effort、Codex model_reasoning_effort、cogito /task 的 effort）
+    ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": True},
     ENGINE_CLI: {"name": "Claude Code", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": True},
     ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": False, "steer": False, "subagents": False, "effort": True},
 }
@@ -4918,6 +4918,8 @@ CLI_EFFORTS = ["low", "medium", "high", "xhigh", "max"]   # `claude --help` 的 
 EFFORT_RE = re.compile(r"^[a-z]{2,10}$")   # Codex 的等級看型號（models_cache 列的）；這裡只擋怪字（它要進 -c 的 TOML 值）
 cli_effort_pick: dict[str, str] = {}      # aid -> 外殼替 Claude Code 選過的力度
 codex_effort_pick: dict[str, str] = {}    # aid -> 外殼替 Codex 選過的力度
+cogito_effort_pick: dict[str, str] = {}   # aid -> 外殼替 cogito 選過的力度（型號收不收由 cogito 判斷：Claude 照 capabilities）
+effort_sent: dict[str, str] = {}          # aid -> cogito 那個頻道現在的力度設定（橋最後一次送的；""＝已清掉）——同 model_sent
 # 三個引擎的型號互不相通（Claude Code 只跑 Claude、Codex 只跑 OpenAI、cogito 看它自己的 provider），
 # 所以清單、記住的選擇、預設都各自一份。2026-09-17 以前共用一份：cogito 改走 OpenAI 後，Claude Code 的選單裡列的是 GPT。
 
@@ -5055,6 +5057,7 @@ async def office_models():
             "engine_caps": ENGINE_CAPS,   # 外殼的按鈕、提示、選單都照這張（跟派工檢查同一份）
             # 思考力度：Claude Code 的固定列舉；Codex 的看型號（codex_list 每個型號的 efforts／default_effort）
             "cli_efforts": CLI_EFFORTS, "cli_effort": dict(cli_effort_pick), "codex_effort": dict(codex_effort_pick),
+            "cogito_effort": dict(cogito_effort_pick),   # cogito 的等級看型號（models 每個型號的 efforts，cogito 從 capabilities 取）
             "cli_models": dict(cli_model)}   # CLI 上次實際跑的模型（揭露，不是可設定值）
 
 
@@ -5292,6 +5295,10 @@ async def office_dispatch(d: dict):
         # 按中止只收了卡、沒叫停 cogito（整理能力表時發現）。
         eng_now = run_eng
     cap = ENGINE_CAPS[eng_now]
+    # 思考力度（三個引擎共用的解析）：只看新任務——工作中的互動（核准、插話…）不該順手改設定
+    epick = str(d.get("effort") or "").strip().lower() if verb not in IN_FLIGHT else ""
+    if epick and epick != MODEL_RESET and not EFFORT_RE.match(epick):
+        return {"ok": False, "error": f"不認得的思考力度：{epick[:20]}"}
     cli_mode = eng_now == ENGINE_CLI
     codex_mode = eng_now == ENGINE_CODEX
     # 中止在分流【之前】處理：兩種引擎共用同一條收尾，差別只在「怎麼叫停上游」。
@@ -5367,9 +5374,6 @@ async def office_dispatch(d: dict):
                     "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
         # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
-        epick = str(d.get("effort") or "").strip().lower()   # 思考力度：同一套規則（CLI_EFFORTS／codex_effort_for）
-        if epick and epick != MODEL_RESET and not EFFORT_RE.match(epick):
-            return {"ok": False, "error": f"不認得的思考力度：{epick[:20]}"}
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         if codex_mode:
@@ -5474,6 +5478,23 @@ async def office_dispatch(d: dict):
                 payload["model"] = MODEL_RESET
                 model_sent[aid] = ""
                 _dirty = True
+            # 思考力度：同 model 的規則。選過的送；沒選但那個頻道之前被設過（effort_sent 有值）→ 送一次 reset 收回。
+            # 從沒送過的頻道不送（cogito 那邊本來就是空，送 reset 只是多一個欄位）
+            if verb not in IN_FLIGHT:   # 核准、插話這些不是新任務，不順手改設定
+                if epick == MODEL_RESET:
+                    cogito_effort_pick.pop(aid, None)
+                    _dirty = True
+                elif epick:
+                    cogito_effort_pick[aid] = epick
+                    _dirty = True
+                if e := cogito_effort_pick.get(aid):
+                    payload["effort"] = e
+                    effort_sent[aid] = e
+                    _dirty = True
+                elif effort_sent.get(aid):
+                    payload["effort"] = MODEL_RESET
+                    effort_sent[aid] = ""
+                    _dirty = True
             r = await cl.post(f"{COGITO_HTTP}/task", json=payload,
                               headers=cogito_headers(text))
     except httpx.HTTPError as e:
@@ -6083,6 +6104,7 @@ def save_state() -> None:
             "sched_last": sched_last,  # 班表防重：重啟不能讓同一小時的巡邏跑兩次
             "model_sent": model_sent, "cogito_pick": cogito_pick, "cli_pick": cli_pick,
             "cli_effort_pick": cli_effort_pick, "codex_effort_pick": codex_effort_pick,
+            "cogito_effort_pick": cogito_effort_pick, "effort_sent": effort_sent,
             "engine_sent": engine_sent,  # 引擎覆蓋也是長期狀態，重啟後畫面不能忘記
             # CLI 回報的能力與模型也要跟著走：它們只在【跑過任務】時才拿得到，
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
@@ -6143,6 +6165,8 @@ def load_state() -> None:
     codex_model_sent.update(data.get("codex_model_sent", {}))
     cli_effort_pick.update(data.get("cli_effort_pick", {}))
     codex_effort_pick.update(data.get("codex_effort_pick", {}))
+    cogito_effort_pick.update(data.get("cogito_effort_pick", {}))
+    effort_sent.update(data.get("effort_sent", {}))
     # 舊 bug 留下的雜項空殼卡：派工那行曾經自己開卡（見 pending_note 的說明），內容只有
     # 那一句「老闆交辦」，而同一句現在掛在真正的任務卡上——留著只是佔位。
     # 條件收得很窄（雜項 + 只有 ≤1 則事件），新版不會再產生這種卡，所以這段等於一次性清理。

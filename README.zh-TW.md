@@ -16,7 +16,8 @@
 cogito 那邊設 `COGITO_OFFICE_URL=http://localhost:8123` 即可，同一台機器上會自動帶橋的 token。事件協定寫在 cogito 的
 [docs/office-protocol.md](https://github.com/SIMPLYBOYS/cogito-agent/blob/main/docs/office-protocol.md)。
 Claude Code 與 Codex 兩個引擎不需要 cogito 也能用。外殼的 ⚙ 派工設定可以替每位員工選引擎、模型與思考力度（選了會記住，
-可還原）：Claude Code 的 `--effort`（low～max）、Codex 的 `model_reasoning_effort`（照各型號列的等級）；cogito 的派工入口還不收思考力度。
+可還原）：Claude Code 的 `--effort`（low～max）、Codex 的 `model_reasoning_effort`（照各型號列的等級）、cogito `/task` 的 `effort`
+（Claude 型號照官方 capabilities，收才送；OpenAI 相容端點送 `reasoning_effort`）。
 
 ## 影片導覽
 
