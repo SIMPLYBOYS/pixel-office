@@ -361,15 +361,24 @@ def run() -> None:
             # 「門口有人」的判斷要看【現在誰在等審批】，不是查 occupied——那張表從不釋放，
             # 只要有人曾經走到門口再也沒移動過，後面的人就永遠被幽靈擋住（實際踩到）。
             main.occupied["p19"] = main.BOSS_DOOR   # 老徐上次走到門口就沒再動過，但他沒在等審批
-            # HITL 投影：走到老闆房門口站著等
-            assert recv(ws, "p07") == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}
+            # HITL 投影：走到老闆房門口站著等。
+            # 走位是背景任務（create_task）、泡泡是當場 await——兩者【誰先到不保證】，泡泡偶爾搶在走位前面
+            # （2026-09-30 重現：跑 17 次紅 1 次，收到的是「⚠ 等待審批」）。所以收到走位為止，途中的泡泡先記下來。
+            pre = []
+            for _ in range(3):
+                m = recv(ws, "p07")
+                if m.get("action") == "move_to":
+                    break
+                pre.append(m)
+            assert m == {"agent_id": "p07", "action": "move_to", "target": "boss_1"}, (m, pre)
+            assert all(x.get("text") == "⚠ 等待審批" for x in pre), pre
             # 姿勢要等【真的走到】才擺——move_to 會清掉姿勢，走路途中送等於沒送。
             # 這個測試原本緊接著就斷言 phone，等於把 bug 寫死成規格：實機上那個動作從來沒出現過。
             ws.send_json({"type": "arrived", "agent_id": "p07", "at": "boss_1"})
             # 等審批＝球在別人手上：掏手機，不是站著像雕像（站著不動＝閒置，兩者不能同形）。
             # 姿勢與泡泡【誰先到不保證】：泡泡走節流佇列、姿勢走等抵達的背景任務，兩條路徑
             # 沒有順序關係。先前照順序斷言，五次會紅兩次——那是測試在假設一個不存在的契約。
-            got = [recv(ws, "p07") for _ in range(2)]
+            got = pre + [recv(ws, "p07") for _ in range(2 - len(pre))]
             assert {"agent_id": "p07", "action": "use", "target": "phone"} in got, got
             assert any(c.get("text") == "⚠ 等待審批" for c in got), got
             assert main.occupied["p07"] == "boss_1"
@@ -5218,7 +5227,29 @@ def permits_feedback() -> None:
             assert "結論放第一段11" not in (ws / "CLAUDE.md").read_text(encoding="utf-8"), "刪掉的要馬上從人設拿掉"
             assert c.post("/office/feedback", json={"agent": aid, "i": 99}).json()["ok"] is False
             assert "老闆驗收時給過的意見" not in main.persona_text(other, main.persona_body(other))
+
+        # ⑦ 當場審批也能「以後都准」：規則從眼前這張卡推、核准送到了才記；推不出規則的不准按、卡留著
+        async def live():
+            main.busy.discard(aid); main.clear_approval(aid)
+            t = asyncio.create_task(main.office_permission(req("WebFetch", {"url": "https://cake.me/jobs"})))
+            await asyncio.sleep(0.15)
+            assert main.office_report(aid)["approval_permit"] == "WebFetch(domain:cake.me)", main.approval_meta.get(aid)
+            r = await main.office_dispatch({"agent": aid, "text": "approve", "always": True})
+            assert r.get("ok"), r
+            assert (await asyncio.wait_for(t, 3))["behavior"] == "allow"
+            assert main.cli_permit_args(aid) == ["--allowedTools", "WebFetch(domain:cake.me)"]
+            assert any("以後都准" in e["text"] for e in main.last_report[aid]["events"][-3:])
+            t = asyncio.create_task(main.office_permission(req("Write", {"file_path": "/etc/x"})))
+            await asyncio.sleep(0.15)
+            assert main.office_report(aid)["approval_permit"] is None
+            r = await main.office_dispatch({"agent": aid, "text": "approve", "always": True})
+            assert r.get("ok") is False and aid in main.pending_approval, f"推不出規則：不准、卡要留著：{r}"
+            await main.office_dispatch({"agent": aid, "text": "reject"})
+            assert (await asyncio.wait_for(t, 3))["behavior"] == "deny"
+            assert main.cli_permit_args(aid) == ["--allowedTools", "WebFetch(domain:cake.me)"], "駁回不影響已給的"
+        asyncio.run(live())
     finally:
+        main.clear_approval(aid); main.busy.discard(aid)
         main.sched_running.pop(aid, None)
         main.PREFS_FILE.unlink(missing_ok=True)
         if old_prefs is not None:

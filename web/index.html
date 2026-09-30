@@ -2222,7 +2222,7 @@ async function inboxcard() {
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat full" title="${esc('上次的請求：' + (t.example || ''))}">🔑 想要 <code>${esc(t.rule)}</code>・${esc(t.text)}</span>`;
       const go = document.createElement('button'); go.className = 'yes'; go.textContent = '✓ 以後都准';
-      go.title = `加進${t.name}的常駐許可（只給他），下次不必再問`;
+      go.title = `加進${t.name}的常駐許可（只給這一位），下次不必再問`;
       go.onclick = e => { e.stopPropagation(); permit(t.agent, t.rule, 'grant'); };
       const no = document.createElement('button'); no.className = 'no'; no.title = '不准，從清單拿掉'; no.textContent = '✕';
       no.onclick = e => { e.stopPropagation(); permit(t.agent, t.rule, 'dismiss'); };
@@ -2445,11 +2445,11 @@ async function steer(text) {
   if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
 }
 
-async function dispatch(text, task, resume) {
+async function dispatch(text, task, resume, always) {
   if (!selected || !text.trim()) return;
   const r = await (await fetch('/office/dispatch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(),
+    body: JSON.stringify({ agent: selected, text: text.trim(), people: crewN(), always: !!always,
                            repo: $('repoSel').value.trim() || null,
                            model: $('modelSel').value || null,
                            engine: $('engineSel').value || null, task: task || null, resume: resume ?? null,
@@ -3272,7 +3272,7 @@ async function resumeCard(id) {
 // 驗收：通過就定案；要求修改＝寫一句意見，接著派給他（接在同一個任務底下，做完再進待驗收）
 async function verdictCard(id, v) {
   let note = '';
-  if (v === 'changes' && (note = prompt('要改什麼？（會接著派給他，接在這張後面；也會記進他的人設，以後同類的活照做）')) === null) return;
+  if (v === 'changes' && (note = prompt('要改什麼？（會接著派給他，接在這張後面；也會記進人設，以後同類的活照做）')) === null) return;
   const r = await (await fetch('/office/verdict', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, card: id, verdict: v, note }) })).json();
   $('hint').textContent = !r.ok ? `⛔ ${r.error}` : v === 'accepted' ? '已驗收 ✓' : '已要求修改';
@@ -3399,7 +3399,7 @@ async function feed() {
 
     const card = $('approvalCard');
     approvalOpen = !!r.approval;   // 球在老闆手上：feed 停止自動捲動與跟隨，畫面別動（見 keepBottom／revealTyping）
-    const sig = r.approval ? JSON.stringify([r.approval, r.approval_from, r.approval_meta && r.approval_meta.task_id, r.approval_queued]) : '';
+    const sig = r.approval ? JSON.stringify([r.approval, r.approval_from, r.approval_meta && r.approval_meta.task_id, r.approval_queued, r.approval_permit]) : '';
     if (r.approval && card.dataset.sig === sig) {
       card.style.display = 'block';   // 同一張審批：不重畫。每次 SSE 都會進來這裡，重建 innerHTML 等於按鈕在手指下被換掉
     } else if (r.approval) {
@@ -3410,7 +3410,9 @@ async function feed() {
         // 來自 Slack/TG 的審批只能回原平台按——這裡按了 cogito 也解不開（審批按頻道解析）
         ? `<div class="btns hint">↩︎ 這張審批來自 ${esc(r.approval_from)}，請回 ${esc(r.approval_from)} 回覆 approve / reject</div>`
         // 按鈕帶著【這張卡】的任務 ID（稽核 #5）：卡在你按之前換成排隊的下一張，橋會拒收，不會看 A 批 B
-        : `<div class="btns"><button class="yes" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('approve', this.dataset.task)">核准</button>
+        : (r.approval_permit ? `<div class="tid">🔑「以後都准」＝核准這次，並把 <code>${esc(r.approval_permit)}</code> 加進${esc(r.name || '')}的常駐許可（只給這一位、檔案卡上可撤銷）</div>` : '')
+        + `<div class="btns"><button class="yes" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('approve', this.dataset.task)">核准</button>
+        ${r.approval_permit ? `<button class="yes" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('approve', this.dataset.task, null, true)">以後都准</button>` : ''}
         <button class="no" data-task="${esc((r.approval_meta && r.approval_meta.task_id) || '')}" onclick="dispatch('reject', this.dataset.task)">駁回</button></div>`;
       const queued = r.approval_queued ? `<div class="tid">⏳ 還有 ${r.approval_queued} 張排隊——一次決定一張，處理完這張才會顯示下一張</div>` : '';
       const m = r.approval_meta;

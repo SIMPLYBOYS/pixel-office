@@ -2255,6 +2255,7 @@ def office_report(aid: str):
     return {"ok": True, "agent": aid, "name": name, **card,
             "approval": pending_approval.get(aid, ""),
             "approval_meta": approval_meta.get(aid),
+            "approval_permit": approval_permit(aid),   # 非空＝可以「以後都准」，外殼把整條規則秀出來
             "approval_left": left,
         "approval_queued": len(approval_backlog.get(aid, [])),   # 排隊中的下一張：外殼提示「還有 N 張」
             "approval_from": approval_from(aid),  # 非空＝要回該平台核准，外殼不給按鈕
@@ -4442,6 +4443,32 @@ def cli_permit_args(aid: str) -> list[str]:
     return ["--allowedTools", *rules] if rules else []
 
 
+def grant_permit(aid: str, rule: str, via: str) -> list[str]:
+    """把一條規則加進這個人的常駐許可（清單上同一條順便拿掉）。via：從哪裡批的（待批清單／當場審批）。"""
+    p = load_prefs()
+    mine = p["permits"].setdefault(aid, [])
+    if rule not in mine:
+        mine.append(rule)
+    p["pending"] = [x for x in p["pending"] if not (x.get("agent") == aid and x.get("rule") == rule)]
+    save_prefs(p)
+    audit("permit.grant", aid, rule=rule, by="office-web", via=via)
+    notify("agent", aid)
+    return mine
+
+
+def approval_permit(aid: str) -> str | None:
+    """眼前這張審批能不能「以後都准」：只有 Claude Code 的（常駐許可靠 --allowedTools 帶），而且推得出規則的。
+    規則從【這張卡】的 approval_meta 推——跟核准綁同一張卡（稽核 #5），看的是 A 就不會准到 B。"""
+    m = approval_meta.get(aid)
+    if aid not in cli_permission or not m:
+        return None
+    try:
+        ti = json.loads(str(m.get("params") or ""))
+    except ValueError:
+        return None
+    return permit_rule(str(m.get("tool") or ""), ti)
+
+
 @app.post("/office/permits")
 async def office_permits(d: dict):
     """老闆處理常駐許可。grant＝批准待批清單上的一條、dismiss＝不准（從清單拿掉）、revoke＝撤銷已給的。
@@ -4455,9 +4482,9 @@ async def office_permits(d: dict):
         hit = [x for x in p["pending"] if x.get("agent") == aid and x.get("rule") == rule]
         if not hit:
             return {"ok": False, "error": "待批清單裡沒有這一條（可能已經處理過）"}
+        if act == "grant":
+            return {"ok": True, "permits": grant_permit(aid, rule, "待批清單")}
         p["pending"] = [x for x in p["pending"] if x not in hit]
-        if act == "grant" and rule not in mine:
-            mine.append(rule)
     elif act == "revoke":
         if rule not in mine:
             return {"ok": False, "error": "這位員工沒有這條許可"}
@@ -5576,7 +5603,14 @@ async def office_dispatch(d: dict):
     if cli_mode:
         if verb in ("approve", "reject"):
             why = text[len(verb):].strip()
+            always = verb == "approve" and bool(d.get("always"))
+            rule = approval_permit(aid) if always else None   # 先推（核准後卡就收了）；推不出來就整個不做，不要准了這次卻沒記住
+            if always and not rule:
+                return {"ok": False, "error": "這個操作不能設成以後都准（只有網域、MCP 工具、單一 Bash 指令可以）——請按一般的核准"}
             if await resolve_cli_permission(aid, verb == "approve", why or ("老闆核准" if verb == "approve" else "老闆駁回")):
+                if rule:   # 真的送到了才記：送不到的核准不該留下一條許可
+                    grant_permit(aid, rule, "當場審批")
+                    log_ev(aid, f"🔑 老闆設成以後都准：{rule}")
                 return {"ok": True}
             return {"ok": False, "error": f"{agents[aid].name} 沒有待審批的操作"}
         if verb == "/steer":
