@@ -2568,7 +2568,8 @@ def office_profile(aid: str):
     return {"ok": True, "id": aid, **{k: a.persona.get(k, "") for k in
             ("name", "role", "team", "personality", "style", "habits")},
             "soul": soul.read_text(encoding="utf-8") if soul.exists() else "",
-            "schedule": schedule_of(aid)}   # 班表是這個人的一部分：誰有例行工作、什麼時候、送去哪
+            "schedule": schedule_of(aid),   # 班表是這個人的一部分：誰有例行工作、什麼時候、送去哪
+            "permits": (p := load_prefs())["permits"].get(aid, []), "feedback": p["feedback"].get(aid, [])}
 
 
 # ── 團隊設定 API（docs/team-setup.md）─────────────────────────────────────────
@@ -3614,6 +3615,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
         argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]   # 同理：沒選就不帶，用 Claude Code 自己的預設
+    argv += cli_permit_args(aid)   # 老闆批過的常駐許可（只給這個人）。放最後：--allowedTools 會吃掉後面所有不是旗標的參數
     await office_event({"v": 1, "agent": aid, "kind": "start",
                         "label": text[:80], "detail": str(base),
                         "engine": ENGINE_CLI, "session": cli_session_of[aid], "effort": effort})   # 回溯用
@@ -4378,6 +4380,124 @@ def agent_from_cwd(cwd: str) -> str | None:
     return m.group(1) if m and m.group(1) in agents else None
 
 
+# ── 老闆對各員工的設定：常駐許可、待批清單、驗收意見（team/prefs.json，跟團隊一樣不進 git）──────────────
+# 班表無人值守時，要審批的操作一律拒（沒人可問）——以前拒完就沒了：TechOrange 連拒 6 天，沒有一個地方讓老闆「以後都准」。
+# 現在拒的時候記一筆待批進收件匣；老闆批了＝這位員工的常駐許可（Claude Code 的權限規則，派工用 --allowedTools 帶上），
+# 下次連問都不用問。只給這一個人——全員共用的 ~/.claude-office/settings.json 不動。
+# 驗收意見：老闆「要求修改」的那句話接在這個人的人設後面（三個引擎都讀人設），同類的活下次就照做。
+PREFS_FILE = TEAM_DIR / "prefs.json"
+FEEDBACK_KEEP = 10   # ponytail: 只留最近 10 則；要更聰明（歸納成偏好）再叫模型整理
+PERMIT_HOST_RE = re.compile(r"[a-z0-9.-]+")
+PERMIT_WORD_RE = re.compile(r"[A-Za-z0-9._+-]+")
+PERMIT_COMPOUND_RE = re.compile(r"[;&|`$<>()\n]")
+
+
+def load_prefs() -> dict:
+    try:
+        d = json.loads(PREFS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    return {k: d.get(k) or ({} if k != "pending" else []) for k in ("permits", "pending", "feedback")}
+
+
+def save_prefs(p: dict) -> None:
+    PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PREFS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(p, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(PREFS_FILE)
+
+
+def permit_rule(tool: str, ti) -> str | None:
+    """被拒的請求 → 批了要加的權限規則。None＝這種不給常駐許可（寫檔、讀工作區外……照舊只能當場審批）。
+    Bash 只收單一指令：複合指令（&&、管線、$()）Claude Code 會拆開逐段比，猜不出缺的是哪一段，批了也照樣被問。"""
+    ti = ti if isinstance(ti, dict) else {}
+    if tool == "WebFetch":
+        host = urlsplit(str(ti.get("url") or "")).hostname or ""
+        return f"WebFetch(domain:{host})" if PERMIT_HOST_RE.fullmatch(host) else None
+    if tool.startswith("mcp__") and PERMIT_WORD_RE.fullmatch(tool):
+        return tool
+    if tool == "Bash":
+        cmd = str(ti.get("command") or "").strip()
+        first = cmd.split(maxsplit=1)[0] if cmd else ""
+        return f"Bash({first}:*)" if PERMIT_WORD_RE.fullmatch(first) and not PERMIT_COMPOUND_RE.search(cmd) else None
+    return None
+
+
+def queue_permit(aid: str, rule: str, example: str) -> bool:
+    """無人值守被拒的請求記進待批清單（同一條只記一筆、累計次數）。已經批過的不再列——那是別的原因被拒，不是缺許可。"""
+    p = load_prefs()
+    if rule in p["permits"].get(aid, []):
+        return False
+    now = time.strftime("%m-%d %H:%M")
+    x = next((x for x in p["pending"] if x.get("agent") == aid and x.get("rule") == rule), None)
+    if x is None:
+        p["pending"].append(x := {"agent": aid, "rule": rule, "n": 0, "first": now})
+    x.update(n=x["n"] + 1, last=now, example=example[:200])
+    save_prefs(p)
+    return True
+
+
+def cli_permit_args(aid: str) -> list[str]:
+    rules = load_prefs()["permits"].get(aid) or []
+    return ["--allowedTools", *rules] if rules else []
+
+
+@app.post("/office/permits")
+async def office_permits(d: dict):
+    """老闆處理常駐許可。grant＝批准待批清單上的一條、dismiss＝不准（從清單拿掉）、revoke＝撤銷已給的。
+    只批得了清單上【真的被拒過】的規則：這支 API 不能憑空塞一條許可進來。"""
+    aid, rule, act = str(d.get("agent") or ""), str(d.get("rule") or ""), d.get("action")
+    if aid not in agents:
+        return {"ok": False, "error": "查無此員工"}
+    p = load_prefs()
+    mine = p["permits"].setdefault(aid, [])
+    if act in ("grant", "dismiss"):
+        hit = [x for x in p["pending"] if x.get("agent") == aid and x.get("rule") == rule]
+        if not hit:
+            return {"ok": False, "error": "待批清單裡沒有這一條（可能已經處理過）"}
+        p["pending"] = [x for x in p["pending"] if x not in hit]
+        if act == "grant" and rule not in mine:
+            mine.append(rule)
+    elif act == "revoke":
+        if rule not in mine:
+            return {"ok": False, "error": "這位員工沒有這條許可"}
+        mine.remove(rule)
+    else:
+        return {"ok": False, "error": "action 只能是 grant、dismiss 或 revoke"}
+    if not mine:
+        p["permits"].pop(aid)
+    save_prefs(p)
+    audit(f"permit.{act}", aid, rule=rule, by="office-web")
+    notify("agent", aid)
+    return {"ok": True, "permits": p["permits"].get(aid, [])}
+
+
+def add_feedback(aid: str, task: str, note: str) -> None:
+    p = load_prefs()
+    fb = p["feedback"].setdefault(aid, [])
+    fb.append({"at": time.strftime("%m-%d"), "task": task[:60], "note": note})
+    del fb[:-FEEDBACK_KEEP]
+    save_prefs(p)
+    sync_soul(aid)
+
+
+@app.post("/office/feedback")
+async def office_feedback(d: dict):
+    """刪掉一則驗收意見（寫錯了、或只是當時那件事的細節，不該一直帶著）。i＝檔案卡上的第幾則。"""
+    aid, i = str(d.get("agent") or ""), d.get("i")
+    p = load_prefs()
+    fb = p["feedback"].get(aid) or []
+    if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(fb):
+        return {"ok": False, "error": "沒有這一則"}
+    gone = fb.pop(i)
+    if not fb:
+        p["feedback"].pop(aid)
+    save_prefs(p)
+    sync_soul(aid)
+    audit("feedback.deleted", aid, note=gone.get("note", "")[:200], by="office-web")
+    return {"ok": True}
+
+
 @app.post("/office/permission")
 async def office_permission(d: dict):
     """員工 CLI 的權限請求 → 辦公室審批卡 → 等老闆決定 → 回 {behavior, message}。
@@ -4388,9 +4508,12 @@ async def office_permission(d: dict):
     if aid is None:
         return {"behavior": "deny", "message": "辦公室認不出這個工作目錄屬於哪位員工，拒絕"}
     if aid in sched_running:
-        log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{tool}｜{params[:120]}")
-        audit("policy.denied", aid, tool=tool, params=params[:300], reason="unattended", engine=ENGINE_CLI)
-        return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"}
+        rule = permit_rule(tool, d.get("tool_input"))
+        queued = rule is not None and queue_permit(aid, rule, params)
+        log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{tool}｜{params[:120]}" + ("（已進老闆的待批清單）" if queued else ""))
+        audit("policy.denied", aid, tool=tool, params=params[:300], reason="unattended", engine=ENGINE_CLI, permit=rule)
+        return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"
+                + ("。已送進老闆的待批清單，批了之後下次就能用" if queued else "")}
     # 同一個人（看板＝主持人加一批子 agent）同時來好幾張：排隊等前一張處理完，不直接拒——
     # 實測三個子 agent 同時讀檔，第二、三張被「上一張還在等」拒掉，等於只有一個人拿得到權限。
     deadline = time.time() + CLI_APPROVAL_S
@@ -4707,6 +4830,11 @@ def inbox_items(limit: int = 60) -> dict:
             if c.get("verdict") == "pending" and aid in agents:
                 todo.append({"id": f"review:{aid}:{c['id']}", "kind": "review", "agent": aid, "name": agents[aid].name,
                              "card": c["id"], "text": f"「{str(c.get('task') or '')[:60]}」做好了，等你驗收", "at": c.get("end", "")})
+    for x in load_prefs()["pending"]:   # 班表無人值守時被拒、可以給常駐許可的：批不批是老闆的決定
+        if (aid := x.get("agent")) in agents:
+            todo.append({"id": f"permit:{aid}:{x['rule']}", "kind": "permit", "agent": aid, "name": agents[aid].name,
+                         "rule": x["rule"], "example": x.get("example", ""),
+                         "text": f"班表無人值守時被拒 {x['n']} 次（最近 {x.get('last', '')}）"})
     now_t = time.localtime()
     today_s = time.strftime("%Y-%m-%d", now_t)
     for j in missed_jobs(now_t):   # 到點沒跑的班表：橋當時不在。要不要補跑是老闆的決定
@@ -5173,6 +5301,8 @@ async def office_verdict(d: dict):
     if aid in agents:   # 生活的記憶：老闆的評語是會拿出來聊的事
         agents[aid].remember((f"老闆驗收通過了「{card['task']}」" if v == "accepted"
                               else f"老闆要我修改「{card['task']}」" + (f"：{note}" if note else "")), imp=7, kind="work")
+    if note and aid in agents:   # 工作的記憶：接在人設後面，下次同類的活照做（生活那條只是聊天素材，工作時讀不到）
+        add_feedback(aid, str(card.get("task") or ""), note)
     notify("agent", aid)
     await sync_emote(aid)
     return {"ok": True}
@@ -5978,7 +6108,11 @@ def persona_text(aid: str, body: str) -> str:
         f"\n個性：{p.get('personality', '')}" if p.get("personality") else "",
         f"說話風格：{p.get('style', '')}" if p.get("style") else "",
     ] if x)
-    return f"{head}\n\n{body.strip()}\n"
+    fb = load_prefs()["feedback"].get(aid) or []
+    tail = ("\n## 老闆驗收時給過的意見\n\n老闆驗收你的工作時說過這些（舊的在上）。同類的活照這些做；"
+            "只針對當時那件事的細節，不用硬套到別的任務。\n\n"
+            + "".join(f"- {x.get('at', '')}「{x.get('task', '')}」：{x.get('note', '')}\n" for x in fb)) if fb else ""
+    return f"{head}\n\n{body.strip()}\n{tail}"
 
 
 def soul_doc(aid: str, body: str) -> str:
@@ -6047,18 +6181,21 @@ def sync_agents() -> int:
     return wrote
 
 
+def sync_soul(aid: str, n: dict[str, int] | None = None) -> None:
+    """一個人的 AGENTS.md＋CLAUDE.md。驗收意見一改就重寫這個人的，不必等橋重啟。"""
+    n = {"wrote": 0, "same": 0, "skipped": 0} if n is None else n
+    if CHANNELS_DIR is None or not persona_md(aid).exists():
+        return
+    want = soul_doc(aid, persona_body(aid))
+    for fname in SOUL_FILES:
+        _sync_one(CHANNELS_DIR / f"office_{aid}" / fname, want, n)
+
+
 def sync_souls() -> dict[str, int]:
     """回傳 {寫入, 無異動, 略過}，兩個檔名合計。略過＝那個檔是人寫的，我們不覆蓋。"""
     n = {"wrote": 0, "same": 0, "skipped": 0}
-    if CHANNELS_DIR is None:
-        return n
     for aid in agents:
-        src = persona_md(aid)
-        if not src.exists():
-            continue
-        want = soul_doc(aid, persona_body(aid))
-        for fname in SOUL_FILES:
-            _sync_one(CHANNELS_DIR / f"office_{aid}" / fname, want, n)
+        sync_soul(aid, n)
     if any(n.values()):
         print(f"人設同步 AGENTS.md＋CLAUDE.md：寫入 {n['wrote']}、已是最新 {n['same']}、略過手寫 {n['skipped']}")
     return n

@@ -546,6 +546,7 @@ def run() -> None:
     late_done_race()
     task_chain()
     verdict_flow()
+    permits_feedback()
     engine_caps_flow()
     life_sim()
     print("✓ office 投影合約測試全過（含子 agent 映射、節流、失聯保險、子 agent 兜底釋放、"
@@ -1675,6 +1676,18 @@ for o in out:
                 assert "--effort" not in sent and "p05" not in main.cli_effort_pick, sent
                 bad = c.post("/office/dispatch", json={"agent": "p05", "engine": "cli", "text": "x", "effort": "hi=1;x"}).json()
                 assert bad["ok"] is False and "思考力度" in bad["error"], bad
+                # 【常駐許可】老闆批過的規則要真的送出去（--allowedTools 放在最後）
+                old_prefs = main.PREFS_FILE.read_text(encoding="utf-8") if main.PREFS_FILE.exists() else None
+                main.save_prefs({"permits": {"p05": ["WebFetch(domain:x.test)", "mcp__a__b"]}, "pending": [], "feedback": {}})
+                try:
+                    r, sent = cli_run({"text": "抓一下"})
+                    assert sent.endswith("--allowedTools WebFetch(domain:x.test) mcp__a__b ENV_NO_API_KEY"), sent[-200:]   # 尾巴是假 CLI 自己補的環境標記
+                finally:
+                    main.PREFS_FILE.unlink(missing_ok=True)
+                    if old_prefs is not None:
+                        main.PREFS_FILE.write_text(old_prefs, encoding="utf-8")
+                r, sent = cli_run({"text": "沒許可"})
+                assert "--allowedTools" not in sent, sent[-200:]
 
                 # 【CLI ＋ 工作 repo】：先前 CLI 分流在綁 repo 之前就 return，於是選了 repo
                 # 等於沒選——worktree 沒開，CLI 在頻道工作區裡跑，然後合理地認定自己在
@@ -5126,6 +5139,91 @@ def _verdict_flow(aid: str, ws: Path) -> None:
         dv = next(x for x in h["evidence"] if x["kind"] == "deliver")
         assert h["verdict"] == "pending" and dv["state"] == "fail" and "沒有產出" in dv["text"], h["evidence"]
         h.pop("verdict")
+
+
+def permits_feedback() -> None:
+    """跟 dots 比的 1、2：班表無人值守被拒 → 待批清單 → 老闆批了變這個人的常駐許可（--allowedTools）；
+    要求修改的意見 → 接在人設後面（CLAUDE.md／AGENTS.md 馬上重寫），可以刪。"""
+    aid, other = "p05", "p07"
+    old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(_tempfile.mkdtemp()).resolve()   # 全套跑時這裡是 None（同 verdict_flow）
+    cwd = str(main.CHANNELS_DIR / f"office_{aid}")
+    req = lambda tool, ti: {"cwd": cwd, "session_id": "s-permit", "tool_name": tool, "tool_input": ti}
+    old_prefs = main.PREFS_FILE.read_text(encoding="utf-8") if main.PREFS_FILE.exists() else None
+    main.PREFS_FILE.unlink(missing_ok=True)
+    try:
+        # ① 規則怎麼推：網域、MCP 工具、單一 Bash 指令給得出來；複合指令、寫檔、怪網域不給
+        R = main.permit_rule
+        assert R("WebFetch", {"url": "https://techorange.com/feed/"}) == "WebFetch(domain:techorange.com)"
+        assert R("mcp__jobspy__search_jobs", {}) == "mcp__jobspy__search_jobs"
+        assert R("Bash", {"command": "cat /x/y.txt"}) == "Bash(cat:*)"
+        for tool, ti in [("Bash", {"command": "cd x && cat y"}), ("Bash", {"command": 'echo "$(date)"'}), ("Write", {"file_path": "/x"}),
+                         ("WebFetch", {"url": "https://a)b/"}), ("WebFetch", {"url": "nope"}), ("mcp__x;y", {})]:
+            assert R(tool, ti) is None, (tool, ti)
+
+        async def drive():
+            main.sched_running[aid] = {"job": {"name": "x"}, "started": time.time()}
+            try:
+                # ② 無人值守被拒兩次 → 清單上一條、計兩次；給不出規則的照拒、不進清單
+                for _ in range(2):
+                    d = await main.office_permission(req("WebFetch", {"url": "https://techorange.com/feed/"}))
+                    assert d["behavior"] == "deny" and "待批清單" in d["message"], d
+                d = await main.office_permission(req("Write", {"file_path": "/etc/x"}))
+                assert d["behavior"] == "deny" and "待批清單" not in d["message"], d
+            finally:
+                main.sched_running.pop(aid, None)
+        asyncio.run(drive())
+        pend = main.load_prefs()["pending"]
+        assert [(x["agent"], x["rule"], x["n"]) for x in pend] == [(aid, "WebFetch(domain:techorange.com)", 2)], pend
+        with TestClient(main.app) as c:
+            todo = [t for t in c.get("/office/inbox").json()["todo"] if t["kind"] == "permit"]
+            assert len(todo) == 1 and todo[0]["rule"] == "WebFetch(domain:techorange.com)" and "2 次" in todo[0]["text"], todo
+            post_ = lambda **b: c.post("/office/permits", json=b).json()
+            # ③ 只批得了清單上的；批了 → 這個人的許可、清單清掉、落帳；別人沒有
+            assert post_(agent=aid, rule="Bash(curl:*)", action="grant")["ok"] is False, "不能憑空塞許可"
+            assert post_(agent=aid, rule="WebFetch(domain:techorange.com)", action="grant")["ok"]
+            assert main.cli_permit_args(aid) == ["--allowedTools", "WebFetch(domain:techorange.com)"]
+            assert main.cli_permit_args(other) == [], "許可只給那一個人"
+            assert not main.load_prefs()["pending"] and main.audit_recent(aid, 1)[0]["kind"] == "permit.grant"
+            assert c.get(f"/office/profile/{aid}").json()["permits"] == ["WebFetch(domain:techorange.com)"]
+            # ④ 批過的再被拒（別的原因）不再列；撤銷後就沒了
+            main.sched_running[aid] = {"job": {"name": "x"}, "started": time.time()}
+            try:
+                asyncio.run(main.office_permission(req("WebFetch", {"url": "https://techorange.com/feed/"})))
+            finally:
+                main.sched_running.pop(aid, None)
+            assert not main.load_prefs()["pending"]
+            assert post_(agent=aid, rule="WebFetch(domain:techorange.com)", action="revoke")["ok"]
+            assert main.cli_permit_args(aid) == [] and post_(agent=aid, rule="x", action="revoke")["ok"] is False
+            # ⑤ 不准：從清單拿掉、不給許可
+            main.queue_permit(aid, "mcp__jobspy__search_jobs", "{}")
+            assert post_(agent=aid, rule="mcp__jobspy__search_jobs", action="dismiss")["ok"]
+            assert not main.load_prefs()["pending"] and main.cli_permit_args(aid) == []
+            # ⑥ 驗收意見 → 人設尾巴（兩個檔都改）；沒寫意見的不記；只留最近 10 則；可以刪
+            ws = main.CHANNELS_DIR / f"office_{aid}"
+            main.sync_soul(aid)
+            for i in range(12):
+                post(c, agent=aid, kind="start", label=f"寫報告{i}")
+                card = main.last_report[aid]
+                post(c, agent=aid, kind="tool", label="Write", detail=json.dumps({"file_path": f"{ws}/r{i}.md"}))
+                post(c, agent=aid, kind="done", label="ok")
+                note = f"結論放第一段{i}" if i else ""
+                assert c.post("/office/verdict", json={"agent": aid, "card": card["id"], "verdict": "changes", "note": note}).json()["ok"]
+            fb = c.get(f"/office/profile/{aid}").json()["feedback"]
+            assert [x["note"] for x in fb] == [f"結論放第一段{i}" for i in range(2, 12)], fb
+            for f in main.SOUL_FILES:
+                s = (ws / f).read_text(encoding="utf-8")
+                assert "老闆驗收時給過的意見" in s and "結論放第一段11" in s and "結論放第一段1\n" not in s, (f, s[-300:])
+            assert "結論放第一段11" in main.persona_text(aid, main.persona_body(aid)), "Codex 的 developer_instructions 也走這份"
+            assert c.post("/office/feedback", json={"agent": aid, "i": 9}).json()["ok"]
+            assert "結論放第一段11" not in (ws / "CLAUDE.md").read_text(encoding="utf-8"), "刪掉的要馬上從人設拿掉"
+            assert c.post("/office/feedback", json={"agent": aid, "i": 99}).json()["ok"] is False
+            assert "老闆驗收時給過的意見" not in main.persona_text(other, main.persona_body(other))
+    finally:
+        main.sched_running.pop(aid, None)
+        main.PREFS_FILE.unlink(missing_ok=True)
+        if old_prefs is not None:
+            main.PREFS_FILE.write_text(old_prefs, encoding="utf-8")
+        main.CHANNELS_DIR = old_ch
 
 
 def engine_caps_flow() -> None:

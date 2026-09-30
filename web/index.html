@@ -126,6 +126,7 @@
   .inbox .iwho { cursor: pointer; font-weight: 600; white-space: nowrap; }
   .inbox .iwhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .inbox .iwhat code { font-size: 10.5px; color: var(--dim); }
+  .inbox .iwhat.full { white-space: normal; overflow-wrap: anywhere; }   /* 常駐許可：簽的是整條規則，不能被省略號吃掉 */
   .inbox .irow.bad .iwhat { color: #c0392b; }
   .inbox .irow.unread .iwhat::before { content: '●'; color: #e0a530; margin-right: 4px; font-size: 8px; }
   .inbox .irow:not(.todo) { cursor: pointer; }
@@ -2142,6 +2143,20 @@ async function profile(id) {
       t.appendChild(document.createElement('br'));
     }
   }
+  // 老闆給過這個人的東西：常駐許可（收件匣批的）、驗收意見（接在人設後面帶進工作）。各自一顆 ✕ 收回
+  const owned = (label, items, show, drop, tip) => {
+    if (!items || !items.length) return;
+    t.appendChild(el('b', label));
+    items.forEach((x, i) => {
+      t.appendChild(el('span', show(x)));
+      const no = el('span', ' ✕', 'wdbtn'); no.title = tip;
+      no.onclick = e => { e.stopPropagation(); drop(x, i); };
+      t.appendChild(no);
+      t.appendChild(document.createElement('br'));
+    });
+  };
+  owned('🔑 常駐許可：', r.permits, x => x, x => permit(id, x, 'revoke'), '撤銷這條許可');
+  owned('📝 驗收意見（會帶進工作）：', r.feedback, x => `${x.at}「${x.task}」：${x.note}`, (x, i) => dropFeedback(id, i), '刪掉這則，之後不再帶進工作');
   if (r.soul) {
     const soul = el('div');
     box.querySelector('.body').appendChild(soul);
@@ -2202,6 +2217,16 @@ async function inboxcard() {
       const no = document.createElement('button'); no.className = 'no'; no.title = '今天不補了，別再列'; no.textContent = '✕';
       no.onclick = e => { e.stopPropagation(); localStorage.inboxDismiss = (localStorage.inboxDismiss || '') + ',' + t.id; inboxcard(); };
       row.append(go, no);
+    } else if (t.kind === 'permit') {
+      // 常駐許可：要簽的就是那一條規則，短、整條照登（.full 換行不截斷；不像審批參數放不下），所以這裡可以直接批
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwhat full" title="${esc('上次的請求：' + (t.example || ''))}">🔑 想要 <code>${esc(t.rule)}</code>・${esc(t.text)}</span>`;
+      const go = document.createElement('button'); go.className = 'yes'; go.textContent = '✓ 以後都准';
+      go.title = `加進${t.name}的常駐許可（只給他），下次不必再問`;
+      go.onclick = e => { e.stopPropagation(); permit(t.agent, t.rule, 'grant'); };
+      const no = document.createElement('button'); no.className = 'no'; no.title = '不准，從清單拿掉'; no.textContent = '✕';
+      no.onclick = e => { e.stopPropagation(); permit(t.agent, t.rule, 'dismiss'); };
+      row.append(go, no);
     } else if (t.kind === 'review') {   // 驗收要看證據：跟審批一樣不給一鍵通過，點「查看」到那張卡
       row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
         <span class="iwhat">📦 ${esc(t.text)}</span>
@@ -2241,6 +2266,22 @@ async function runJob(name) {
     : r.results.map(x => `${x.name}：${x.ok ? '開跑 ✓' : x.error}`).join('；');
   $('hint').textContent = msg; $('hint').classList.toggle('err', !r.ok);
   inboxcard(); roster();
+}
+// 常駐許可：grant／dismiss 處理待批清單，revoke 撤銷已給的（檔案卡上的 ✕）
+async function permit(agent, rule, action) {
+  const r = await (await fetch('/office/permits', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent, rule, action }) })).json();
+  $('hint').textContent = !r.ok ? `⛔ ${r.error}` : { grant: '已放行，下次不必再問 ✓', dismiss: '已從待批清單拿掉', revoke: '已撤銷' }[action];
+  $('hint').classList.toggle('err', !r.ok);
+  inboxcard();
+  if (agent === selected) profile(agent);
+}
+async function dropFeedback(agent, i) {
+  const r = await (await fetch('/office/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent, i }) })).json();
+  $('hint').textContent = r.ok ? '已刪掉這則意見' : `⛔ ${r.error}`;
+  $('hint').classList.toggle('err', !r.ok);
+  if (agent === selected) profile(agent);
 }
 // 給指定的人下指令（收件匣裡放行別人的審批，不必先切到他）
 async function dispatchFor(agent, text) {
@@ -3231,7 +3272,7 @@ async function resumeCard(id) {
 // 驗收：通過就定案；要求修改＝寫一句意見，接著派給他（接在同一個任務底下，做完再進待驗收）
 async function verdictCard(id, v) {
   let note = '';
-  if (v === 'changes' && (note = prompt('要改什麼？（會接著派給他，接在這張後面）')) === null) return;
+  if (v === 'changes' && (note = prompt('要改什麼？（會接著派給他，接在這張後面；也會記進他的人設，以後同類的活照做）')) === null) return;
   const r = await (await fetch('/office/verdict', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent: selected, card: id, verdict: v, note }) })).json();
   $('hint').textContent = !r.ok ? `⛔ ${r.error}` : v === 'accepted' ? '已驗收 ✓' : '已要求修改';
