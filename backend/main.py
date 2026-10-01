@@ -4277,12 +4277,30 @@ def sync_office_hook() -> str:
     except ValueError:
         print(f"⚠ {p} 不是合法 JSON，審批 hook 與工具守門都沒掛上——CLI 員工的權限請求會一律被拒、jobspy 參數沒人檢查")
         return "skip"
+    # hook 是被當成執行檔叫的（/bin/sh <路徑>）：少了 x 位元就是 Permission denied、而且是不擋人的錯——
+    # 記憶落帳那支從上線就沒有 x，一次都沒跑過，沒人發現（2026-10-01 抽查記憶檔時才查到）
+    for script in (HOOK_SCRIPT, GUARD_SCRIPT, MEMORY_SCRIPT):
+        try:
+            if not os.access(script, os.X_OK):
+                script.chmod(script.stat().st_mode | 0o111)
+        except OSError:
+            pass
     changed = False
     for event, matcher, want in (
             ("PermissionRequest", "", {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}),
             ("PreToolUse", GUARD_MATCHER, {"type": "command", "command": str(GUARD_SCRIPT), "timeout": 10}),
             ("PostToolUse", MEMORY_MATCHER, {"type": "command", "command": str(MEMORY_SCRIPT), "timeout": 10})):
         entries = d.setdefault("hooks", {}).setdefault(event, [])
+        # 同名腳本、不同路徑＝別的副本留下的（搬過目錄、隔離測試沒把 profile 隔開）：那支多半已經不在，
+        # 每次都報錯；在的話又是舊版。清掉（2026-10-01 在真的 profile 裡清出三條指向 scratchpad 的）
+        name = Path(want["command"]).name
+        for entry in entries:
+            hooks = entry.get("hooks", [])
+            keep = [h for h in hooks if not (Path(str(h.get("command", ""))).name == name and h.get("command") != want["command"])]
+            if len(keep) != len(hooks):
+                entry["hooks"] = keep
+                changed = True
+        entries[:] = [e for e in entries if e.get("hooks")]
         found = None
         for entry in entries:
             for h in entry.get("hooks", []):
@@ -4339,7 +4357,8 @@ def record_memory(aid: str, path: Path, via: str, quiet: bool = False) -> bool:
         return False
     memory_seen[str(path)] = mt
     _dirty = True
-    card = (last_report.get(aid) or {}).get("id") if aid else None
+    # 盤點的是以前寫好的檔：那個人現在手上的卡跟它無關，掛上去等於替一張卡認領它沒寫的東西
+    card = (last_report.get(aid) or {}).get("id") if aid and not quiet else None
     audit("memory.write", aid, file=str(path), card=card, via=via,
           at_file=time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mt)))
     if aid and not quiet:

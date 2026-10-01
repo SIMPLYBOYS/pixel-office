@@ -2062,6 +2062,35 @@ def memory_ledger() -> None:
                 bad = Path(tmp) / "別的地方" / "memory" / "假的.md"; bad.parent.mkdir(parents=True)
                 bad.write_text("z", encoding="utf-8")
                 assert c.post("/office/memory", json={"cwd": str(ch / "office_p07"), "file": str(bad)}).json()["ok"] is False
+                # hook 腳本本身要真的跑得起來：Claude Code 用 /bin/sh 直接叫路徑（x 位元、shebang、帶 token 送到橋）。
+                # 上面只測了端點——腳本從上線就沒有 x 位元、一次都沒跑過，測試一直是綠的（2026-10-01 才查到）
+                import http.server
+                import threading
+                got = []
+
+                class _Bridge(http.server.BaseHTTPRequestHandler):
+                    def do_POST(self):
+                        got.append((self.path, self.headers.get("X-Office-Token"),
+                                    json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                        self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+
+                    def log_message(self, *a):
+                        pass
+                srv = http.server.HTTPServer(("127.0.0.1", 0), _Bridge)
+                threading.Thread(target=srv.handle_request, daemon=True).start()
+                req = {"tool_name": "Edit", "cwd": "/x/office_p07", "session_id": "s1", "tool_input": {"file_path": "/p/memory/a.md"}}
+                env = {**os.environ, "OFFICE_URL": f"http://127.0.0.1:{srv.server_port}", "OFFICE_TOKEN": "hook-test-token"}
+                r = subprocess.run(["/bin/sh", "-c", str(main.MEMORY_SCRIPT)], input=json.dumps(req), env=env,
+                                   capture_output=True, text=True, timeout=10)
+                srv.server_close()
+                assert r.returncode == 0 and not r.stderr, r.stderr
+                assert got == [("/office/memory", "hook-test-token", {"cwd": "/x/office_p07", "session_id": "s1", "tool": "Edit",
+                                                                       "file": "/p/memory/a.md"})], got
+            # 盤點時那個人手上有卡，也不能掛上去：舊檔不是那張卡寫的（2026-10-01 抽查：8 月的檔被記成 9/19 的卡 295）
+            (cog / "也很舊.md").write_text("以前寫的", encoding="utf-8")
+            main.last_report["p07"] = {"id": 4242, "events": []}
+            main.memory_inventory()
+            assert led("memory.write")[-1].get("card") is None, led("memory.write")[-1]
         finally:
             main.CHANNELS_DIR, main.AUDIT_DIR = old_ch, old_dir
             main._audit_last.update({"seq": 0, "hash": "", "path": None})
@@ -3399,9 +3428,19 @@ def cli_hitl() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_cfg = os.environ.get("CLAUDE_CONFIG_DIR"); os.environ["CLAUDE_CONFIG_DIR"] = tmp
             try:
-                (Path(tmp) / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Write"]}, "theme": "dark"}), encoding="utf-8")
+                # 別的副本留下的同名 hook（搬過目錄、隔離測試沒隔好）：路徑不同的要清掉，別人的 hook 不動
+                stale = {"hooks": {"PostToolUse": [
+                    {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "/tmp/gone/backend/tools/office_memory_hook.py"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/local/bin/my-own-hook"}]}]},
+                    "permissions": {"allow": ["Write"]}, "theme": "dark"}
+                (Path(tmp) / "settings.json").write_text(json.dumps(stale), encoding="utf-8")
                 assert main.sync_office_hook() == "wrote"
                 d = json.loads((Path(tmp) / "settings.json").read_text(encoding="utf-8"))
+                post_cmds = [h["command"] for e in d["hooks"]["PostToolUse"] for h in e["hooks"]]
+                assert post_cmds == ["/usr/local/bin/my-own-hook", str(main.MEMORY_SCRIPT)], post_cmds
+                # hook 是被當成執行檔叫的：少了 x 位元就是 Permission denied（記憶落帳因此從上線就沒跑過）
+                for s_ in (main.HOOK_SCRIPT, main.GUARD_SCRIPT, main.MEMORY_SCRIPT):
+                    assert os.access(s_, os.X_OK), f"{s_.name} 不能執行"
                 h = d["hooks"]["PermissionRequest"][0]["hooks"][0]
                 assert h["command"] == str(main.HOOK_SCRIPT) and h["timeout"] > main.CLI_APPROVAL_S and Path(h["command"]).exists()
                 assert d["permissions"]["allow"] == ["Write"] and d["theme"] == "dark", "同步不能動到別的鍵"
