@@ -21,7 +21,7 @@
 | 7 | High | 班表交付不檢查路徑：agent 把報告做成指向金鑰的 symlink，橋就把金鑰上傳 Telegram／Slack | 程式＋測試（✅ 已修） |
 | 8 | High | Codex 員工共用你本人的 `~/.codex`（登入憑證、信任清單）；一個環境變數就能關掉沙箱 | 程式＋設定（✅ 已修） |
 | 9 | Medium | agent 寫的 SVG 在 `render=0` 以 `image/svg+xml` 送出、沒有 CSP：直接開啟會在橋的來源執行腳本 | 測試（✅ 已修） |
-| 10 | Medium | 模型輸出只要以審批標頭開頭就會變成審批卡 | 程式 |
+| 10 | Medium | 模型輸出只要以審批標頭開頭就會變成審批卡 | 程式（✅ 已修） |
 | 11 | Medium | 稽核帳本：無金鑰雜湊、截掉尾巴驗證仍通過；封存端點無驗證且可被跨站 POST 觸發 | 測試 |
 | 12 | Medium | 供應鏈：jobspy 未釘 commit、104 MCP 版本在安裝時取最新、cycletls 附帶原生執行檔 | 腳本與快取（🟡 部分） |
 | 13 | Low | 程式碼區塊語言寫 `constructor` 會讓工作串停止更新；/shell 沒有防框架嵌入；`/office/permission` 可冒名佔住審批佇列；Codex `-m` 驗證較鬆 | 測試／程式（🟡 部分） |
@@ -136,6 +136,7 @@
 
 ### 10. 文字前綴就能變成審批卡
 `office_chat` 只要訊息以審批標頭開頭就建立審批卡。模型輸出可以偽造一張，觸發警示音、收件匣待辦、NPC 走到老闆房門口；搭配 #5 可能遮住真正的待審。修法：審批只接受結構化欄位或專用端點。
+**已修（2026-10-01）**：審批卡改帶 `approval` 欄位（tool／params／task_id／timeout_s），橋只認欄位開卡。cogito 的所有審批（含 office 平台與 Slack／TG 鏡射）都由 `postApprovalToOffice` 送；橋自己的 `/office/permission` 也帶同一組欄位。只有文字的仿冒卡照一般訊息顯示、不開卡，落帳 `approval.spoofed`。測試涵蓋兩邊（pixel-office `approval_binding`、cogito `TestApprovalPostsStructuredCardToOffice`）。
 
 ### 11. 稽核帳本的防竄改能力有限
 雜湊沒有金鑰，同機可寫檔的程式能重算整條鏈；刪掉最後幾筆驗證仍通過（測試確認）；封存端點無驗證且可被跨站觸發（#4）。修法：把鏈頭雜湊與筆數定期寫到 agent 碰不到的地方（或用 agent 讀不到的金鑰簽）；驗證時比對已知的鏈頭；封存加驗證。

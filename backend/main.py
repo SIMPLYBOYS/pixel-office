@@ -1466,7 +1466,7 @@ async def tell_cogito_stop(aid: str) -> str:
             # 要等逾時自動拒絕才會醒——使用者眼裡就是「按了中止卻還卡在選擇上」。
             if aid in pending_approval:
                 ids = [(approval_meta.get(aid) or {}).get("task_id")] + \
-                      [(parse_approval(c["text"]) or {}).get("task_id") for c in approval_backlog.get(aid, [])]
+                      [(approval_fields(c) or {}).get("task_id") for c in approval_backlog.get(aid, [])]
                 for tid in [i for i in ids if i] or [None]:
                     await cl.post(f"{COGITO_HTTP}/task", json={"agent": aid, "text": f"reject {tid}" if tid else "reject"},
                                   headers=cogito_headers("reject"))
@@ -2311,31 +2311,29 @@ APPROVAL_PREFIX = "⚠️ *高危操作審批請求*"                  # chatbot
 RESUME_NUDGE_PREFIX = "[系統] 先前因暫時性錯誤"            # core.go resumeNudge：斷點續跑的系統提示
 PROGRESS_PREFIXES = ("🤔", "🛠️", "✅ *執行成功*", "⚠️ *執行報錯*")  # OfficeReporter 已投影過，去重
 pending_approval: dict[str, str] = {}  # npc id -> 待審批卡文字（shell 顯示核准/駁回按鈕）
-# 審批卡是 approval.go 的固定樣板——收卡時就解析成結構化欄位，外殼直接排版面（工具一顆
-# chip、參數整段折行、任務 ID 降級成小字、逾時做成倒數），不用靠 markdown 碰運氣。
-# 解析不了（樣板改版、舊狀態檔復原的卡）就退回原文渲染——結構化是加分，不是門檻。
-# 參數用貪婪比對、任務 ID 取【最後一個】（稽核 #5）：參數是 agent 給的，懶惰比對時它只要在參數裡藏一行
-# 「任務 ID: `假的`」，解析就停在那裡——畫面上的參數被截短、真正的指令藏在後面，核准送出的還是假 ID。
-# cogito 永遠把真的 ID 接在參數後面，所以最後一個才是它的。
-APPROVAL_RE = re.compile(r"• 工具: `([^`]+)`\n• 參數: `?(.*)\n任務 ID: `([^`]+)`", re.S)
-APPROVAL_TIMEOUT_RE = re.compile(r"(\d+)\s*分鐘內無響應")
+# 審批卡只認【結構化欄位】（稽核 #10）：cogito 的 approval.go 與橋自己的 /office/permission 送卡時帶
+# {"approval": {tool, params, task_id, timeout_s}}。以前看文字開頭是不是審批標頭——但模型的回覆走同一個
+# /office/chat，它只要以那行字開頭就能偽造一張：響警示、進收件匣、NPC 走到老闆房門口、遮住真正在等的那張。
+# 模型只控制得了 text，生不出這個欄位。順帶不必再從文字解析 ID（以前要防參數裡藏一行假的任務 ID）。
 approval_meta: dict[str, dict] = {}   # npc id -> {tool, params, task_id, timeout_s}
 approval_at: dict[str, float] = {}    # npc id -> 收卡的牆鐘時間（倒數的起點）
 # 同一個人的第二張以後的卡（稽核 #5）。cogito 一輪會平行跑好幾個工具呼叫，危險的每個各開一張卡；
 # 以前新卡直接蓋掉舊卡——舊的那張在 cogito 那邊還在等，畫面上卻沒了，一句不帶 ID 的 approve 就全部放行。
 # 現在一次只顯示一張、其餘排隊，處理完一張才輪下一張。
-approval_backlog: dict[str, list[dict]] = {}   # npc id -> [{"agent": 來源會話, "text": 卡片原文}]
+approval_backlog: dict[str, list[dict]] = {}   # npc id -> [{"agent": 來源會話, "text": 卡片原文, "approval": 結構化欄位}]
 
 
-def parse_approval(text: str) -> dict | None:
-    m = APPROVAL_RE.search(text)
-    if not m:
+def approval_fields(ev: dict) -> dict | None:
+    """一則出訊帶的審批欄位；沒有（或不像樣）就是 None——那就不是審批，長得再像也一樣。"""
+    a = ev.get("approval")
+    if not isinstance(a, dict) or not str(a.get("task_id") or "").strip():
         return None
-    t = APPROVAL_TIMEOUT_RE.search(text)
-    params = m.group(2).strip()
-    params = params[:-1].rstrip() if params.endswith("`") else params   # 樣板的收尾反引號
-    return {"tool": m.group(1), "params": params, "task_id": m.group(3),
-            "timeout_s": int(t.group(1)) * 60 if t else 300}
+    try:
+        timeout = int(a.get("timeout_s") or 300)
+    except (TypeError, ValueError):
+        timeout = 300
+    return {"tool": str(a.get("tool") or "?"), "params": str(a.get("params") or ""),
+            "task_id": str(a["task_id"]).strip(), "timeout_s": max(1, timeout)}
 
 
 def clear_approval(aid: str, next_card: bool = True) -> None:
@@ -2402,25 +2400,28 @@ async def office_chat(ev: dict):
         return {"ok": False}
     if text.startswith(PROGRESS_PREFIXES):
         return {"ok": True}
-    if text.startswith(APPROVAL_PREFIX) and aid in pending_approval:
-        new_id = (parse_approval(text) or {}).get("task_id")
+    meta = approval_fields(ev)
+    if meta is None and text.startswith(APPROVAL_PREFIX):
+        # 長得像審批卡、卻沒有結構化欄位：模型的輸出（或還沒更新的 cogito）。照一般訊息顯示——不開卡、不響、不走位
+        log_ev(aid, "⚠ 這則訊息長得像審批卡，但不是審批（沒有審批欄位）——照一般訊息顯示、沒有開卡。"
+                    "若是 cogito 真的在等審批，代表 claw 還沒重編")
+        audit("approval.spoofed", aid, source=ev.get("agent", ""), text=text[:300])
+    if meta and aid in pending_approval:
         seen = {(approval_meta.get(aid) or {}).get("task_id")} | \
-               {(parse_approval(q["text"]) or {}).get("task_id") for q in approval_backlog.get(aid, [])}
-        if new_id and new_id in seen:
+               {(approval_fields(q) or {}).get("task_id") for q in approval_backlog.get(aid, [])}
+        if meta["task_id"] in seen:
             return {"ok": True}   # 同一張卡從兩條路送來（office 平台＋鏡像），不重複排——顯示中的與排隊中的都算
-        approval_backlog.setdefault(aid, []).append({"agent": ev.get("agent", ""), "text": text})
-        m = parse_approval(text) or {}
-        audit("approval.asked", aid, tool=m.get("tool"), params=str(m.get("params") or "")[:300], task_id=m.get("task_id"),
+        approval_backlog.setdefault(aid, []).append({"agent": ev.get("agent", ""), "text": text, "approval": meta})
+        audit("approval.asked", aid, tool=meta["tool"], params=meta["params"][:300], task_id=meta["task_id"],
               source=ev.get("agent", ""), queued=len(approval_backlog[aid]),
               engine=ENGINE_CLI if aid in cli_procs else ENGINE_COGITO)
         log_ev(aid, f"⚠ 又一個操作在等審批（排第 {len(approval_backlog[aid])} 張）——前一張處理完才會顯示，一次決定一張")
         notify("roster", aid, alert="approval")
         return {"ok": True, "queued": len(approval_backlog[aid])}
-    if text.startswith(APPROVAL_PREFIX):
+    if meta:
         pending_approval[aid] = text
         approval_src[aid] = ev.get("agent", "")
-        if meta := parse_approval(text):
-            approval_meta[aid] = meta
+        approval_meta[aid] = meta
         approval_at[aid] = time.time()
         m = approval_meta.get(aid) or {}
         audit("approval.asked", aid, tool=m.get("tool"), params=str(m.get("params") or "")[:300], task_id=m.get("task_id"),
@@ -4557,13 +4558,15 @@ async def office_permission(d: dict):
         if time.time() > deadline:
             return {"behavior": "deny", "message": "前一張審批一直沒處理完，這一個等到逾時，拒絕"}
         await asyncio.sleep(0.3)
-    # 沿用 cogito 審批卡的樣板：parse_approval 的正則、外殼的版面、倒數，全部不用改
+    # 沿用 cogito 審批卡的樣板（文字給人看）＋同一組審批欄位（橋只認這個，稽核 #10）：外殼的版面、倒數全部不用改
     # 每張卡都要有獨一無二的 ID（稽核 #5：決定綁在看過的那張卡上）。Claude Code 的 PermissionRequest hook 實測不帶
     # tool_use_id，以前一律寫 '-'——所有 CLI 卡同一個 ID，卡換了也分不出來，綁 ID 等於沒綁。
+    tid = str(d.get("tool_use_id") or "cli-" + uuid.uuid4().hex[:12])
     text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params}`\n"
-            f"任務 ID: `{d.get('tool_use_id') or 'cli-' + uuid.uuid4().hex[:12]}`\n"
+            f"任務 ID: `{tid}`\n"
             f"👉 直接回復 `approve` / `reject` 即可。{max(1, int(CLI_APPROVAL_S // 60))} 分鐘內無響應將自動拒絕。")
-    await office_chat({"agent": f"office:{aid}", "text": text})
+    await office_chat({"agent": f"office:{aid}", "text": text,
+                       "approval": {"tool": tool, "params": params, "task_id": tid, "timeout_s": int(CLI_APPROVAL_S)}})
     fut: asyncio.Future = asyncio.get_running_loop().create_future()
     cli_permission[aid] = fut
     try:
@@ -6349,7 +6352,9 @@ def load_state() -> None:
     approval_src.update(data.get("approval_src", {}))
     approval_meta.update(data.get("approval_meta", {}))
     approval_at.update(data.get("approval_at", {}))
-    approval_backlog.update(data.get("approval_backlog", {}))
+    # 排隊中的卡要帶審批欄位才放得回去：舊版存的（只有文字）重播出來會被當成冒名的訊息
+    approval_backlog.update({a: kept for a, q in (data.get("approval_backlog") or {}).items()
+                             if (kept := [x for x in q if isinstance(x, dict) and approval_fields(x)])})
     sched_last.update(data.get("sched_last", {}))
     if "cli_pick" in data:
         model_sent.update(data.get("model_sent", {}))
