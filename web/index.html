@@ -2458,7 +2458,7 @@ async function dispatch(text, task, resume, always) {
   // 失敗要看得見：先前只有 11px 的灰字，實際回報「按了送出沒有反應」——其實是 cogito 沒開、派工被拒，
   // 但那行字跟平常的提示長得一樣。失敗改紅字並把原因講完；成功照舊。
   $('hint').textContent = !r.ok ? `⛔ 派工失敗：${r.error}`
-    : text.trim() === '/stop' ? '已中止 🛑' : '已交辦 ✓';
+    : text.trim() === '/stop' ? (r.note || '已中止 🛑') : '已交辦 ✓';
   $('hint').classList.toggle('err', !r.ok);
   if (r.ok) { $('box').value = ''; loadModels(); feed(); }
 }

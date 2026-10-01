@@ -5520,6 +5520,13 @@ async def office_dispatch(d: dict):
         # busy 沒了但卡還開著（上個行程留下的、手打事件開的）也要能收——那正是先前
         # 唯一無解的情況：畫面顯示進行中，中止卻說「沒有進行中的任務」。
         if aid not in busy and not (card and card["status"] == "working"):
+            # 閒著的 cogito 員工也轉給 cogito：上一個任務收工後還留在背景的子 agent、背景指令只有它收得到
+            # （cogito-agent#1：以前收工後的 /stop 什麼都沒停，它們跑到 claw 關掉）。收了什麼它會回在工作串。
+            if eng_now == ENGINE_COGITO and COGITO_HTTP:
+                how = await tell_cogito_stop(aid)
+                note = ("沒有進行中的任務；已請 cogito 收掉先前留在背景的工作（結果看工作串）"
+                        if how.startswith("——已通知") else f"沒有進行中的任務{how}")
+                return {"ok": True, "stopped": False, "note": note}
             return {"ok": False, "error": f"{agents[aid].name} 沒有進行中的任務"}
         if proc := cli_procs.get(aid):
             n = kill_tree(proc.pid)   # CLI 沒有優雅中止的入口，砍掉就是砍掉——連子孫一起；done 由 finally 補

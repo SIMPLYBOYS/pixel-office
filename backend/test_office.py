@@ -1452,6 +1452,22 @@ def stop_always_works() -> None:
         post(c, agent="p01", kind="done", label="ok")
         r = stop(c, "p01")
         assert not r["ok"] and "沒有進行中的任務" in r["error"], r
+        # ⑦ 閒著的 cogito 員工：照樣轉給 cogito——收工後還留在背景的子 agent、背景指令只有它收得到（cogito-agent#1）
+        told: list = []
+
+        class _Told(_FakeHTTP):
+            async def post(self, url, **kw):
+                told.append((url, kw.get("json", {}).get("text")))
+                return _FakeResp()
+        old_http, old_client = main.COGITO_HTTP, main.httpx.AsyncClient
+        main.COGITO_HTTP, main.httpx.AsyncClient = "http://fake", (lambda **kw: _Told())
+        try:
+            r = c.post("/office/dispatch", json={"agent": "p01", "text": "/stop", "engine": main.ENGINE_COGITO}).json()
+        finally:
+            main.COGITO_HTTP, main.httpx.AsyncClient = old_http, old_client
+        assert r["ok"] and r["stopped"] is False and "背景" in r["note"], r
+        assert told == [("http://fake/task", "/stop")], told
+        assert card_of(c, "p01")["status"] == "ok", "閒著的人沒有卡可收，上一張做完的卡不能被改成中止"
         for aid in ("p05", "p12", "p07", "p08", "p01"):
             main.busy.discard(aid)
         main.engine_sent.clear()
