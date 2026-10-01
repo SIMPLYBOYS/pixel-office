@@ -1197,7 +1197,10 @@ async def sweep_work() -> None:
             await goto(npc, desk)   # 關鍵：把人送回座位，不然畫面上他就一直杵著
         notify("roster")
 
-    for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT]:
+    # 「沒事件＝斷線」只是推測，給 cogito 用的（它在橋外面，死了收工事件送不到）。Claude Code／Codex 是橋自己的
+    # 子行程：還活著就沒斷，結束時 finally 一定補收工，卡死有 CLI_TIMEOUT 砍。拿推測蓋過看得到的事實會誤判——
+    # 2026-10-01 班表一次生成整份長報告，7 分鐘沒有串流事件，5 分鐘就被標失聯，人還在寫、之後照樣交件。
+    for aid in [a for a, t in list(work_last.items()) if now - t > WORK_TIMEOUT and not proc_alive(a)]:
         print(f"⚠ {aid} 上工中 {WORK_TIMEOUT:.0f}s 無事件，視為失聯，釋放")
         release_work(aid)
         close_card(aid, "lost")
@@ -1206,6 +1209,12 @@ async def sweep_work() -> None:
         if aid in agents:
             agents[aid].remember("工作任務失聯中斷了")
             await bubble(aid, "⚠ 失聯沒回應")
+
+
+def proc_alive(aid: str) -> bool:
+    """這個人的 Claude Code／Codex 行程還在跑嗎（橋自己開的子行程，死活看得到）。"""
+    p = cli_procs.get(aid)
+    return p is not None and p.returncode is None
 
 
 async def work_watchdog() -> None:

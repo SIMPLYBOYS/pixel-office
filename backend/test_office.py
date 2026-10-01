@@ -545,6 +545,7 @@ def run() -> None:
     board()
     camera()
     sub_release_fallback()
+    watchdog_alive_proc()
     hurt_projection()
     turn_in_stream()
     local_only()
@@ -606,6 +607,32 @@ def hurt_projection() -> None:
         post(c, agent="p17", kind="done", label="ok")
         for aid in ("p19", "p17", "p01"):
             main.busy.discard(aid)
+
+
+def watchdog_alive_proc() -> None:
+    """失聯保險不套在還活著的 Claude Code／Codex 行程上；行程死了又沒送收工，保險照舊。
+    2026-10-01 實例：班表一次生成整份長報告，7 分鐘沒有串流事件，5 分鐘就被標失聯，之後照樣交件。"""
+    aid = "p05"
+
+    class _Proc:
+        returncode, pid = None, 0
+    old_t = main.WORK_TIMEOUT
+    with TestClient(main.app) as c:
+        main.busy.discard(aid)
+        post(c, agent=aid, kind="start", label="一次寫完一份很長的報告")
+        card = main.last_report[aid]
+        main.cli_procs[aid] = p = _Proc()
+        main.work_last[aid] = time.monotonic() - 1000   # 很久沒事件了
+        main.WORK_TIMEOUT = 300
+        try:
+            asyncio.run(main.sweep_work())
+            assert card["status"] == "working" and aid in main.work_last and aid in main.busy, "行程還活著，不能判失聯"
+            p.returncode = 0   # 行程死了卻沒送收工（finally 本來會補；這裡驗保險還在）
+            asyncio.run(main.sweep_work())
+            assert card["status"] == "lost" and aid not in main.work_last and aid not in main.busy, card["status"]
+        finally:
+            main.WORK_TIMEOUT = old_t
+            main.cli_procs.pop(aid, None); main.busy.discard(aid); main.work_last.pop(aid, None)
 
 
 def sub_release_fallback() -> None:
