@@ -2293,9 +2293,18 @@ async function dispatchFor(agent, text) {
 }
 // 跳到某人的某張卡：切人後等 feed 畫好，把那張卡展開、對齊到頂
 async function openCard(agent, cid) {
+  if (tab !== 'feed') { tab = 'feed'; paintTabs(); }   // 卡在工作串裡：從收件匣、任務板等別的分頁點進來要切回去
   for (let i = 0; i < 40; i++) {
     const el_ = $('feed').querySelector(`.tcard[data-id="${cid}"]`);
-    if (el_ && $('feed').dataset.agent === agent) { el_.open = true; tog(cid, true); stuck = false; alignTop(el_); return; }
+    if (el_ && $('feed').dataset.agent === agent) {
+      // 不是今天的卡收在日期分組（<details>）裡：分組沒打開，捲過去也看不到、驗收鈕按不到（2026-10-05 回報）。
+      // 外層一路打開（同 goToCard）；子卡的展開狀態要記住
+      for (let d = el_.parentElement && el_.parentElement.closest('details'); d && $('feed').contains(d);
+           d = d.parentElement && d.parentElement.closest('details')) {
+        if (!d.open) { d.open = true; if (d.dataset.id) tog(d.dataset.id, true); }
+      }
+      el_.open = true; tog(cid, true); stuck = false; alignTop(el_); return;
+    }
     await sleep(100);
   }
 }
