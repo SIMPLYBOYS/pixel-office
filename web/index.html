@@ -189,6 +189,7 @@
          font: inherit; font-size: 12px; padding: 7px 8px 5px; cursor: pointer; white-space: nowrap; }
   .tab:hover { color: var(--text); }
   .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .tabs.dragging, .tabs.dragging .tab { cursor: grabbing; user-select: none; }
   .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .tab.new::after { content: '●'; color: var(--accent); font-size: 8px; margin-left: 4px; vertical-align: 2px; }
   .tab.inboxtab { margin-left: auto; }            /* 收件匣是全辦公室的待辦，靠右當徽章，不跟這位員工的頁混在一起 */
@@ -1417,7 +1418,10 @@ function paintTabs() {
     + (ib.hidden ? '' : btn('inbox', `📥 ${todo || unread || ''}`.trim(), ' inboxtab' + (todo ? ' hot' : ''),
                             `收件匣：待處理 ${todo}、未讀 ${unread}`));
   const nav = $('tabs');
-  if (nav.dataset.sig !== html) { nav.innerHTML = html; nav.dataset.sig = html; }
+  if (nav.dataset.sig !== html) {
+    nav.innerHTML = html; nav.dataset.sig = html;
+    nav.querySelector('.tab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });   // 選到的那頁別藏在捲出去的那段
+  }
   // 漏跑的班表：不在收件匣頁時拉一條提示（收件匣是全辦公室的事，換人也要看得到）
   const missed = ib.hidden ? 0 : +(ib.dataset.missed || 0), bar = $('missedBar');
   bar.hidden = !missed || tab === 'inbox';
@@ -1442,6 +1446,31 @@ $('tabs').onclick = e => {
   if (tab === 'feed' && f.dataset.keep) f.scrollTop = +f.dataset.keep;
   if (tab === 'tasks') taskboard();   // 切進來就拿最新的，不等下一輪
 };
+// 分頁列放不下時可以橫向捲（捲軸藏起來了）：觸控板本來就能滑，滑鼠要能【拖】、也能用滾輪（2026-10-05 回報）。
+// 拖超過幾個像素才算拖曳，之後放開的那一下 click 吞掉，不要拖完順手切了分頁。
+{
+  const nav = $('tabs');
+  let x0 = 0, left0 = 0, down = false, dragged = false;
+  nav.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;   // 觸控本來就能原生滑動
+    down = true; dragged = false; x0 = e.clientX; left0 = nav.scrollLeft;
+  });
+  nav.addEventListener('pointermove', e => {
+    if (!down) return;
+    const dx = e.clientX - x0;
+    if (!dragged && Math.abs(dx) < 5) return;
+    if (!dragged) { dragged = true; nav.setPointerCapture(e.pointerId); nav.classList.add('dragging'); }
+    nav.scrollLeft = left0 - dx;
+  });
+  const end = () => { down = false; nav.classList.remove('dragging'); };
+  nav.addEventListener('pointerup', end);
+  nav.addEventListener('pointercancel', end);
+  nav.addEventListener('click', e => { if (dragged) { e.stopPropagation(); e.preventDefault(); dragged = false; } }, true);
+  nav.addEventListener('wheel', e => {   // 滑鼠滾輪只有上下：放不下時轉成左右
+    if (nav.scrollWidth <= nav.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    nav.scrollLeft += e.deltaY; e.preventDefault();
+  }, { passive: false });
+}
 // 當前頁的標題列（summary）不能把自己收起來——那等於切到一頁空白。上面的按鈕照常可按。
 document.querySelector('body > section').addEventListener('click', e => {
   if (e.target.closest('details.prof.page > summary') && !e.target.closest('button, a, input, select, .rl, .wdbtn'))
