@@ -2174,16 +2174,16 @@ elif a[0] == "quota": print(json.dumps({{"error": True, "code": "RATE_LIMITED", 
         # ② 工作區外的檔不收（絕對路徑與 .. 穿越都擋）；下載資料夾在工作區外也擋
         for i in (4, 5, 6):
             assert by[i]["result"]["isError"] and "工作區" in body(by[i])["error"], body(by[i])
-        assert not (outside / "weekly.mp3").exists()
+        assert not (outside / "weekly.m4a").exists()
         # ③ 全部完成：下載成兩個檔到指定資料夾（pptx 要帶 --format pptx）
         col = body(by[7])
-        assert col["ready"] and sorted(col["files"]) == ["audio", "slide-deck"] and (ws / "out" / "weekly.mp3").exists() and (ws / "out" / "weekly.pptx").exists(), col
+        assert col["ready"] and sorted(col["files"]) == ["audio", "slide-deck"] and (ws / "out" / "weekly.m4a").exists() and (ws / "out" / "weekly.pptx").exists(), col
         dl = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l.startswith('["download"')]
         assert any("--format" in c and "pptx" in c for c in dl) and all("-a" in c for c in dl), dl
         # ④ 還在生成：不下載、回 pending；CLI 回錯（額度用完）照實回、標 isError
         out = rpc(init + [call(8, "collect", {"notebook_id": "nb1", "artifacts": {"audio": "art-audio"}, "out_dir": str(ws)})], {"FAKE_STATUS": "in_progress"})
         c8 = body(next(r for r in out if r.get("id") == 8))
-        assert c8["ready"] is False and c8["status"] == {"audio": "in_progress"} and not (ws / ("notebooklm-" + time.strftime("%Y-%m-%d") + ".mp3")).exists(), c8
+        assert c8["ready"] is False and c8["status"] == {"audio": "in_progress"} and not (ws / ("notebooklm-" + time.strftime("%Y-%m-%d") + ".m4a")).exists(), c8
         # ⑤ 沒設工作區根：全部拒
         out = rpc(init + [call(9, "publish", {"file": str(ws / "weekly.md")})], {"OFFICE_WORKSPACE_ROOT": ""})
         assert next(r for r in out if r.get("id") == 9)["result"]["isError"]
