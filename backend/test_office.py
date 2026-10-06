@@ -2139,7 +2139,7 @@ elif a[:2] == ["source", "add"]: print(json.dumps({{"source": {{"id": "src1"}}}}
 elif a[:2] == ["source", "wait"]: print(json.dumps({{"status": "ready"}}))
 elif a[0] == "generate": print(json.dumps({{"task_id": "art-" + a[1], "status": "in_progress"}}))
 elif a[:2] == ["artifact", "wait"]:
-    print(json.dumps({{"artifact_id": a[2], "status": st}})); sys.exit(0 if st == "completed" else 1)
+    print(json.dumps({{"artifact_id": a[2], "status": st, "error": None if st == "completed" else "Timed out after 5 seconds"}})); sys.exit(0 if st == "completed" else 1)
 elif a[0] == "download":
     open(a[2], "w").write("bytes"); print(json.dumps({{"path": a[2]}}))
 elif a[0] == "quota": print(json.dumps({{"error": True, "code": "RATE_LIMITED", "message": "daily quota"}})); sys.exit(1)

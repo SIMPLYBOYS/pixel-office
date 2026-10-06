@@ -72,8 +72,8 @@ def cli(*args: str, timeout: int = 180) -> dict:
         data = {}
     if r.returncode != 0 and not data:
         raise ToolError(f"notebooklm {' '.join(args[:2])} 失敗（退出碼 {r.returncode}）：{(r.stderr or out)[-300:]}")
-    if data.get("error"):
-        raise ToolError(f"notebooklm {' '.join(args[:2])}：{data.get('code')} {data.get('message')}")
+    if data.get("error") is True or data.get("code"):   # CLI 的錯誤信封是 {"error": true, "code", "message"}；
+        raise ToolError(f"notebooklm {' '.join(args[:2])}：{data.get('code')} {data.get('message')}")   # artifact wait 逾時的 "error" 只是說明文字
     return data
 
 
