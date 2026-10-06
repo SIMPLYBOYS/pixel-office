@@ -5522,6 +5522,7 @@ def life_sim() -> None:
                            {"who": b.name, "text": "對啊，" + "冷" * 40}, {"who": a.name, "text": "去裝杯熱水"}],
                  "a_memory": f"{b.name}也覺得冷", "b_memory": f"{a.name}要去裝熱水", "closer": 1},
         "reflect": {"insights": ["我好像很怕冷", ""]}})
+    old_life_hours, main.LIFE_HOURS = main.LIFE_HOURS, ""   # .env 的 OFFICE_LIFE_HOURS=9-19 會讓這條測試半夜必紅（2026-10-07 03:00 踩到）；⑥-2 自己設時段
     try:
         main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT = fake, False, fake_send, fake_walk, 0
         main.LIFE_ENGINE = "api"   # ①–⑩ 走 API（假 client）；⑪ 換 CLI
@@ -5595,6 +5596,7 @@ def life_sim() -> None:
         old_wl, main.waypoint_list = main.waypoint_list, [main.RECEPTION_FRONT, "lobby_1", "lobby_2"]
         main.walk = rec_walk
         main.in_world.add("p10"); main.last_chat["at"] = -1e9; main.pair_chat.clear()
+        main.occupied.pop(a.id, None)   # 對方坐在自己座位時，來找的人會走到桌邊而不是大廳——這段要驗的是去大廳；別依賴前面段落留下的位置
         real_slot = main.SLOTS["p10"]
         try:
             # 小安現在會走動（2026-09-29 櫃檯開了出口）：聊天跟大家一樣，一起去面對面的位子
@@ -5779,6 +5781,7 @@ print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "s
             if not had_key:
                 os.environ.pop("ANTHROPIC_API_KEY", None)
     finally:
+        main.LIFE_HOURS = old_life_hours
         (main.client, main.PROJECTION, main.send_cmd, main.walk, main.BUBBLE_WAIT, main.LIFE_BUDGET) = saved[:6]
         main.LIFE_ENGINE, main.CLI_CMD = saved[9], saved[10]
         main.in_world.clear(); main.in_world.update(saved[6])
