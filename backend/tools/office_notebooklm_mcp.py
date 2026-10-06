@@ -23,7 +23,8 @@ from pathlib import Path
 ROOT = Path(os.environ.get("OFFICE_WORKSPACE_ROOT", "")).expanduser()
 BIN = os.environ.get("NOTEBOOKLM_BIN", "notebooklm")
 LANG = os.environ.get("NOTEBOOKLM_LANGUAGE", "zh_Hant")
-OUTPUTS = {"audio": ("audio", ".m4a", [])   # NotebookLM 給的是 MP4 容器的音訊，不是 mp3, "slide-deck": ("slide-deck", ".pptx", ["--format", "pptx"])}
+OUTPUTS = {"audio": ("audio", ".m4a", []),          # NotebookLM 給的語音是 MP4 容器，不是 mp3
+           "slide-deck": ("slide-deck", ".pptx", ["--format", "pptx"])}
 MAX_BYTES = 5 * 1024 * 1024
 
 TOOLS = [
