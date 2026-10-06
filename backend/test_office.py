@@ -519,6 +519,7 @@ def run() -> None:
     start_records_engine()
     audit_ledger()
     memory_ledger()
+    notebooklm_mcp()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -2116,6 +2117,77 @@ def memory_ledger() -> None:
             else:
                 os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
     print("  ✓ 記憶落帳：舊檔首次盤點、cogito 靠掃描、CLI 靠 hook、重複不記、共用池不硬掛人、偽造路徑不收")
+
+
+def notebooklm_mcp() -> None:
+    """NotebookLM MCP（tools/office_notebooklm_mcp.py）：員工只拿到 publish／collect，檔案只能在工作區裡；
+    CLI 的呼叫順序、兩段式（collect 沒好就回 pending）、CLI 回錯照實回。CLI 用假的，不碰老闆的 Google 帳號。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "channels"; ws = root / "office_p19"; ws.mkdir(parents=True)
+        (ws / "weekly.md").write_text("# 週報\n內容", encoding="utf-8")
+        outside = Path(tmp) / "elsewhere"; outside.mkdir(); (outside / "secret.md").write_text("x", encoding="utf-8")
+        log = Path(tmp) / "calls.log"
+        fake = Path(tmp) / "notebooklm"
+        fake.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+open({str(log)!r}, "a").write(json.dumps(a, ensure_ascii=False) + "\\n")
+st = os.environ.get("FAKE_STATUS", "completed")
+if a[0] == "create": print(json.dumps({{"notebook": {{"id": "nb1", "title": a[1]}}}}))
+elif a[:2] == ["source", "add"]: print(json.dumps({{"source": {{"id": "src1"}}}}))
+elif a[:2] == ["source", "wait"]: print(json.dumps({{"status": "ready"}}))
+elif a[0] == "generate": print(json.dumps({{"task_id": "art-" + a[1], "status": "in_progress"}}))
+elif a[:2] == ["artifact", "wait"]:
+    print(json.dumps({{"artifact_id": a[2], "status": st}})); sys.exit(0 if st == "completed" else 1)
+elif a[0] == "download":
+    open(a[2], "w").write("bytes"); print(json.dumps({{"path": a[2]}}))
+elif a[0] == "quota": print(json.dumps({{"error": True, "code": "RATE_LIMITED", "message": "daily quota"}})); sys.exit(1)
+""", encoding="utf-8"); fake.chmod(0o755)
+        env = {**os.environ, "OFFICE_WORKSPACE_ROOT": str(root), "NOTEBOOKLM_BIN": str(fake)}
+
+        def rpc(msgs, extra_env=None):
+            proc = subprocess.run([sys.executable, str(Path(main.__file__).parent / "tools" / "office_notebooklm_mcp.py")],
+                                  input="\n".join(json.dumps(m) for m in msgs) + "\n", capture_output=True, text=True,
+                                  env={**env, **(extra_env or {})}, timeout=30)
+            assert proc.returncode == 0, proc.stderr[-400:]
+            out = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+            return out
+        call = lambda i, name, args: {"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": {"name": name, "arguments": args}}
+        body = lambda r: json.loads(r["result"]["content"][0]["text"])
+        init = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+        out = rpc(init + [call(3, "publish", {"file": str(ws / "weekly.md"), "title": "GitHub 週報"}),
+                          call(4, "publish", {"file": str(outside / "secret.md")}),
+                          call(5, "publish", {"file": str(ws / "../../elsewhere/secret.md")}),
+                          call(6, "collect", {"notebook_id": "nb1", "artifacts": {"audio": "art-audio"}, "out_dir": str(outside)}),
+                          call(7, "collect", {"notebook_id": "nb1", "artifacts": {"audio": "art-audio", "slide-deck": "art-slide-deck"}, "out_dir": str(ws / "out"), "basename": "weekly"})])
+        by = {r["id"]: r for r in out}
+        assert by[1]["result"]["serverInfo"]["name"] == "office-notebooklm" and [t["name"] for t in by[2]["result"]["tools"]] == ["publish", "collect"]
+        # ① 正常送件：建筆記本（標題帶日期）→ 加來源 → 等來源 → 兩種都 --no-wait 生成，回 id；不碰既有筆記本
+        pub = body(by[3])
+        assert pub["notebook_id"] == "nb1" and pub["artifacts"] == {"audio": "art-audio", "slide-deck": "art-slide-deck"} and "（" in pub["title"], pub
+        calls = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+        assert [c[0] if c[0] != "source" else c[1] for c in calls[:5]] == ["create", "add", "wait", "generate", "generate"], calls
+        assert all("--no-wait" in c and "--language" in c and "-n" in c for c in calls[3:5]) and calls[1][2] == str((ws / "weekly.md").resolve()), calls[1:5]
+        assert all(c[-1] == "--json" for c in calls), "每次都要 --json 才解析得了"
+        # ② 工作區外的檔不收（絕對路徑與 .. 穿越都擋）；下載資料夾在工作區外也擋
+        for i in (4, 5, 6):
+            assert by[i]["result"]["isError"] and "工作區" in body(by[i])["error"], body(by[i])
+        assert not (outside / "weekly.mp3").exists()
+        # ③ 全部完成：下載成兩個檔到指定資料夾（pptx 要帶 --format pptx）
+        col = body(by[7])
+        assert col["ready"] and sorted(col["files"]) == ["audio", "slide-deck"] and (ws / "out" / "weekly.mp3").exists() and (ws / "out" / "weekly.pptx").exists(), col
+        dl = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines() if l.startswith('["download"')]
+        assert any("--format" in c and "pptx" in c for c in dl) and all("-a" in c for c in dl), dl
+        # ④ 還在生成：不下載、回 pending；CLI 回錯（額度用完）照實回、標 isError
+        out = rpc(init + [call(8, "collect", {"notebook_id": "nb1", "artifacts": {"audio": "art-audio"}, "out_dir": str(ws)})], {"FAKE_STATUS": "in_progress"})
+        c8 = body(next(r for r in out if r.get("id") == 8))
+        assert c8["ready"] is False and c8["status"] == {"audio": "in_progress"} and not (ws / ("notebooklm-" + time.strftime("%Y-%m-%d") + ".mp3")).exists(), c8
+        # ⑤ 沒設工作區根：全部拒
+        out = rpc(init + [call(9, "publish", {"file": str(ws / "weekly.md")})], {"OFFICE_WORKSPACE_ROOT": ""})
+        assert next(r for r in out if r.get("id") == 9)["result"]["isError"]
+    print("  ✓ NotebookLM MCP：工作區內才收、兩段式、CLI 順序、pptx 格式、pending 不下載")
 
 
 def approver_key_separation() -> None:

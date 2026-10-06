@@ -53,3 +53,24 @@ PY
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2) \
   | ENABLE_SSE=0 DOCKER_CMD="$M/jobspy-run.sh" node "$M/jobspy-mcp-server/src/index.js" 2>/dev/null \
   | grep -q '"searchTerm"' && echo "✓ search_jobs schema 正常" || { echo "✗ search_jobs schema 是空的，Claude Code 看不到這顆工具"; exit 1; }
+
+# NotebookLM：把報告送去做語音摘要與簡報（2026-10-06）。走 notebooklm-py 的 CLI，不開瀏覽器。CLI 讀的是老闆 Google 帳號的
+# cookie（~/.notebooklm），員工沙箱擋住那裡、也沒網路——所以包成 MCP 伺服器（tools/office_notebooklm_mcp.py）跑在沙箱外，
+# 員工只拿到 publish／collect 兩顆工具，檔案只能是工作區裡的。沒裝 notebooklm 就略過這段。
+# 前提：`pipx install notebooklm-py` 之後老闆自己跑過一次 `notebooklm login`。第一次呼叫會進審批，收件匣「以後都准」即可。
+NLM="$(command -v notebooklm || true)"
+CHANNELS="${COGITO_CHANNELS:-$(grep -E '^COGITO_CHANNELS=' "$(cd "$(dirname "$0")/.." && pwd)/.env" 2>/dev/null | cut -d= -f2-)}"
+if [ -n "$NLM" ] && [ -n "$CHANNELS" ]; then
+  python3 - "$OFFICE/.claude.json" "$NLM" "$CHANNELS" "$(cd "$(dirname "$0")" && pwd)/office_notebooklm_mcp.py" <<'PY'
+import json, os, sys
+p, nlm, channels, server = sys.argv[1:5]
+d = json.load(open(p)) if os.path.exists(p) else {}
+d.setdefault("mcpServers", {})["notebooklm"] = {"type": "stdio", "command": server,
+    "env": {"OFFICE_WORKSPACE_ROOT": os.path.expanduser(channels), "NOTEBOOKLM_BIN": nlm,
+            "NOTEBOOKLM_HOME": os.path.expanduser(os.environ.get("NOTEBOOKLM_HOME", "~/.notebooklm")), "NOTEBOOKLM_LANGUAGE": "zh_Hant"}}
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+print("mcpServers.notebooklm 寫進", p, "工作區根", channels)
+PY
+else
+  echo "（沒裝 notebooklm 或沒設 COGITO_CHANNELS，略過 NotebookLM MCP）"
+fi
