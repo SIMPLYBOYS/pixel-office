@@ -4306,6 +4306,22 @@ cli_session_of: dict[str, str] = {}               # aid -> 這次跑的 session 
 CWD_AGENT_RE = re.compile(r"/office_(kanban|p\d+)(?:/|$)")
 
 
+def project_mcp_servers() -> set[str]:
+    """員工工作區往上找到的第一份 .mcp.json 裡的伺服器名（Claude Code 會當成專案 MCP 自動載入的那些）。"""
+    if CHANNELS_DIR is None:
+        return set()
+    for d in (CHANNELS_DIR, *CHANNELS_DIR.parents):
+        if d == Path.home() or d == d.parent:
+            break
+        if (f := d / ".mcp.json").is_file():
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return set()
+            return set((data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) else data) or {})
+    return set()
+
+
 def sync_office_hook() -> str:
     """把辦公室的三個 hook 掛進員工 profile 的 settings.json（CLAUDE_CONFIG_DIR）。回 wrote／same／skip。
     - PermissionRequest：審批 hook（權限請求交給辦公室審批）
@@ -4330,6 +4346,17 @@ def sync_office_hook() -> str:
         except OSError:
             pass
     changed = False
+    # 員工的 MCP 由辦公室自己指定，不繼承工作區所在 repo 的 .mcp.json（issue #1）：員工工作區在 cogito-agent 的 git repo 底下，
+    # Claude Code 會自動載入那份——於是員工拿到沒有網域限制的 playwright、根在 /tmp 的 filesystem，沒有人決定過要給。
+    # 瀏覽器改走辦公室的 browser（tools/office_browser_mcp.py，只放行白名單網域）。被改掉的下次啟動改回來。
+    if names := sorted(project_mcp_servers()):
+        if d.get("enableAllProjectMcpServers") is not False:
+            d["enableAllProjectMcpServers"] = False
+            changed = True
+        have = d.get("disabledMcpjsonServers") if isinstance(d.get("disabledMcpjsonServers"), list) else []
+        if missing := [n for n in names if n not in have]:
+            d["disabledMcpjsonServers"] = have + missing
+            changed = True
     for event, matcher, want in (
             ("PermissionRequest", "", {"type": "command", "command": str(HOOK_SCRIPT), "timeout": int(CLI_APPROVAL_S) + 300}),
             ("PreToolUse", GUARD_MATCHER, {"type": "command", "command": str(GUARD_SCRIPT), "timeout": 10}),

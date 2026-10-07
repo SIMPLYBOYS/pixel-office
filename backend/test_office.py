@@ -521,6 +521,7 @@ def run() -> None:
     memory_ledger()
     notebooklm_mcp()
     cli_relogin()
+    office_browser()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -2370,6 +2371,71 @@ sys.exit(2)
                 main.auth_state[p_].update(at=0.0, status=None); main.auth_login[p_].clear()
             main.busy.discard(aid)
     print("  ✓ 重新登入：claude（網址、代碼、成功、失敗、取消）＋ NotebookLM（有在用才列、撞到就掛、登好自己收）")
+
+def office_browser() -> None:
+    """員工的無頭瀏覽器（issue #1）：白名單網域（含子網域）才放行、其他與 localhost 一律 403；白名單讀員工 profile 的
+    WebFetch 網域（www.X 視為 X）＋Cloudflare 驗證頁；橋啟動時停用工作區所在 repo 的 .mcp.json（不再繼承 cogito 的 playwright）。"""
+    import importlib.util
+    import socket
+    import tempfile
+    import threading
+    spec = importlib.util.spec_from_file_location("office_browser_mcp", Path(main.__file__).parent / "tools" / "office_browser_mcp.py")
+    ob = importlib.util.module_from_spec(spec); spec.loader.exec_module(ob)
+    # ① 網域比對：本身或子網域；長得像但不是的不算
+    doms = ["cake.me", "techorange.com"]
+    assert ob.host_allowed("www.cake.me", doms) and ob.host_allowed("cake.me", doms) and ob.host_allowed("CAKE.ME.", doms)
+    assert not ob.host_allowed("evilcake.me", doms) and not ob.host_allowed("cake.me.evil.com", doms) and not ob.host_allowed("127.0.0.1", doms)
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Path(tmp) / "settings.json"
+        st.write_text(json.dumps({"permissions": {"allow": ["WebFetch(domain:Cake.me)", "WebFetch(domain:www.yourator.co)", "WebSearch", "mcp__jobspy", "Bash(jq:*)"]}}), encoding="utf-8")
+        assert ob.allowlist(st) == ["cake.me", "challenges.cloudflare.com", "yourator.co"], ob.allowlist(st)   # www.X＝整個 X（assets.X 也要）
+        assert ob.allowlist(Path(tmp) / "沒有這個檔") == ["challenges.cloudflare.com"]
+        # ② 代理：放行的走得通（隧道真的有接上）、其他 403、純 HTTP 不轉、不在允許的埠也擋
+        up = socket.socket(); up.bind(("127.0.0.1", 0)); up.listen(1); uport = up.getsockname()[1]
+
+        def echo():
+            conn, _ = up.accept(); conn.sendall(conn.recv(100).upper()); conn.close()
+        threading.Thread(target=echo, daemon=True).start()
+        px = ob.start_proxy(["127.0.0.1"], {uport})
+        pport = px.server_address[1]
+
+        def ask(line: bytes) -> bytes:
+            c = socket.create_connection(("127.0.0.1", pport), timeout=5)
+            c.sendall(line + b"\r\n\r\n")
+            head = c.recv(200)
+            if b" 200 " in head:
+                c.sendall(b"ping"); head += b"|" + c.recv(100)
+            c.close()
+            return head
+        assert ask(f"CONNECT 127.0.0.1:{uport} HTTP/1.1".encode()).endswith(b"|PING"), "白名單的要接得通"
+        assert b" 403 " in ask(b"CONNECT example.com:443 HTTP/1.1"), "白名單外的要擋"
+        assert b" 403 " in ask(f"CONNECT 127.0.0.1:{uport + 1} HTTP/1.1".encode()), "不在允許的埠要擋"
+        assert b" 403 " in ask(f"GET http://127.0.0.1:{uport}/ HTTP/1.1".encode()), "純 HTTP 不轉"
+        px.shutdown(); up.close()
+        # ③ 橋啟動時停用工作區所在 repo 的 .mcp.json 伺服器（保留別的設定、被改掉會改回來）
+        repo = Path(tmp) / "repo"; ch = repo / "workspace" / "channels"; ch.mkdir(parents=True)
+        (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"playwright": {}, "filesystem": {}}}), encoding="utf-8")
+        prof = Path(tmp) / "prof"; prof.mkdir()
+        (prof / "settings.json").write_text(json.dumps({"theme": "dark", "disabledMcpjsonServers": ["mine"]}), encoding="utf-8")
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, ch
+        old_cfg = os.environ.get("CLAUDE_CONFIG_DIR"); os.environ["CLAUDE_CONFIG_DIR"] = str(prof)
+        try:
+            assert main.project_mcp_servers() == {"playwright", "filesystem"}
+            main.sync_office_hook()
+            d = json.loads((prof / "settings.json").read_text(encoding="utf-8"))
+            assert d["enableAllProjectMcpServers"] is False and d["disabledMcpjsonServers"] == ["mine", "filesystem", "playwright"], d
+            assert d["theme"] == "dark"
+            d["enableAllProjectMcpServers"] = True; d["disabledMcpjsonServers"] = []
+            (prof / "settings.json").write_text(json.dumps(d), encoding="utf-8")
+            assert main.sync_office_hook() == "wrote"
+            d = json.loads((prof / "settings.json").read_text(encoding="utf-8"))
+            assert d["enableAllProjectMcpServers"] is False and set(d["disabledMcpjsonServers"]) == {"playwright", "filesystem"}, "被改掉要改回來"
+        finally:
+            main.CHANNELS_DIR = old_ch
+            if old_cfg is None: os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else: os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
+    print("  ✓ 員工瀏覽器：白名單網域才放行、localhost 與純 HTTP 擋、停用 repo 的 .mcp.json")
+
 
 def approver_key_separation() -> None:
     """派工權／審批權分離在橋這端的半邊：只有 approve/reject 帶 X-Approver-Token，派工與中止不帶。

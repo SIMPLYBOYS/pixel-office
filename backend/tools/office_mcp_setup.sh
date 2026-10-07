@@ -74,3 +74,20 @@ PY
 else
   echo "（沒裝 notebooklm 或沒設 COGITO_CHANNELS，略過 NotebookLM MCP）"
 fi
+
+# 瀏覽器（issue #1，2026-10-07）：辦公室自己的 browser MCP（tools/office_browser_mcp.py）＝@playwright/mcp 隔離、開視窗（無頭過不了 Cloudflare），
+# 所有流量經過只放行白名單網域（settings.json 的 WebFetch 網域）的本機代理；localhost 也擋。工作區所在 repo 的 .mcp.json
+# （cogito 的 playwright 等）由橋啟動時的 sync_office_hook 停用。allow 加 mcp__browser＝班表也能用。
+python3 - "$OFFICE/.claude.json" "$OFFICE/settings.json" "$(cd "$(dirname "$0")" && pwd)/office_browser_mcp.py" <<'PY'
+import json, os, sys
+cj, st, server = sys.argv[1:4]
+d = json.load(open(cj)) if os.path.exists(cj) else {}
+d.setdefault("mcpServers", {})["browser"] = {"type": "stdio", "command": server, "args": ["--headed"]}   # 無頭過不了 Cloudflare
+json.dump(d, open(cj, "w"), ensure_ascii=False, indent=2)
+s = json.load(open(st)) if os.path.exists(st) else {}
+allow = s.setdefault("permissions", {}).setdefault("allow", [])
+if "mcp__browser" not in allow:
+    allow.append("mcp__browser")
+json.dump(s, open(st, "w"), ensure_ascii=False, indent=2)
+print("mcpServers.browser 寫進", cj, "；allow 加 mcp__browser")
+PY
