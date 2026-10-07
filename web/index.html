@@ -200,8 +200,10 @@
   .missedbar[hidden] { display: none; }
   .authbar { flex-wrap: wrap; background: #2e1a1a; border-bottom-color: #7a3b3b; color: #f0b4a8; }
   .authbar a { color: inherit; }
-  .missedbar.authbar > span { flex: 1 1 100%; }   /* 說明自己一行；輸入框與按鈕換到下一行，別把字擠成一字一行 */
-  .missedbar.authbar:not(:has(input)) > span { flex: 1 1 0; }   /* 只有一顆鈕時照舊同一行 */
+  .missedbar.authbar { flex-direction: column; align-items: stretch; gap: 6px; }
+  .authrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .missedbar.authbar .authrow > span { flex: 1 1 0; min-width: 0; }
+  .missedbar.authbar .authrow:has(input) > span { flex: 1 1 100%; }   /* 有輸入框：說明自己一行，別把字擠成一字一行 */
   .authbar input { flex: 1 1 180px; min-width: 0; font: inherit; font-size: 11px; padding: 3px 6px; background: var(--bg, #111);
                    color: inherit; border: 1px solid #7a3b3b; border-radius: 4px; }
   .missedbar span { flex: 1; min-width: 0; }
@@ -2319,45 +2321,60 @@ async function dropFeedback(agent, i) {
   $('hint').classList.toggle('err', !r.ok);
   if (agent === selected) profile(agent);
 }
-// 員工 Claude Code 的登入（~/.claude-office）：過期了所有走 CLI 的員工與班表都會中斷「OAuth session expired」。
-// 一條橫條掛在分頁列上方（切到哪頁都看得到），不放收件匣：收件匣會重畫，貼代碼貼到一半會被洗掉。
-// 橋代跑 `claude auth login`：它會開瀏覽器，授權完自動接回；接不回時授權頁給一串代碼，貼在這裡。
+// 外部服務的登入：員工的 Claude Code（~/.claude-office）過期 → 所有走 CLI 的員工與班表中斷「OAuth session expired」；
+// NotebookLM（老闆的 Google）過期 → 員工送報告失敗「CSRF token not found」。一條橫條掛在分頁列上方，每個服務一列
+// （切到哪頁都看得到）；不放收件匣：收件匣會重畫，貼代碼貼到一半會被洗掉。橋代跑那支登入指令：
+// claude 開瀏覽器、授權完自動接回，接不回時授權頁給一串代碼貼在這裡；notebooklm 開一個登入視窗，登好它自己收。
 let authPoll = null;
 async function authbar() {
   const bar = $('authBar');
   let r;
   try { r = await (await fetch('/office/auth')).json(); } catch { return; }
   if (!r.ok) return;
-  const lg = r.login || {}, out = r.cli && r.cli.loggedIn === false;
-  const sig = JSON.stringify([out, lg.running, lg.url, lg.done, lg.ok]);
+  const ps = Object.entries(r.providers || {});
+  const sig = JSON.stringify(ps.map(([k, v]) => [k, v.status && v.status.loggedIn, v.login.running, v.login.url, v.login.done, v.login.ok]));
   if (bar.dataset.sig === sig) return;
   bar.dataset.sig = sig;
-  if (lg.running) {
-    bar.innerHTML = `<span>🔑 正在重新登入員工的 Claude Code：已在瀏覽器開啟授權頁。${lg.url ? `沒開的話<a href="${esc(lg.url)}" target="_blank" rel="noopener">點這裡</a>。` : ''}
-      授權完頁面若給你一串代碼，貼在右邊。</span><input id="authCode" placeholder="授權頁給的代碼（沒有就不用）" autocomplete="off">`;
-    const send = el('button', '送出代碼'); send.type = 'button';
-    send.onclick = () => authAct({ action: 'code', code: $('authCode').value.trim() });
-    const no = el('button', '取消'); no.type = 'button';
-    no.onclick = () => authAct({ action: 'cancel' });
-    bar.append(send, no);
-    bar.hidden = false;
-    if (!authPoll) authPoll = setInterval(authbar, 2000);   // 登入中：問勤一點，好了馬上收起來
-    return;
+  const busy = ps.some(([, v]) => v.login.running);
+  if (busy && !authPoll) authPoll = setInterval(authbar, 2000);   // 登入中：問勤一點，好了馬上收起來
+  if (!busy) { clearInterval(authPoll); authPoll = null; }
+  bar.replaceChildren();
+  for (const [k, v] of ps) {
+    const lg = v.login, row = el('div', '', 'authrow');
+    if (lg.running) {
+      delete bar.dataset['ok' + k];   // 這一輪登好了要再講一次
+      const how = k === 'claude'
+        ? `已在瀏覽器開啟授權頁。${lg.url ? `沒開的話<a href="${esc(lg.url)}" target="_blank" rel="noopener">點這裡</a>。` : ''}授權完頁面若給你一串代碼，貼在右邊。`
+        : '已開一個登入視窗（另一個瀏覽器視窗），登入你的 Google 帳號，完成後它會自己收起來。';
+      row.innerHTML = `<span>🔑 正在重新登入${esc(v.name)}：${how}</span>`;
+      if (k === 'claude') {
+        const inp = el('input'); inp.id = 'authCode-' + k; inp.placeholder = '授權頁給的代碼（沒有就不用）'; inp.autocomplete = 'off';
+        const send = el('button', '送出代碼'); send.type = 'button';
+        send.onclick = () => authAct({ provider: k, action: 'code', code: inp.value.trim() });
+        row.append(inp, send);
+      }
+      const no = el('button', '取消'); no.type = 'button';
+      no.onclick = () => authAct({ provider: k, action: 'cancel' });
+      row.append(no);
+    } else if (v.status && v.status.loggedIn === false) {
+      const hurt = k === 'claude' ? '走 Claude Code 的員工與班表都會中斷' : '員工送報告去做語音摘要與簡報會失敗';
+      row.innerHTML = `<span>🔑 ${esc(v.name)}登入過期了——${hurt}。${
+        lg.done && lg.ok === false ? `上一次沒登成功${lg.message ? `（${esc(lg.message)}）` : ''}，再試一次。` : ''}</span>`;
+      const go = el('button', '重新登入'); go.type = 'button';
+      go.onclick = () => authAct({ provider: k, action: 'start' });
+      row.append(go);
+    } else {
+      if (lg.done && lg.ok && bar.dataset['ok' + k] !== String(lg.done)) {   // 剛登好：講一次就好
+        bar.dataset['ok' + k] = String(lg.done);
+        $('hint').textContent = `✓ ${v.name}已重新登入` + (k === 'claude' ? '——中斷的班表可以到收件匣補跑' : '');
+        $('hint').classList.remove('err');
+        inboxcard();
+      }
+      continue;
+    }
+    bar.append(row);
   }
-  clearInterval(authPoll); authPoll = null;
-  if (lg.done && lg.ok) {
-    bar.hidden = true;
-    $('hint').textContent = '✓ 員工的 Claude Code 已重新登入——中斷的班表可以到收件匣補跑'; $('hint').classList.remove('err');
-    inboxcard();
-    return;
-  }
-  if (!out) { bar.hidden = true; return; }
-  bar.innerHTML = `<span>🔑 員工的 Claude Code 登入過期了——走 Claude Code 的員工與班表都會中斷。${
-    lg.done && lg.ok === false ? `上一次沒登成功${lg.message ? `（${esc(lg.message)}）` : ''}，再試一次。` : ''}</span>`;
-  const go = el('button', '重新登入'); go.type = 'button';
-  go.onclick = () => authAct({ action: 'start' });
-  bar.append(go);
-  bar.hidden = false;
+  bar.hidden = !bar.children.length;
 }
 async function authAct(body) {
   const r = await (await fetch('/office/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
