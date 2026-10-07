@@ -550,6 +550,7 @@ def run() -> None:
     camera()
     sub_release_fallback()
     watchdog_alive_proc()
+    sub_parallel_ids()
     hurt_projection()
     turn_in_stream()
     local_only()
@@ -637,6 +638,75 @@ def watchdog_alive_proc() -> None:
         finally:
             main.WORK_TIMEOUT = old_t
             main.cli_procs.pop(aid, None); main.busy.discard(aid); main.work_last.pop(aid, None)
+
+
+def sub_parallel_ids() -> None:
+    """#14：Claude Code 同名並行的子 agent 按自己的 id 對人（以前事件全掛第一個、交件 FIFO）；逾時從最後動靜起算；
+    主行程（Claude Code）還活著就不強制收卡，行程死了照舊收。2026-09-22 小安並行派 4 個 general-purpose 時踩到。"""
+    # ① cli_events：派工、子 agent 自己的事件、背景交件都帶上 Claude Code 的 tool_use_id
+    names, subs = {}, {}
+    ev = main.cli_events({"type": "system", "subtype": "task_started", "tool_use_id": "TA", "subagent_type": "general-purpose"}, names, subs)
+    assert ev[0]["sub_id"] == "TA" and ev[0]["label"].startswith("spawn_subagent:"), ev
+    main.cli_events({"type": "system", "subtype": "task_started", "tool_use_id": "TB", "subagent_type": "general-purpose"}, names, subs)
+    ev = main.cli_events({"type": "assistant", "parent_tool_use_id": "TB", "message": {"content": [
+        {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "x"}}, {"type": "text", "text": "看完了"}]}}, names, subs)
+    assert [e.get("sub_id") for e in ev] == ["TB", "TB"], ev
+    ev = main.cli_events({"type": "system", "subtype": "task_notification", "tool_use_id": "TB", "task_id": "b2", "status": "completed"}, names, subs)
+    assert ev[0]["label"] == "subagent_await" and ev[0]["sub_id"] == "TB", ev
+    name = ev[0]["detail"].split("[", 1)[1].split("]", 1)[0]
+
+    parent = "p10"
+
+    class _Proc:
+        returncode, pid = None, 0
+    old_t = main.SUB_TIMEOUT
+    with TestClient(main.app) as c:
+        for a_ in list(main.agents):
+            main.busy.discard(a_)
+        main.sub_active.clear(); main.sub_ids.clear(); main.sub_since.clear()
+        post(c, agent=parent, kind="start", label="整理職缺", engine=main.ENGINE_CLI)
+        # ② 同名派兩個：各自一個 NPC，id 記在對應表
+        post(c, agent=parent, kind="tool", label=f"spawn_subagent:{name}", detail="查 A", sub_id="TA")
+        post(c, agent=parent, kind="tool", label=f"spawn_subagent:{name}", detail="查 B", sub_id="TB")
+        na, nb = main.sub_ids[(parent, "TA")], main.sub_ids[(parent, "TB")]
+        assert na != nb and na in main.busy and nb in main.busy, (na, nb)
+        # ③ B 的事件掛到 B 身上（以前一律掛第一個＝A）
+        post(c, agent=parent, kind="tool", label=f"[Subagent:{name}] Read", detail='{"file_path": "jobs.json"}', sub_id="TB")
+        assert any("jobs.json" in e["text"] for e in main.last_report[nb]["events"]), [e["text"] for e in main.last_report[nb]["events"]][-3:]
+        assert not any("jobs.json" in e["text"] for e in main.last_report[na]["events"])
+        # ④ B 先交件：放的是 B，不是先派的 A
+        post(c, agent=parent, kind="result", label="subagent_await", sub_id="TB",
+             detail=f"背景子 agent b2 [{name}]：✅ 已完成\nB 的結論")
+        for _ in range(60):
+            if nb not in main.busy:
+                break
+            time.sleep(0.05)
+        assert nb not in main.busy and na in main.busy, "B 交件該放 B、A 繼續"
+        assert main.last_report[nb]["status"] == "ok" and main.last_report[na]["status"] == "working"
+        assert (parent, "TB") not in main.sub_ids and main.sub_ids.get((parent, "TA")) == na
+        # ⑤ 逾時從最後動靜起算：A 有事件就重新計時
+        main.sub_since[na] = time.monotonic() - 9999
+        post(c, agent=parent, kind="tool", label=f"[Subagent:{name}] Grep", detail="{}", sub_id="TA")
+        assert time.monotonic() - main.sub_since[na] < 5, "有動靜要重新計時"
+        # ⑥ 主行程（Claude Code）還活著：很久沒動靜也不強制收；行程死了照舊收
+        main.SUB_TIMEOUT = 1
+        main.sub_since[na] = time.monotonic() - 9999
+        main.cli_procs[parent] = p_ = _Proc()
+        try:
+            asyncio.run(main.sweep_work())
+            assert na in main.busy and main.last_report[na]["status"] == "working", "主行程還活著，不能把子 agent 判失聯"
+            p_.returncode = 0
+            asyncio.run(main.sweep_work())
+            assert na not in main.busy and main.last_report[na]["status"] == "lost", main.last_report[na]["status"]
+            assert (parent, "TA") not in main.sub_ids
+        finally:
+            main.cli_procs.pop(parent, None)
+    main.SUB_TIMEOUT = old_t
+    main.sub_active.clear(); main.sub_ids.clear(); main.sub_since.clear()
+    for a_ in (parent, na, nb):
+        main.busy.discard(a_)
+        main.work_last.pop(a_, None)
+    print("  ✓ 同名並行子 agent 按 id 對人、交件放對的人、逾時從最後動靜起算、主行程活著不收")
 
 
 def sub_release_fallback() -> None:
@@ -4313,25 +4383,25 @@ def cli_subagents() -> None:
     assert ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "T1", "name": "Agent",
                "input": {"subagent_type": "xiaomei", "description": "小美的意見", "run_in_background": True}}]}}) == [], "Agent 工具呼叫本身不投影（由 task_started 投）"
     out = ev({"type": "system", "subtype": "task_started", "tool_use_id": "T1", "subagent_type": "xiaomei", "description": "小美的意見", "is_backgrounded": True})
-    assert out == [{"kind": "tool", "label": "spawn_subagent:小美", "detail": "小美的意見"}], out
+    assert out == [{"kind": "tool", "label": "spawn_subagent:小美", "detail": "小美的意見", "sub_id": "T1"}], out   # sub_id：同名並行時對人（#14）
     assert ev({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "T1", "content": [{"type": "text", "text": "Async agent launched successfully. agentId: abc"}]}]}}) == [], "背景啟動回執不是交件"
     out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"model": "claude-haiku-4-5-20251001", "content": [{"type": "tool_use", "id": "S1", "name": "Read", "input": {"file_path": "a.md"}}]}})
-    assert out == [{"kind": "msg", "label": "[Subagent:小美] 🧠 模型：claude-haiku-4-5-20251001", "sub_model": "claude-haiku-4-5-20251001", "sub_name": "小美"},
-                   {"kind": "tool", "label": "[Subagent:小美] Read", "detail": '{"file_path": "a.md"}'}], out
+    assert out == [{"kind": "msg", "label": "[Subagent:小美] 🧠 模型：claude-haiku-4-5-20251001", "sub_model": "claude-haiku-4-5-20251001", "sub_name": "小美", "sub_id": "T1"},
+                   {"kind": "tool", "label": "[Subagent:小美] Read", "detail": '{"file_path": "a.md"}', "sub_id": "T1"}], out
     assert subs["T1"]["model"] == "claude-haiku-4-5-20251001"
     out = ev({"type": "user", "parent_tool_use_id": "T1", "message": {"content": [{"type": "tool_result", "tool_use_id": "S1", "content": "內容", "is_error": False}]}})
-    assert out == [{"kind": "result", "label": "[Subagent:小美] Read", "detail": "內容"}], out
+    assert out == [{"kind": "result", "label": "[Subagent:小美] Read", "detail": "內容", "sub_id": "T1"}], out
     out = ev({"type": "assistant", "parent_tool_use_id": "T1", "message": {"model": "claude-haiku-4-5-20251001", "content": [{"type": "text", "text": "不建議立即擴增。"}]}})
-    assert out == [{"kind": "msg", "label": "[Subagent:小美] 不建議立即擴增。"}] and subs["T1"]["text"] == "不建議立即擴增。", "模型那行只講一次"
+    assert out == [{"kind": "msg", "label": "[Subagent:小美] 不建議立即擴增。", "sub_id": "T1"}] and subs["T1"]["text"] == "不建議立即擴增。", "模型那行只講一次"
     out = ev({"type": "system", "subtype": "task_notification", "tool_use_id": "T1", "task_id": "ab61", "status": "completed"})
-    assert out == [{"kind": "result", "label": "subagent_await", "detail": "背景子 agent ab61 [小美]：✅ 已完成\n不建議立即擴增。"}], out
+    assert out == [{"kind": "result", "label": "subagent_await", "detail": "背景子 agent ab61 [小美]：✅ 已完成\n不建議立即擴增。", "sub_id": "T1"}], out
     assert main.BG_DONE_RE.search(out[0]["detail"]).group(1) == "小美", "收件格式要對得上橋的 BG_DONE_RE"
     assert "T1" not in subs
     # 前景子 agent：Agent 的 tool_result 就是交件
     ev({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "T2", "name": "Agent", "input": {"subagent_type": "laoxu"}}]}})
     ev({"type": "system", "subtype": "task_started", "tool_use_id": "T2", "subagent_type": "laoxu", "description": "老徐", "is_backgrounded": False})
     out = ev({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "T2", "content": "需要，先試一間。"}]}})
-    assert out == [{"kind": "result", "label": "spawn_subagent:老徐", "detail": "需要，先試一間。"}], out
+    assert out == [{"kind": "result", "label": "spawn_subagent:老徐", "detail": "需要，先試一間。", "sub_id": "T2"}], out
     # 3) 整條走假 CLI：看板派工 → 小美起身支援 → 背景交件 → 看板收工在第二個 result 才發生
     fake = r"""#!/usr/bin/env python3
 import json, sys, time

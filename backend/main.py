@@ -1147,6 +1147,8 @@ def release_work(aid: str) -> None:
     last_tool.pop(aid, None)
     watering.discard(aid)
     busy.discard(aid)
+    for key in [k for k in sub_ids if k[0] == aid]:
+        sub_ids.pop(key, None)
     for key in [k for k in sub_active if k[0] == aid]:
         for npc in sub_active.pop(key):   # 同一個鍵可能掛著多個並行子 agent，整批釋放
             busy.discard(npc)
@@ -1179,10 +1181,12 @@ async def sweep_work() -> None:
         await sync_emote(aid)
 
     # 子 agent 的釋放事件掉了：主 agent 可能還活得好好的（work_last 一直在刷新），
-    # 所以上面那條失聯規則救不到。這裡按【徵用時間】強制放人，否則那個 NPC 永遠不回座位。
+    # 所以上面那條失聯規則救不到。這裡按【最後一次動靜】強制放人，否則那個 NPC 永遠不回座位。
+    # sub_since 有子 agent 自己的事件就刷新（#14：以前是徵用時間，跑超過 7 分鐘的子 agent 一定被收）；
+    # 主行程是 Claude Code／Codex 而且還活著就不收——交件或行程結束都一定會送到（同 ca862b1 的道理）。
     # 這是投影層的兜底——cogito 端已把釋放事件改成不可丟（見 office_reporter 的 isCritical），
     # 但橋長期掛掉時仍可能漏，且橋自己重啟也會失憶，所以兩邊都要有。
-    for npc in [n for n, t in list(sub_since.items()) if now - t > SUB_TIMEOUT]:
+    for npc in [n for n, t in list(sub_since.items()) if now - t > SUB_TIMEOUT and not proc_alive(sub_parent(n) or "")]:
         print(f"⚠ {npc} 被徵用 {SUB_TIMEOUT:.0f}s 未收到釋放事件，強制放人")
         sub_since.pop(npc, None)
         busy.discard(npc)
@@ -1191,6 +1195,8 @@ async def sweep_work() -> None:
                 queue.remove(npc)
                 if not queue:
                     sub_active.pop(key, None)
+        for key in [k for k, v in sub_ids.items() if v == npc]:
+            sub_ids.pop(key, None)
         close_card(npc, "lost")
         log_ev(npc, "⚠ 委派回報沒收到，自動收工")
         if desk := WORK_DESK.get(npc):
@@ -1307,6 +1313,10 @@ BG_DONE_RE = re.compile(r"^背景子 agent \S+ \[([^\]]*)\]：([✅⚪🟢])", r
 # 收工時 FIFO 取一個：同名的兄弟對橋來說本來就分不出誰是誰，報告掛到哪一個是任意的，
 # 但「每個都會被釋放」這件事是確定的——那才是重點。
 sub_active: dict[tuple[str, str], list[str]] = {}
+# (主 agent, 子 agent 自己的 id) -> 演出的 NPC。Claude Code 的子 agent 事件都帶 tool_use_id，同名並行時靠它對人；
+# 沒有 id 的（cogito）照舊按名字 FIFO。#14：9/22 小安並行派了 4 個 general-purpose，事件全掛到第一個人身上，
+# 另外三個人看起來毫無動靜，7 分鐘後被強制收卡（其實都還在讀資料）。
+sub_ids: dict[tuple[str, str], str] = {}
 
 
 def stays_put(aid: str) -> bool:
@@ -1565,17 +1575,34 @@ def pick_sub_npc(parent: str, name: str) -> str | None:
     return free[0] if free else None
 
 
-async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
+def sub_parent(npc: str) -> str | None:
+    """這個 NPC 現在在支援誰（主 agent）；沒在支援回 None。"""
+    return next((k[0] for k, q in sub_active.items() if npc in q), None)
+
+
+def take_sub(parent: str, name: str, sub_id: str = "") -> str | None:
+    """交件時取出演那個子 agent 的 NPC：有 id 就取那一個，沒有（或對不上）照舊按名字 FIFO。"""
+    queue = sub_active.get((parent, name)) or []
+    npc = sub_ids.pop((parent, sub_id), None) if sub_id else None
+    if npc not in queue:
+        npc = queue[0] if queue else None
+    if npc is not None:
+        queue.remove(npc)
+        for key in [k for k, v in sub_ids.items() if v == npc and k[0] == parent]:
+            sub_ids.pop(key, None)
+    if not queue:
+        sub_active.pop((parent, name), None)
+    return npc
+
+
+async def finish_sub(parent: str, name: str, ok: bool, detail: str, sub_id: str = "") -> bool:
     """收掉一張委派卡：主 agent 回位、支援者解除忙碌、關卡、冒泡、記錄。
     找不到對應的人就回 False（沒開成卡，交給呼叫端退回主 agent 冒泡）。
 
     兩條路徑共用：同步 spawn 的 result，以及 background spawn 之後 subagent_await 的收件。
     先前只有前者，於是背景派工的卡片是靠【啟動回執】關掉的——關錯了時機。
     """
-    queue = sub_active.get((parent, name)) or []
-    npc = queue.pop(0) if queue else None
-    if not queue:
-        sub_active.pop((parent, name), None)
+    npc = take_sub(parent, name, sub_id)
     if npc is None:
         return False
     # 交付戲：收件【成功】時，支援者面向站在自己桌邊的主 agent 把成果遞出去——
@@ -1623,7 +1650,7 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str) -> bool:
     return True
 
 
-async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
+async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: str = "") -> bool:
     """子 agent 事件分流；回傳 True＝已投影完畢（主流程不再處理）。"""
     spawn = SPAWN_RE.match(label)
     if spawn:
@@ -1634,6 +1661,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             if npc is None:
                 return False  # 沒人有空：主 agent 頭上冒泡就好
             sub_active.setdefault((parent, name), []).append(npc)
+            if sub_id:
+                sub_ids[(parent, sub_id)] = npc
             busy.add(npc)
             sub_since[npc] = time.monotonic()
             notify("roster")
@@ -1667,7 +1696,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             # 真正的收件在 subagent_await 的結果那裡（見下面 AWAIT 分支）。
             if BG_ACK_RE.match(detail or ""):
                 return True
-            return await finish_sub(parent, name, kind == "result", detail)
+            return await finish_sub(parent, name, kind == "result", detail, sub_id)
         return True  # spawn 的其他事件不投影
 
     # subagent_await 的結果＝背景子 agent 的【真正】交件。一次可能收好幾個人，
@@ -1688,7 +1717,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
             # （「⚪ 已結束（失敗：…）」）整句都在同一行、沒有換行，就整句留著。
             seg = detail[m.end():end]
             own = (seg.split("\n", 1)[1] if "\n" in seg else seg).strip() or m.group(0)
-            if await finish_sub(parent, m.group(1), m.group(2) == "✅", own):
+            # 一則通知只交一個人（CLI 的 task_notification）時帶著 id；cogito 一次收好幾個人，照名字
+            if await finish_sub(parent, m.group(1), m.group(2) == "✅", own, sub_id if len(hits) == 1 else ""):
                 done = True
         return done
     sub = SUB_RE.match(label)
@@ -1696,7 +1726,10 @@ async def project_sub(parent: str, kind: str, label: str, detail: str) -> bool:
         queue = sub_active.get((parent, sub.group(1) or "")) or []
         if not queue:
             return False  # 沒開成卡：退回主 agent 帶小名冒泡
-        npc = queue[0]    # 同名並行時分不出是哪個兄弟送來的，一律掛第一個（見 sub_active 的說明）
+        npc = sub_ids.get((parent, sub_id)) if sub_id else None
+        if npc not in queue:
+            npc = queue[0]    # 沒有 id（cogito）：同名並行時分不出是哪個兄弟送來的，一律掛第一個（見 sub_active 的說明）
+        sub_since[npc] = time.monotonic()   # 有動靜：逾時保險從這裡重新計時（#14）
         stripped = SUB_RE.sub("", label)
         text = office_bubble(kind, stripped)
         if text:
@@ -2050,7 +2083,7 @@ async def office_event(ev: dict):
 
     if kind in ("tool", "result", "error"):   # 要在 project_sub 之前：子 agent 的事件在那裡就被接走了
         note_evidence(aid, kind, label, str(ev.get("detail") or ""))
-    if await project_sub(aid, kind, label, ev.get("detail", "")):
+    if await project_sub(aid, kind, label, ev.get("detail", ""), str(ev.get("sub_id") or "")):
         return {"ok": True}
 
     # 審批逾時（自動拒絕）後工作恢復：人還杵在老闆房門口，看到工具事件就自己回工位
@@ -3409,36 +3442,39 @@ def cli_events(d: dict, tool_names: dict[str, str], subs: dict | None = None) ->
         if st == "task_started" and d.get("tool_use_id"):
             name = slug_to_name(str(d.get("subagent_type") or ""))
             subs[str(d["tool_use_id"])] = {"name": name, "text": ""}
-            out.append({"kind": "tool", "label": f"spawn_subagent:{name}", "detail": str(d.get("description") or "")[:400]})
+            out.append({"kind": "tool", "label": f"spawn_subagent:{name}", "detail": str(d.get("description") or "")[:400],
+                        "sub_id": str(d["tool_use_id"])})
         elif st == "task_notification" and str(d.get("tool_use_id")) in subs:
             sub = subs.pop(str(d["tool_use_id"]))
             ok = str(d.get("status") or "") == "completed"
             head = (f"背景子 agent {d.get('task_id') or '-'} [{sub['name']}]：✅ 已完成\n" if ok
                     else f"背景子 agent {d.get('task_id') or '-'} [{sub['name']}]：⚪ 已結束（失敗：{d.get('status')}）")
-            out.append({"kind": "result", "label": "subagent_await", "detail": head + (sub["text"] if ok else "")})
+            out.append({"kind": "result", "label": "subagent_await", "detail": head + (sub["text"] if ok else ""),
+                        "sub_id": str(d["tool_use_id"])})
         return out
     if parent and str(parent) in subs:   # 子 agent 自己的事件：掛到扮演它的人身上
         name = subs[str(parent)]["name"]
+        tag = {"sub_id": str(parent)}   # 同名並行時靠它分得出是哪一個（#14）
         if (mu := str((d.get("message") or {}).get("model") or "")) and "model" not in subs[str(parent)]:
             subs[str(parent)]["model"] = mu   # 實際跑的，不是主 agent 要求的——兩者不一致時信這個
-            out.append({"kind": "msg", "label": f"[Subagent:{name}] 🧠 模型：{mu}", "sub_model": mu, "sub_name": name})
+            out.append({"kind": "msg", "label": f"[Subagent:{name}] 🧠 模型：{mu}", "sub_model": mu, "sub_name": name, **tag})
         for c in (d.get("message") or {}).get("content") or []:
             if not isinstance(c, dict):
                 continue
             if c.get("type") == "tool_use":
                 tool_names[str(c.get("id", ""))] = str(c.get("name", "tool"))
                 out.append({"kind": "tool", "label": f"[Subagent:{name}] {c.get('name', 'tool')}",
-                            "detail": json.dumps(c.get("input"), ensure_ascii=False)})
+                            "detail": json.dumps(c.get("input"), ensure_ascii=False), **tag})
             elif c.get("type") == "tool_result":
                 body = c.get("content")
                 if isinstance(body, list):
                     body = " ".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
                 out.append({"kind": "error" if c.get("is_error") else "result",
                             "label": f"[Subagent:{name}] {tool_names.get(str(c.get('tool_use_id', '')), 'tool')}",
-                            "detail": str(body or "")[:400]})
+                            "detail": str(body or "")[:400], **tag})
             elif c.get("type") == "text" and str(c.get("text", "")).strip():
                 subs[str(parent)]["text"] = c["text"]   # 最後一段文字＝它的交付
-                out.append({"kind": "msg", "label": f"[Subagent:{name}] {c['text']}"})
+                out.append({"kind": "msg", "label": f"[Subagent:{name}] {c['text']}", **tag})
         return out
     if t == "assistant":
         for c in (d.get("message") or {}).get("content") or []:
@@ -3468,7 +3504,7 @@ def cli_events(d: dict, tool_names: dict[str, str], subs: dict | None = None) ->
                     # 前景子 agent：這個 tool_result 就是交件（背景的走 task_notification）
                     sub = subs.pop(tid)
                     out.append({"kind": "error" if c.get("is_error") else "result",
-                                "label": f"spawn_subagent:{sub['name']}", "detail": str(body or "")[:400]})
+                                "label": f"spawn_subagent:{sub['name']}", "detail": str(body or "")[:400], "sub_id": tid})
                 continue   # 背景啟動回執「Async agent launched…」不是交件，不投影
             out.append({"kind": "error" if c.get("is_error") else "result",
                         "label": tool_names.get(tid, "tool"),
