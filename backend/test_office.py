@@ -4374,10 +4374,13 @@ for i, o in enumerate(out):
                     if k and k.get("id") != before and "p01" in main.busy and k["status"] == "working":
                         seen_open = True; break
                 assert seen_open, "背景子 agent 還在跑時，看板卡就該開著、小美該在支援中"
-                for _ in range(100):
+                # 看板派的子 agent 在會議中交件不當場解除忙碌，等看板收工時散會（adjourn）才放；收工處理是先關卡、
+                # 再經過幾次 await 才散會——所以「卡完成」與「小美放開」之間有一小段，兩個條件要一起等，
+                # 不能看到卡完成就立刻斷言（高負載下 10 次紅 1 次，2026-10-07 重現）。
+                for _ in range(200):
                     time.sleep(0.05)
                     k = main.last_report.get("kanban")
-                    if k and k.get("id") != before and k["status"] != "working":
+                    if k and k.get("id") != before and k["status"] != "working" and "p01" not in main.busy:
                         break
                 assert k["status"] == "ok", k
                 assert "p01" not in main.busy, "小美交件後該解除忙碌"
