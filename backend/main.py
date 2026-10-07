@@ -4035,6 +4035,9 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
     return out
 
 
+CODEX_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")   # 讀不到型號清單時，長得像型號名稱的才收
+
+
 def codex_model_list() -> list[dict]:
     """Codex 可選的模型：讀 Codex 自己的 models_cache.json（它向 OpenAI 拿、依帳號方案過濾過的清單），
     只列 visibility=list 的、照 priority 排。員工的 CODEX_HOME 還沒跑過就退回你本人的 ~/.codex 那份；都沒有就空（選單只剩「Codex 預設」）。"""
@@ -5802,14 +5805,21 @@ async def office_dispatch(d: dict):
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         if codex_mode:
+            model_note: tuple = ()
             # 模型：外殼這次選的 > 上次替 Codex 選過的（記住）> 交給 run_codex_task（接續那條 thread 的模型 > OFFICE_CODEX_MODEL > Codex 預設）。
             # 辦公室預設是 Claude 的 claude-opus-5[1m]，Claude 型號一律不送給 Codex。「還原」＝收回選過的。
             if pick == MODEL_RESET:
                 codex_model_sent.pop(aid, None)
                 _dirty = True
             elif pick and not pick.startswith("claude"):
-                codex_model_sent[aid] = pick
-                _dirty = True
+                # 只收 Codex 自己清單上的型號（稽核 #13：以前只排除 claude 開頭，什麼字串都往 -m 送）；清單讀不到
+                # （員工的 Codex 還沒跑過）就只收長得像型號的。不收的不換、沿用，卡上講一句——同思考力度的作法
+                known = [m["id"] for m in codex_model_list()]
+                if (pick in known) if known else CODEX_MODEL_RE.fullmatch(pick):
+                    codex_model_sent[aid] = pick
+                    _dirty = True
+                else:
+                    model_note = (f"ℹ Codex 的型號清單沒有「{pick[:40]}」，這次沿用 {codex_model_sent.get(aid) or 'Codex 預設型號'}",)
             codex_want = codex_model_sent.get(aid, "")
             if epick == MODEL_RESET:
                 codex_effort_pick.pop(aid, None)
@@ -5818,8 +5828,8 @@ async def office_dispatch(d: dict):
                 codex_effort_pick[aid] = epick
                 _dirty = True
             eff = codex_effort_for(aid, codex_want)
-            notes = ((f"ℹ {codex_want or 'Codex 預設型號'} 不收思考力度 {codex_effort_pick[aid]}，這次用它自己的預設",)
-                     if codex_effort_pick.get(aid) and not eff else ())
+            notes = model_note + ((f"ℹ {codex_want or 'Codex 預設型號'} 不收思考力度 {codex_effort_pick[aid]}，這次用它自己的預設",)
+                                  if codex_effort_pick.get(aid) and not eff else ())
             asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want, "effort": eff}
         if pick == MODEL_RESET:

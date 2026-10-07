@@ -996,7 +996,7 @@ async function roster() {
       <div class="team">${esc(t)}<small>${teams.get(t).length}</small></div>
       ${teams.get(t).map(id => {
         const a = d[id];
-        return `<div class="emp ${id === selected ? 'sel' : ''}" data-id="${id}" onclick="pick('${id}')">
+        return `<div class="emp ${id === selected ? 'sel' : ''}" data-id="${id}" onclick="pick(${jsa(id)})">
           <img class="face" src="/avatars/${id}.png" alt=""
                onerror="this.replaceWith(Object.assign(document.createElement('span'),
                         {className:'face ph', textContent:'${esc(a.name[0])}'}))">
@@ -1032,16 +1032,16 @@ async function memocard(id) {
       <span class="txt">${it.op ? `<span class="op">${esc(it.op.toUpperCase())}</span>` : ''}${esc(it.text)}
         ${it.meta.length ? `<div class="why">${esc(it.meta.join('　'))}</div>` : ''}</span>
       ${r.can_apply ? `<span class="acts">
-        <button onclick="memoAct('${id}', 'apply', [${it.n}])">放行</button>
-        <button onclick="memoAct('${id}', 'reject', [${it.n}])">丟棄</button>
+        <button onclick="memoAct(${jsa(id)}, 'apply', [${it.n}])">放行</button>
+        <button onclick="memoAct(${jsa(id)}, 'reject', [${it.n}])">丟棄</button>
       </span>` : ''}
     </div>`).join('');
   box.innerHTML = `<summary>💡 待審記憶提案<small>${r.items.length} 條</small></summary>`
     + `<div class="say" id="memoSay"></div>`
     + (r.can_apply
         ? `<div class="bulk">
-             <button onclick="memoAct('${id}', 'apply', [])">全部放行</button>
-             <button onclick="memoAct('${id}', 'reject', [])">全部丟棄</button>
+             <button onclick="memoAct(${jsa(id)}, 'apply', [])">全部放行</button>
+             <button onclick="memoAct(${jsa(id)}, 'reject', [])">全部丟棄</button>
              <span class="warn">放行＝寫進長期記憶；丟棄不可復原</span>
            </div>`
         : `<div class="bulk"><span class="warn">cogito 沒在跑——提案存在它的工作區，`
@@ -1115,7 +1115,7 @@ function rosterState(a, id) {
   // 頭上掛不了徽章（emote() 對 KANBAN 直接 return）。
   const memo = a.memo
     ? `<span class="memo" title="${a.memo} 條待審記憶提案——點開來逐條放行或丟棄"
-             onclick="event.stopPropagation(); openMemo('${id}')">💡${a.memo}</span>`
+             onclick="event.stopPropagation(); openMemo(${jsa(id)})">💡${a.memo}</span>`
     : '';
   // 有例行工作的人：一眼看得出誰是有班表的員工；細節在檔案卡
   const sched = a.scheduled ? `<span class="memo" title="${a.scheduled} 條班表——點開檔案卡看時間與交付">🗓</span>` : '';
@@ -2240,13 +2240,13 @@ async function inboxcard() {
       // 收件匣不給一鍵核准（稽核 #5）：這裡只放得下一行參數，看不完整就不該能簽。點「查看」到那個人的完整審批卡決定
       const btns = t.from
         ? `<span class="ihint">↩︎ 來自 ${esc(t.from)}，請回原平台核准</span>`
-        : `<button class="yes" onclick="event.stopPropagation(); pick('${t.agent}')">查看</button>`;
+        : `<button class="yes" onclick="event.stopPropagation(); pick(${jsa(t.agent)})">查看</button>`;
       row.innerHTML = `<span class="ileft" data-left="${t.left_s}" data-t0="${Date.now()}"></span>
-        <span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+        <span class="iwho" onclick="pick(${jsa(t.agent)})">${esc(t.name)}</span>
         <span class="iwhat">⏳ 審批 <b>${esc(t.tool)}</b> <code>${esc((t.params || '').slice(0, 90))}</code></span>${btns}`;
     } else if (t.kind === 'missed') {
       // 橋在到點時沒開著：補不補是老闆的決定。今天那份已經在了橋會拒（fire_job 守門），不會重跑
-      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick(${jsa(t.agent)})">${esc(t.name)}</span>
         <span class="iwhat">🗓 ${esc(t.text)}</span>`;
       // 班表名稱帶中文、id 帶日期與引號：不能塞進 onclick="…" 字串——JSON 的雙引號會把屬性截斷，
       // 整顆鈕變成語法錯誤、按了沒反應（實際回報）。用事件綁定，值不經過 HTML。
@@ -2257,7 +2257,7 @@ async function inboxcard() {
       row.append(go, no);
     } else if (t.kind === 'permit') {
       // 常駐許可：要簽的就是那一條規則，短、整條照登（.full 換行不截斷；不像審批參數放不下），所以這裡可以直接批
-      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick(${jsa(t.agent)})">${esc(t.name)}</span>
         <span class="iwhat full" title="${esc('上次的請求：' + (t.example || ''))}">🔑 想要 <code>${esc(t.rule)}</code>・${esc(t.text)}</span>`;
       const go = document.createElement('button'); go.className = 'yes'; go.textContent = '✓ 以後都准';
       go.title = `加進${t.name}的常駐許可（只給這一位），下次不必再問`;
@@ -2266,13 +2266,13 @@ async function inboxcard() {
       no.onclick = e => { e.stopPropagation(); permit(t.agent, t.rule, 'dismiss'); };
       row.append(go, no);
     } else if (t.kind === 'review') {   // 驗收要看證據：跟審批一樣不給一鍵通過，點「查看」到那張卡
-      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick(${jsa(t.agent)})">${esc(t.name)}</span>
         <span class="iwhat">📦 ${esc(t.text)}</span>
-        <button class="yes" onclick="event.stopPropagation(); pick('${t.agent}'); openCard('${t.agent}', ${+t.card})">查看</button>`;
+        <button class="yes" onclick="event.stopPropagation(); pick(${jsa(t.agent)}); openCard(${jsa(t.agent)}, ${+t.card})">查看</button>`;
     } else {
-      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick('${t.agent}')">${esc(t.name)}</span>
+      row.innerHTML = `<span class="ileft"></span><span class="iwho" onclick="pick(${jsa(t.agent)})">${esc(t.name)}</span>
         <span class="iwhat">🗓 ${esc(t.text)}</span>
-        <button class="yes" onclick="event.stopPropagation(); dispatchFor('${t.agent}', '開工。照板子推進，先做相依都滿足的票，最多 3 人並行。')">開工</button>`;
+        <button class="yes" onclick="event.stopPropagation(); dispatchFor(${jsa(t.agent)}, '開工。照板子推進，先做相依都滿足的票，最多 3 人並行。')">開工</button>`;
     }
     box.appendChild(row);
   }
@@ -2428,7 +2428,7 @@ async function auditcard(id) {
   const v = r.verify || {};
   const chain = v.ok ? `鏈完整・共 ${v.entries} 筆` : `⚠ 鏈在第 ${v.broken_at} 筆斷了：${v.reason || ''}`;
   box.innerHTML = `<summary>🧾 稽核帳本<small>${r.items.length} 筆・${esc(chain)}</small>
-    <span class="wdbtn" title="封存整本（全員）：改名歸檔、不刪，新本第一筆記下上一本的檔名與最後 hash" onclick="event.preventDefault(); event.stopPropagation(); archiveLedger('${id}');">📦 封存</span></summary>`;
+    <span class="wdbtn" title="封存整本（全員）：改名歸檔、不刪，新本第一筆記下上一本的檔名與最後 hash" onclick="event.preventDefault(); event.stopPropagation(); archiveLedger(${jsa(id)});">📦 封存</span></summary>`;
   box.open = localStorage.auditOpen === '1';
   for (const e of r.items) {
     const what = e.tool || e.task || e.target || e.text || e.why || e.reason || e.detail || '';
@@ -3549,6 +3549,9 @@ async function feed() {
 }
 
 const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// 行內 onclick="…" 裡要放字串（員工 ID、範本代碼）時用它：JSON 轉成合法的 JS 字串字面值、再 HTML 跳脫——
+// 不管值裡有什麼引號都只會是一個字串，不會變成程式碼（稽核 #13：以前是 '${id}' 直接塞，靠 ID 恰好是乾淨的）
+const jsa = v => esc(JSON.stringify(String(v ?? '')));
 
 // 審批卡的參數：多半是 {"command":"…"} 這種單鍵 JSON——直接給指令本體，包一層 JSON
 // 對簽名的人只是雜訊。其他形狀就縮排排開；連 JSON 都不是（被截斷等）就原樣顯示。
@@ -3709,7 +3712,7 @@ function wizTabs() {
   if (!el) return;
   el.innerHTML = wizOrder().map(id => {
     const m = wiz.members[id];
-    return `<div class="tab${id === wiz.cur ? ' sel' : ''}${wizMissing(id) ? ' bad' : ''}" onclick="wiz.cur='${id}'; wizRender()">${wizFace(id)}
+    return `<div class="tab${id === wiz.cur ? ' sel' : ''}${wizMissing(id) ? ' bad' : ''}" onclick="wiz.cur=${jsa(id)}; wizRender()">${wizFace(id)}
       <div><div>${esc(m.name || '（未命名）')}</div><div class="sl">${esc(slotOf(id).label)}</div></div></div>`;
   }).join('');
 }
@@ -3721,7 +3724,7 @@ function wizRender() {
   $('wizNext').hidden = wiz.step === 0;
   const b = $('wizBody');
   if (wiz.step === 0) {
-    const cards = wiz.templates.map(t => `<div class="tpl${wiz.template === t.key ? ' sel' : ''}" onclick="wizUse('${t.key}')">
+    const cards = wiz.templates.map(t => `<div class="tpl${wiz.template === t.key ? ' sel' : ''}" onclick="wizUse(${jsa(t.key)})">
         <b>${esc(t.title)}</b><p>${esc(t.description)}</p><div class="n">${Object.keys(t.members).length} 個工位</div></div>`);
     if (wiz.configured) cards.unshift(`<div class="tpl" onclick="wizUse('__current')"><b>目前的團隊</b><p>從現在的設定開始調整。</p><div class="n">${wiz.on.size} 人</div></div>`);
     cards.push(`<div class="tpl" onclick="wizUse('__blank')"><b>從空白開始</b><p>自己決定每個位子坐誰。</p></div>`);
@@ -3731,18 +3734,18 @@ function wizRender() {
     b.innerHTML = `<div class="lead">辦公室有 ${wiz.slots.length} 個固定工位，外觀與座位都是固定的；勾選要啟用的位子。沒啟用的位子，角色會從畫面上藏起來。</div>
       <div class="slotgrid">${wiz.slots.map(s => {
         const on = wiz.on.has(s.id), m = wiz.members[s.id];
-        return `<div class="slot${on ? ' sel' : ' off'}" onclick="wizToggle('${s.id}')">${wizFace(s.id)}
+        return `<div class="slot${on ? ' sel' : ' off'}" onclick="wizToggle(${jsa(s.id)})">${wizFace(s.id)}
           <div><div class="sl">${esc(s.label)}${s.fixed ? '・固定崗位' : ''}</div>
           <div class="sn">${on ? esc((m && m.name) || '（新成員）') : '（空位）'}</div>
           <div class="sr">${on && m ? esc(m.role || '') : ''}</div></div>
-          <input type="checkbox" ${on ? 'checked' : ''} onclick="event.stopPropagation(); wizToggle('${s.id}')" aria-label="啟用 ${esc(s.label)}"></div>`;
+          <input type="checkbox" ${on ? 'checked' : ''} onclick="event.stopPropagation(); wizToggle(${jsa(s.id)})" aria-label="啟用 ${esc(s.label)}"></div>`;
       }).join('')}</div>
       <div class="wizcount">已選 ${wiz.on.size} / ${wiz.slots.length} 個工位。第 ${wiz.slots.length + 1} 個人要在 Unity 新增角色與座位，這裡加不了。</div>`;
   } else if (wiz.step === 2) {
     if (!wiz.on.has(wiz.cur)) wiz.cur = wizOrder()[0];
     const m = wiz.members[wiz.cur], s = slotOf(wiz.cur);
-    const field = (k, label, ph = '') => `<label>${label}</label><input value="${esc(m[k] || '')}" placeholder="${esc(ph)}" oninput="wizSet('${k}', this.value)">`;
-    const area = (k, label, ph = '', rows = 3) => `<label>${label}</label><textarea rows="${rows}" placeholder="${esc(ph)}" oninput="wizSet('${k}', this.value)">${esc(m[k] || '')}</textarea>`;
+    const field = (k, label, ph = '') => `<label>${label}</label><input value="${esc(m[k] || '')}" placeholder="${esc(ph)}" oninput="wizSet(${jsa(k)}, this.value)">`;
+    const area = (k, label, ph = '', rows = 3) => `<label>${label}</label><textarea rows="${rows}" placeholder="${esc(ph)}" oninput="wizSet(${jsa(k)}, this.value)">${esc(m[k] || '')}</textarea>`;
     b.innerHTML = `<div class="wizppl"><div class="wiztabs" id="wizTabList"></div>
       <div class="wizform"><div class="lead" style="margin-bottom:8px">${esc(s.label)}${s.fixed ? '（固定崗位：不走位、不進自動指派）' : ''}</div>
         <div class="row2"><div>${field('name', '名字 *', '例：阿哲')}</div><div>${field('role', '職務 *', '例：後端工程師')}</div></div>

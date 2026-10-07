@@ -4188,6 +4188,12 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 run({"text": "給了 Claude 型號", "model": "claude-opus-5[1m]"})
                 a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
                 assert a[a.index("-m") + 1] == "gpt-luna", f"Claude 型號不該送給 Codex：{a}"
+                # 清單上沒有的不收（稽核 #13）：隱藏的、亂打的都沿用上一次，卡上講一句
+                for bad in ("gpt-hidden", "gpt-luna; rm -rf ~", "不存在的型號"):
+                    card_bad = run({"text": "選了清單外的", "engine": "codex", "model": bad})
+                    a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                    assert a[a.index("-m") + 1] == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", (bad, a)
+                    assert any("型號清單沒有" in e["text"] for e in card_bad["events"]), [e["text"] for e in card_bad["events"]][-3:]
                 run({"text": "還原", "model": main.MODEL_RESET})
                 a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
                 assert a[a.index("-m") + 1] == "gpt-test-model" and "p05" not in main.codex_model_sent, f"還原後回到接續那條的模型：{a}"

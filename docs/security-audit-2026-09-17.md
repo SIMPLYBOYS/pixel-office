@@ -24,7 +24,7 @@
 | 10 | Medium | 模型輸出只要以審批標頭開頭就會變成審批卡 | 程式（✅ 已修） |
 | 11 | Medium | 稽核帳本：無金鑰雜湊、截掉尾巴驗證仍通過；封存端點無驗證且可被跨站 POST 觸發 | 測試 |
 | 12 | Medium | 供應鏈：jobspy 未釘 commit、104 MCP 版本在安裝時取最新、cycletls 附帶原生執行檔 | 腳本與快取（🟡 部分） |
-| 13 | Low | 程式碼區塊語言寫 `constructor` 會讓工作串停止更新；/shell 沒有防框架嵌入；`/office/permission` 可冒名佔住審批佇列；Codex `-m` 驗證較鬆 | 測試／程式（🟡 部分） |
+| 13 | Low | 程式碼區塊語言寫 `constructor` 會讓工作串停止更新；/shell 沒有防框架嵌入；`/office/permission` 可冒名佔住審批佇列；Codex `-m` 驗證較鬆 | 測試／程式（🟡 部分：只剩 `/office/permission` 冒名，見 #16） |
 
 ---
 
@@ -149,9 +149,9 @@
 ## Low
 - 程式碼區塊語言為 `constructor`／`__proto__` 時語法上色會丟例外，工作串的播放佇列卡住直到重新整理。修法：用 `Object.hasOwn` 並在佇列迴圈加 try/finally。**已修（第一批）**：查表改 `Object.hasOwn`、快取用無原型物件；`drain()` 單則失敗只略過該則、`finally` 一定解除鎖。以 node 抽出上色函式驗證：修正前 `constructor`／`toString`／`__proto__` 等丟 `re.exec is not a function`，修正後全數正常。
 - `/shell` 沒有 `frame-ancestors`，理論上可被框架嵌入誘導點擊核准（依瀏覽器限制，未驗證）。**已修（第一批）**：`/shell`、`/unity` 加 `Content-Security-Policy: frame-ancestors 'self'` 與 `X-Frame-Options: SAMEORIGIN`，測試涵蓋。
-- `/office/permission` 以請求裡的 cwd 認人，同機程式可冒名送出假審批、佔住該員工佇列到逾時。
-- Codex 的 `-m` 只排除 claude 開頭，未比對 Codex 清單（argv 形式，無參數注入）。
-- 外殼少數 onclick 字串內嵌員工 ID（來源是人設檔名，目前不可被 agent 控制，屬縱深防禦）。
+- `/office/permission` 以請求裡的 cwd 認人，同機程式可冒名送出假審批、佔住該員工佇列到逾時。**待設計，追蹤在 issue #16。**
+- Codex 的 `-m` 只排除 claude 開頭，未比對 Codex 清單（argv 形式，無參數注入）。**已修（2026-10-07）**：只收 Codex 型號清單上的；清單讀不到時只收長得像型號名稱的；不收的沿用上一次，卡上寫一句。
+- 外殼少數 onclick 字串內嵌員工 ID（來源是人設檔名，目前不可被 agent 控制，屬縱深防禦）。**已修（2026-10-07）**：22 處改用 `jsa()`（JSON 字串字面值＋HTML 跳脫），值裡有什麼引號都只會是字串。
 
 ---
 
