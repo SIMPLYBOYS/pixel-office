@@ -2195,6 +2195,8 @@ async def office_event(ev: dict):
             card = last_report.get(aid)
             if card and label != "ok" and ev.get("detail"):
                 card["report"] = card["report"] or ev["detail"]
+                if card.get("engine") == ENGINE_CLI and CLI_AUTH_FAIL_RE.search(str(ev["detail"])):
+                    note_cli_auth_failure(aid, str(ev["detail"]))
             if card and cost:
                 card["cost"] = cost  # **card 攤平：report / history 自動帶到外殼
             # 主 agent 實際跑的模型。沒有它，花費就沒有分母——$0.0231 是 haiku 跑十輪
@@ -4930,6 +4932,131 @@ def inbox_items(limit: int = 60) -> dict:
             break
     # 水位看磁碟檔尾：橋重啟後到第一筆 audit() 之前 _audit_last 還是 0，外殼拿 0 當「全讀／清除」的水位就什麼都藏不掉（實際回報）
     return {"ok": True, "todo": todo, "recent": recent, "max_seq": _audit_disk_tail()[0]}
+
+
+# ── 員工 Claude Code 的登入（CLAUDE_CONFIG_DIR，~/.claude-office）：過期了所有走 CLI 的員工與班表都跑不動 ──────────
+# 2026-10-07 實例：老徐的任務中斷「Failed to authenticate: OAuth session expired and could not be refreshed」。以前只能叫老闆
+# 自己去終端機 `CLAUDE_CONFIG_DIR=~/.claude-office claude auth login`。現在外殼上一條提示、一顆鈕，橋代跑那支指令：
+# 它開瀏覽器（授權完自動接回本機），網址也放在外殼上；接不回時授權頁會給一串代碼，外殼貼上、橋轉給它的 stdin。
+# 代碼與憑證都不落地、不落帳——只過一手，存憑證是 Claude Code 自己的事。
+CLI_AUTH_TTL = 120.0
+CLI_AUTH_FAIL_RE = re.compile(r"Failed to authenticate|OAuth session expired|OAuth token (?:has )?expired|Not logged in|"
+                              r"Please run /login|Invalid API key|authentication_error", re.I)
+CLI_LOGIN_URL_RE = re.compile(r"visit:\s*(https://\S+)")
+CLI_LOGIN_CODE_RE = re.compile(r"[A-Za-z0-9#_\-.~=+/]{10,800}")
+CLI_LOGIN_TIMEOUT = 900.0
+cli_auth: dict = {"at": 0.0, "status": None}   # status：{loggedIn, method, why?}；None＝沒問過或問不到
+cli_login: dict = {}                            # proc, url, started, done, ok, message, out
+
+
+async def cli_auth_status(force: bool = False) -> dict | None:
+    """`claude auth status --json`（不叫模型、不花額度），快取 CLI_AUTH_TTL 秒。問不到就回 None——不表態，不假裝登入了。"""
+    if not cli_available():
+        return None
+    now = time.monotonic()
+    if not force and cli_auth["at"] and now - cli_auth["at"] < CLI_AUTH_TTL:
+        return cli_auth["status"]
+    try:
+        proc = await asyncio.create_subprocess_exec(CLI_CMD, "auth", "status", "--json", env=agent_env(),
+                                                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        out = (await asyncio.wait_for(proc.communicate(), 20))[0].decode("utf-8", "replace")
+        d = json.loads(out[out.index("{"):])
+        st: dict | None = {"loggedIn": bool(d.get("loggedIn")), "method": str(d.get("authMethod") or "")}
+    except (OSError, ValueError, asyncio.TimeoutError):
+        st = None
+    cli_auth.update(at=now, status=st)
+    return st
+
+
+def note_cli_auth_failure(aid: str, detail: str) -> None:
+    """CLI 任務因為登入失效而中斷：不必等下一輪查狀態，外殼的提示馬上掛出來。"""
+    if (cli_auth.get("status") or {}).get("loggedIn") is False:
+        return   # 已經掛著了：同一個原因一個早上會中斷好幾個人，帳記一次就好
+    cli_auth.update(at=time.monotonic(), status={"loggedIn": False, "method": "", "why": detail[:200]})
+    audit("auth.expired", aid, engine=ENGINE_CLI, detail=detail[:200])
+    log_ev(aid, "🔑 員工的 Claude Code 登入過期了——外殼上方按「重新登入」，好了再補跑這張")
+    notify("roster")
+
+
+def cli_login_view() -> dict:
+    proc = cli_login.get("proc")
+    return {"running": bool(proc and proc.returncode is None), "url": cli_login.get("url", ""),
+            "done": bool(cli_login.get("done")), "ok": cli_login.get("ok"), "message": cli_login.get("message", "")}
+
+
+async def watch_cli_login(proc: asyncio.subprocess.Process) -> None:
+    """讀登入指令的輸出：抓出網址給外殼；它結束了就重問一次狀態。輸出沒換行（「Paste code here if prompted > 」）所以逐塊讀。"""
+    assert proc.stdout is not None
+    buf = ""
+    try:
+        async def pump() -> None:
+            nonlocal buf
+            while chunk := await proc.stdout.read(1024):
+                buf += chunk.decode("utf-8", "replace")
+                if not cli_login.get("url") and (m := CLI_LOGIN_URL_RE.search(buf)):
+                    cli_login["url"] = m.group(1)
+            await proc.wait()
+        await asyncio.wait_for(pump(), CLI_LOGIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        kill_tree(proc.pid)
+        buf += "\n登入等太久（15 分鐘），已取消"
+    if cli_login.get("proc") is not proc:
+        return   # 已經被新的一次取代
+    lines = [x.strip() for x in buf.replace("Paste code here if prompted >", "").splitlines() if x.strip()]
+    ok = proc.returncode == 0
+    st = await cli_auth_status(force=True)
+    ok = ok and bool(st and st.get("loggedIn"))
+    cli_login.update(done=True, ok=ok, message=(lines[-1] if lines else "")[:200])
+    audit("auth.login", "", engine=ENGINE_CLI, ok=ok, by="office-web", message=cli_login["message"])
+    notify("roster")
+
+
+@app.get("/office/auth")
+async def office_auth():
+    """員工 Claude Code 的登入狀態＋進行中的重新登入。外殼每分鐘問一次；橋自己快取，不會每次都去跑 CLI。"""
+    return {"ok": True, "cli": await cli_auth_status(), "login": cli_login_view()}
+
+
+@app.post("/office/auth/login")
+async def office_auth_login(d: dict):
+    """start＝代跑 `claude auth login`（開瀏覽器）；code＝把授權頁給的代碼轉給它；cancel＝取消。"""
+    act = str(d.get("action") or "start")
+    proc = cli_login.get("proc")
+    running = bool(proc and proc.returncode is None)
+    if act == "start":
+        if not cli_available():
+            return {"ok": False, "error": "這台機器找不到 Claude Code（claude 指令）"}
+        if not running:
+            try:
+                proc = await asyncio.create_subprocess_exec(CLI_CMD, "auth", "login", "--claudeai", env=agent_env(),
+                                                            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                            stderr=asyncio.subprocess.STDOUT, cwd=tempfile.gettempdir())
+            except OSError as e:
+                return {"ok": False, "error": f"起不了登入指令：{e}"}
+            cli_login.clear()
+            cli_login.update(proc=proc, url="", started=time.time(), done=False, ok=None, message="")
+            asyncio.create_task(watch_cli_login(proc))
+            audit("auth.login_started", "", engine=ENGINE_CLI, by="office-web")
+        for _ in range(100):   # 網址通常一秒內就印出來
+            if cli_login.get("url") or proc.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        return {**cli_login_view(), "ok": True}   # 檢視裡的 ok 是「登入成功沒」，不能蓋掉這次呼叫的 ok
+    if act == "code":
+        code = str(d.get("code") or "").strip()
+        if not running or proc.stdin is None:
+            return {"ok": False, "error": "沒有進行中的登入，先按「重新登入」"}
+        if not CLI_LOGIN_CODE_RE.fullmatch(code):
+            return {"ok": False, "error": "代碼的格式不對：把授權頁上那一整串複製過來"}
+        proc.stdin.write((code + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+        return {**cli_login_view(), "ok": True}   # 檢視裡的 ok 是「登入成功沒」，不能蓋掉這次呼叫的 ok
+    if act == "cancel":
+        if running:
+            kill_tree(proc.pid)
+        return {"ok": True}
+    return {"ok": False, "error": "action 只能是 start、code 或 cancel"}
 
 
 @app.get("/office/inbox")

@@ -520,6 +520,7 @@ def run() -> None:
     audit_ledger()
     memory_ledger()
     notebooklm_mcp()
+    cli_relogin()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -2188,6 +2189,84 @@ elif a[0] == "quota": print(json.dumps({{"error": True, "code": "RATE_LIMITED", 
         out = rpc(init + [call(9, "publish", {"file": str(ws / "weekly.md")})], {"OFFICE_WORKSPACE_ROOT": ""})
         assert next(r for r in out if r.get("id") == 9)["result"]["isError"]
     print("  ✓ NotebookLM MCP：工作區內才收、兩段式、CLI 順序、pptx 格式、pending 不下載")
+
+
+def cli_relogin() -> None:
+    """員工 Claude Code 登入過期（2026-10-07 老徐中斷「OAuth session expired」）：CLI 任務因此中斷就掛提示、落帳；
+    外殼按「重新登入」＝橋代跑 `claude auth login`，抓出網址；代碼轉給它的 stdin；登好了狀態變回已登入。CLI 用假的。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "loggedin"
+        fake = Path(tmp) / "claude"
+        fake.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+st = {str(state)!r}
+a = sys.argv[1:]
+if a[:2] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": os.path.exists(st), "authMethod": "claude.ai" if os.path.exists(st) else "none"}})); sys.exit(0)
+if a[:2] == ["auth", "login"]:
+    print("Opening browser to sign in…"); print("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?x=1")
+    sys.stdout.write("Paste code here if prompted > "); sys.stdout.flush()
+    code = sys.stdin.readline().strip()
+    if code == "GOODCODE1234#state":
+        open(st, "w").write("1"); print("Login successful."); sys.exit(0)
+    print("Login failed: invalid code"); sys.exit(1)
+sys.exit(2)
+""", encoding="utf-8"); fake.chmod(0o755)
+        old_cmd, main.CLI_CMD = main.CLI_CMD, str(fake)
+        main.cli_auth.update(at=0.0, status=None); main.cli_login.clear()
+        aid = "p19"
+        try:
+            with TestClient(main.app) as c:
+                # ① 沒登入：狀態照實回
+                r = c.get("/office/auth").json()
+                assert r["cli"] == {"loggedIn": False, "method": "none"} and not r["login"]["running"], r
+                # ② CLI 任務因為登入失效中斷：提示馬上掛、落帳、卡上留一行（同一個原因不重複落帳）
+                main.cli_auth.update(at=0.0, status=None)
+                main.busy.discard(aid)
+                post(c, agent=aid, kind="start", label="每日趨勢", engine=main.ENGINE_CLI)
+                post(c, agent=aid, kind="done", label="error", detail="Failed to authenticate: OAuth session expired and could not be refreshed")
+                assert main.cli_auth["status"]["loggedIn"] is False and "OAuth session expired" in main.cli_auth["status"]["why"]
+                assert any(e["kind"] == "auth.expired" for e in main.audit_recent(aid, 3)), main.audit_recent(aid, 3)
+                assert any("重新登入" in e["text"] for e in main.last_report[aid]["events"][-3:])
+                n_audit = len(main.audit_recent("", 400))
+                main.note_cli_auth_failure(aid, "Failed to authenticate again")
+                assert len(main.audit_recent("", 400)) == n_audit, "同一個原因不重複落帳"
+                # ③ 重新登入：橋代跑、抓出網址；代碼格式不對擋下；對的代碼轉進去、登好了狀態翻回已登入、落帳
+                r = c.post("/office/auth/login", json={"action": "start"}).json()
+                assert r["ok"] and r["running"] and r["url"] == "https://claude.com/cai/oauth/authorize?x=1", r
+                assert c.post("/office/auth/login", json={"action": "code", "code": "x"}).json()["ok"] is False
+                assert c.post("/office/auth/login", json={"action": "code", "code": "GOODCODE1234#state"}).json()["ok"]
+                for _ in range(100):
+                    if main.cli_login.get("done"):
+                        break
+                    time.sleep(0.05)
+                v = c.get("/office/auth").json()
+                assert v["login"]["done"] and v["login"]["ok"] and v["cli"]["loggedIn"] is True, v
+                assert any(e["kind"] == "auth.login" and e.get("ok") is True for e in main.audit_recent("", 3)), main.audit_recent("", 3)
+                # ④ 錯的代碼：登不上、照實回；取消：行程收掉
+                state.unlink()
+                c.post("/office/auth/login", json={"action": "start"})
+                c.post("/office/auth/login", json={"action": "code", "code": "WRONGCODE999"})
+                for _ in range(100):
+                    if main.cli_login.get("done"):
+                        break
+                    time.sleep(0.05)
+                v = c.get("/office/auth").json()["login"]
+                assert v["done"] and v["ok"] is False and "invalid code" in v["message"], v
+                r = c.post("/office/auth/login", json={"action": "start"}).json()
+                assert r["running"]
+                assert c.post("/office/auth/login", json={"action": "cancel"}).json()["ok"]
+                for _ in range(100):
+                    if not main.cli_login_view()["running"]:
+                        break
+                    time.sleep(0.05)
+                assert not main.cli_login_view()["running"], "取消要真的把登入行程收掉"
+                assert c.post("/office/auth/login", json={"action": "code", "code": "GOODCODE1234#state"}).json()["ok"] is False
+        finally:
+            main.CLI_CMD = old_cmd
+            main.cli_auth.update(at=0.0, status=None); main.cli_login.clear(); main.busy.discard(aid)
+    print("  ✓ 員工重新登入：中斷就掛提示、代跑 claude auth login、代碼轉進去、狀態翻回、錯的與取消照實回")
 
 
 def approver_key_separation() -> None:
