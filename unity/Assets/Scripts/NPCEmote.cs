@@ -45,6 +45,9 @@ public class NPCEmote : MonoBehaviour
         sr.enabled = cur != null;
     }
 
+    /// 照現在的徽章決定要不要顯示（NPCAgent.SetVisible 把所有圖層打開之後用）。
+    public void Refresh() => sr.enabled = cur != null;
+
     void Update()
     {
         if (cur == null) return;

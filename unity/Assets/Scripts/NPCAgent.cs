@@ -71,5 +71,11 @@ public class NPCAgent : MonoBehaviour
         foreach (var r in GetComponentsInChildren<Renderer>(true)) r.enabled = on;
         foreach (var c in GetComponentsInChildren<Collider2D>(true)) c.enabled = on;
         foreach (var cv in GetComponentsInChildren<Canvas>(true)) cv.enabled = on;
+        if (!on) return;
+        // 上面一律打開，會把平常關著的圖層也打開：「...」泡泡（NPCMeeting 用 renderer 開關）會從此掛在頭上，
+        // 橋每次畫面連線都送 visible 1，於是全辦公室頭上都是「...」，看起來像在聊天（2026-10-08 實際回報）。
+        // 這兩個圖層的開關不歸這裡管：泡泡收回去，徽章照它自己的狀態。
+        if (meeting != null && meeting.bubble != null) meeting.bubble.enabled = false;
+        if (emote != null) emote.Refresh();
     }
 }
