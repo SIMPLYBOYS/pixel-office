@@ -5584,7 +5584,7 @@ async def office_verdict(d: dict):
     card = find_card(aid, cid) if isinstance(cid, int) and not isinstance(cid, bool) else None
     if v not in ("accepted", "changes"):
         return {"ok": False, "error": "verdict 只能是 accepted 或 changes"}
-    if card is None or card.get("verdict") != "pending":
+    if card is None or card.get("verdict") not in ("pending", "skipped"):   # 略過＝沒看，事後還能補驗
         return {"ok": False, "error": "那張卡不在待驗收（可能已經驗過了）"}
     card["verdict"], card["verdict_at"] = v, time.strftime("%m-%d %H:%M")
     if note:
@@ -5600,6 +5600,29 @@ async def office_verdict(d: dict):
     notify("agent", aid)
     await sync_emote(aid)
     return {"ok": True}
+
+
+@app.post("/office/verdict/skip")
+async def office_verdict_skip(d: dict):
+    """收件匣「全部略過」：老闆畫面上看到的那幾張待驗收一次收掉（cards＝[{agent, card}]，只認畫面上那幾張——
+    按下去的瞬間才進來的新交付不會被一起略過）。略過不是通過也不是要求修改：不進員工的記憶與人設回饋，
+    帳本每張記一筆 verdict=skipped；卡上照樣能事後補驗。"""
+    items = d.get("cards") if isinstance(d.get("cards"), list) else []
+    now, who, n = time.strftime("%m-%d %H:%M"), set(), 0
+    for x in items[:200]:
+        cid = x.get("card") if isinstance(x, dict) else None
+        aid = str(x.get("agent") or "") if isinstance(x, dict) else ""
+        card = find_card(aid, cid) if isinstance(cid, int) and not isinstance(cid, bool) else None
+        if card is None or card.get("verdict") != "pending":
+            continue   # 已經驗過、或不存在：跳過，不算錯——畫面可能慢了一拍
+        card["verdict"], card["verdict_at"] = "skipped", now
+        card["events"].append({"at": time.strftime("%H:%M:%S"), "text": "⏭ 老闆略過驗收"})
+        audit("task.verdict", aid, card=card["id"], task_id=card.get("task_id"), verdict="skipped", note="")
+        who.add(aid); n += 1
+    for aid in who:
+        notify("agent", aid)
+        await sync_emote(aid)
+    return {"ok": True, "skipped": n}
 
 
 def skill_frontmatter(path: Path) -> dict[str, str]:

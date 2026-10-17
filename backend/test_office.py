@@ -5534,6 +5534,29 @@ def _verdict_flow(aid: str, ws: Path) -> None:
         post(c, agent=aid, kind="done", label="ok")
         assert b2["verdict"] == "pending" and b2["tests"] == "passed" and b2["writes"] == ["app.py"], b2
         assert verdict(c, b2, "accepted")["ok"]
+        # ④b 收件匣「全部略過」：只略過送來的那幾張；不是通過也不是修改，帳上一筆、信封收掉、事後還能補驗
+        cards = []
+        for i in range(3):
+            post(c, agent=aid, kind="start", label=f"寫報告 {i}")
+            cards.append(main.last_report[aid])
+            post(c, agent=aid, kind="tool", label="Write", detail=json.dumps({"file_path": f"{ws}/r{i}.md"}))
+            post(c, agent=aid, kind="done", label="ok")
+        assert all(x["verdict"] == "pending" for x in cards) and main.want_emote(aid) == "mail"
+        mem0 = len(main.agents[aid].memory)
+        r = c.post("/office/verdict/skip", json={"cards": [{"agent": aid, "card": x["id"]} for x in cards[:2]]
+                                                 + [{"agent": aid, "card": b2["id"]}, {"agent": aid, "card": "1"}, "壞的"]}).json()
+        assert r == {"ok": True, "skipped": 2}, r   # 已定案的 b2、型別不對的、不是物件的都跳過
+        assert [x["verdict"] for x in cards] == ["skipped", "skipped", "pending"] and b2["verdict"] == "accepted"
+        assert main.want_emote(aid) == "mail", "第三張還在等驗收，信封要留著"
+        todo = c.get("/office/inbox").json()["todo"]
+        assert [t["card"] for t in todo if t["kind"] == "review"] == [cards[2]["id"]], todo
+        last = main.audit_recent(aid, 1)[0]
+        assert last["kind"] == "task.verdict" and last["verdict"] == "skipped" and last["card"] == cards[1]["id"], last
+        assert len(main.agents[aid].memory) == mem0, "略過沒有評語，不進員工的記憶"
+        assert c.post("/office/verdict/skip", json={"cards": [{"agent": aid, "card": cards[2]["id"]}]}).json()["skipped"] == 1
+        assert main.want_emote(aid) != "mail", "都略過了，信封要收掉"
+        assert verdict(c, cards[0], "accepted")["ok"] and cards[0]["verdict"] == "accepted", "略過的卡事後還能補驗"
+        assert c.post("/office/verdict/skip", json={}).json() == {"ok": True, "skipped": 0}
         # ⑤ 沒有產出（只讀）沒東西可驗；出錯的卡也不進待驗收
         post(c, agent=aid, kind="start", label="查一下 a.py 在做什麼")
         r = main.last_report[aid]

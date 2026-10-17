@@ -1358,7 +1358,7 @@ const TASK_COLS = [
 const TASK_COL_MAX = 30;
 const ORIGIN_CLS = { 老闆: 'boss', 班表: 'sched', 委派: 'dele' };
 const STATUS_MARK = { error: ' ✗ 失敗', stopped: ' 🛑 中止', lost: ' ⚠ 失聯', superseded: ' ↻ 已由續跑接手' };
-const VERDICT_MARK = { accepted: ' ✓ 已驗收', changes: ' ↺ 要求修改' };
+const VERDICT_MARK = { accepted: ' ✓ 已驗收', changes: ' ↺ 要求修改', skipped: ' ⏭ 略過驗收' };
 let taskScope = 'all';   // all＝全辦公室；me＝只看目前選的這位
 const taskCardHtml = c => `<button type="button" class="tk" data-agent="${esc(c.agent)}" data-card="${esc(String(c.id))}">
   <span class="tkwho">${esc(c.name)}${c.engine ? `<small>${esc(ENGINE_NAME[c.engine] || c.engine)}</small>` : ''}</span>
@@ -2231,8 +2231,19 @@ async function inboxcard() {
   if (box.hidden) return;
   box.innerHTML = `<summary>📥 收件匣<small>${r.todo.length ? `待處理 ${r.todo.length}・` : ''}未讀 ${unread}</small>
     ${r.todo.filter(t => t.kind === 'missed').length > 1 ? `<span class="wdbtn" title="今天到點沒跑的班表全部補跑（今天已有報表的不重跑）" onclick="event.preventDefault(); event.stopPropagation(); runJob('');">▶ 補跑全部</span>` : ''}
+    ${r.todo.some(t => t.kind === 'review') ? `<span class="wdbtn" id="skipAll" title="待驗收的交付全部略過：收出待處理、員工頭上的信封也收掉；不算通過也不算要求修改，之後打開那張卡還能補驗">⏭ 略過驗收 ${r.todo.filter(t => t.kind === 'review').length}</span>` : ''}
     <span class="wdbtn" title="全部標為已讀" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxRead = String(${top}); inboxcard();">✓ 全讀</span>
     ${r.recent.length ? `<span class="wdbtn" title="把「最近」清掉（只影響你這個瀏覽器；帳本一筆不少）" onclick="event.preventDefault(); event.stopPropagation(); localStorage.inboxHide = String(${top}); localStorage.inboxRead = String(${top}); inboxcard();">🗑 清除</span>` : ''}</summary>`;
+  const skip = box.querySelector('#skipAll');   // 只送畫面上這幾張：按下去的瞬間才到的新交付不會被一起略過
+  if (skip) skip.onclick = async e => {
+    e.preventDefault(); e.stopPropagation();
+    const cards = r.todo.filter(t => t.kind === 'review').map(t => ({ agent: t.agent, card: t.card }));
+    const res = await (await fetch('/office/verdict/skip', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cards }) })).json();
+    $('hint').textContent = res.ok ? `已略過 ${res.skipped} 件待驗收（卡上還能補驗）` : `⛔ ${res.error}`;
+    $('hint').classList.toggle('err', !res.ok);
+    inboxcard();
+  };
   box.open = localStorage.inboxOpen !== '0';   // 預設開：這是主面板
   for (const t of r.todo) {
     const row = el('div', '', 'irow todo');
@@ -3361,7 +3372,7 @@ const LANG_BY_EXT = { py: 'python', js: 'javascript', ts: 'typescript', go: 'go'
 // 同一件事的前後幾次執行（Paperclip 比較筆記第一批）：↩ 接續哪一張、→ 由哪一張接手；
 // 中止／出錯／失聯、還沒人接手的卡給一顆「↻ 接著做」——接在這張後面開一次新的執行，同一個任務底下看得到前後。
 let lastHistory = [];
-const VERDICT = { pending: '📦 待驗收', accepted: '✓ 已驗收', changes: '↺ 要求修改' };
+const VERDICT = { pending: '📦 待驗收', accepted: '✓ 已驗收', changes: '↺ 要求修改', skipped: '⏭ 略過驗收（還能補驗）' };
 function cardLinks(t) {
   const out = [];
   if (VERDICT[t.verdict]) out.push(`<span class="vchip ${t.verdict}">${VERDICT[t.verdict]}</span>`);
@@ -3408,7 +3419,7 @@ function verdictBox(body, t) {
   vb.innerHTML = `<div class="vh">${esc(VERDICT[t.verdict] || '')}${t.verdict_at ? `<small>・${esc(t.verdict_at)}</small>` : ''}</div>`
     + t.evidence.map(e => `<div class="ev ${esc(e.state)}">${EV_ICON[e.state] || '·'} ${esc(e.text)}</div>`).join('')
     + (t.verdict_note ? `<div class="vnote">↺ ${esc(t.verdict_note)}</div>` : '')
-    + (t.verdict === 'pending' ? `<div class="btns">
+    + (['pending', 'skipped'].includes(t.verdict) ? `<div class="btns">
         <button class="yes" onclick="verdictCard(${+t.id}, 'accepted')">✓ 通過</button>
         <button class="no" onclick="verdictCard(${+t.id}, 'changes')">要求修改…</button></div>` : '');
   body.appendChild(vb);   // 放在串尾：它是這一次執行的結論
