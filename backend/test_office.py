@@ -562,6 +562,7 @@ def run() -> None:
     late_done_race()
     task_chain()
     verdict_flow()
+    ask_followup()
     permits_feedback()
     engine_caps_flow()
     life_sim()
@@ -5471,6 +5472,55 @@ def task_chain() -> None:
     finally:
         main.STATE_FILE.unlink(missing_ok=True)
         main.busy.discard("p12"); main.busy.discard("p17"); main.work_last.clear()
+
+
+def ask_followup() -> None:
+    """追問不是新工作（2026-10-21 回報：每句都「接到任務」很死板）：照樣開卡、記花費與報告，
+    但工作串記成「💬 老闆：…」、不冒「▶ 開工」；意圖判斷的 API 失敗時退回關鍵字，不再一律當任務。"""
+    aid = "p05"
+    main.busy.discard(aid); main.chat_mode.discard(aid); main.stopped.discard(aid)
+    old_client, old_bubble = main.client, main.bubble
+    said: list[str] = []
+
+    async def spy(a, text, collapsible=False):
+        if a == aid:
+            said.append(text)
+    main.client, main.bubble = None, spy
+    try:
+        with TestClient(main.app) as c:
+            post(c, agent=aid, kind="start", label="整理 429 的錯誤紀錄")
+            first = main.last_report[aid]
+            assert first["events"][0]["text"] == "📋 接到任務：整理 429 的錯誤紀錄" and said[-1] == "▶ 開工"
+            post(c, agent=aid, kind="done", label="ok")
+            said.clear()
+            post(c, agent=aid, kind="start", label="所以有找到克服 429 的解法？")
+            card = main.last_report[aid]
+            assert card is not first and card["status"] == "working", "追問照樣開卡：花費、產出、帳本都要記"
+            assert card["events"][0]["text"] == "💬 老闆：所以有找到克服 429 的解法？", card["events"]
+            assert "▶ 開工" not in said, said
+            post(c, agent=aid, kind="msg", label="有，加退避重試")
+            post(c, agent=aid, kind="done", label="ok", cost=0.01)
+            assert (card["status"], card["report"], card.get("cost")) == ("ok", "有，加退避重試", 0.01)
+            assert any(x.startswith("老闆問我") for x in main.agents[aid].memory_texts)
+            post(c, agent=aid, kind="start", label="continue")
+            assert main.last_report[aid]["events"][0]["text"] == "💬 老闆：continue"
+            post(c, agent=aid, kind="done", label="ok")
+            assert [main.intent_rule(x) for x in ("辛苦了", "為什麼會 429？", "繼續", "整理週報", "跑一下測試")] \
+                == ["chat", "ask", "ask", "task", "task"]
+        # API 失敗（額度用完）：退回關鍵字，十分鐘內不再去撞
+        class Boom:
+            class messages:
+                @staticmethod
+                async def create(**kw):
+                    raise RuntimeError("credit balance is too low")
+        main.client = Boom(); main._intent_down["until"] = 0.0; main._intent_cache.clear()
+        assert asyncio.run(main.intent("辛苦了")) == "chat", "API 失敗不該把問候當任務"
+        assert main._intent_down["until"] > time.monotonic()
+        assert asyncio.run(main.intent("x" * (main.INTENT_MAX + 1))) == "task"
+    finally:
+        main.client, main.bubble = old_client, old_bubble
+        main._intent_down["until"] = 0.0
+        main.busy.discard(aid)
 
 
 def verdict_flow() -> None:

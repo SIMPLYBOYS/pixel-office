@@ -1241,39 +1241,59 @@ BUBBLE = {"start": "▶ 開工", "msg": "→ 回報"}
 INTENT_MODEL = "claude-haiku-4-5"
 INTENT_SYSTEM = (
     "你在判斷老闆傳給 AI 員工的訊息屬於哪一類，只回一個英文單字。\n"
-    "task＝交辦工作、提問、要求修改或補充資訊（即使很短，例如「整理週報」「跑一下測試」）。\n"
+    "task＝交辦一件新的工作、要求修改或做出產出（即使很短，例如「整理週報」「跑一下測試」）。\n"
+    "ask＝提問、追問、要他說明或回報進度、要他繼續剛才那件事（例如「所以找到解法了嗎？」「continue」「為什麼會 429」）。\n"
     "chat＝問候、稱讚、道謝、附和、確認收到，沒有要求做任何事。\n"
-    "只輸出 task 或 chat，不要標點、不要解釋。"
+    "只輸出 task、ask 或 chat，不要標點、不要解釋。"
 )
 _CHAT_WORD = (r"(?:nice job|good job|well done|nice work|thank you|thanks?|thx|nice|good|great|"
               r"awesome|cool|perfect|ok(?:ay)?|got it|辛苦了?|謝謝|感謝|做得好|做得不錯|太好了|"
               r"不錯|很棒|讚|沒問題|收到|了解|好的|👍|🎉)")
 CHAT_RE = re.compile(rf"^\W*{_CHAT_WORD}(?:\W+{_CHAT_WORD})*\W*$", re.I)
-_intent_cache: dict[str, bool] = {}
+# 追問／接續：句尾是問號或「嗎／呢」，或整句就是「繼續」這類。跟閒聊同一個原則——拿不準就當任務；
+# 但這裡誤判的代價很小（照樣開卡做事，只是工作串記成「💬 老闆：…」而不是「📋 接到任務」）。
+# ponytail: 關鍵字規則，「可以幫我整理週報嗎？」會被當成追問（只差在那一行字）；API 有額度時由模型判。
+ASK_RE = re.compile(r"(?:[?？]|嗎|呢)\W*$|^\W*(?:continue|go on|keep going|繼續|接著|然後呢)\W*$", re.I)
+INTENT_MAX = 80   # 再長就不可能只是一句追問或問候，省一次呼叫
+_intent_cache: dict[str, str] = {}
+_intent_down = {"until": 0.0}   # API 剛失敗（額度用完、key 不對）：這段時間直接走關鍵字，不每句都去撞
 chat_mode: set[str] = set()   # 這一輪 run 是閒聊而非任務的 agent
 
 
-async def is_chat(text: str) -> bool:
+def intent_rule(t: str) -> str:
+    if len(t) <= 24 and CHAT_RE.match(t):
+        return "chat"
+    return "ask" if ASK_RE.search(t) else "task"
+
+
+async def intent(text: str) -> str:
+    """老闆這句話是 task（新工作）／ask（追問、要他接著做）／chat（問候）。"""
     t = text.strip()
-    if not t or len(t) > 40:      # 長訊息不可能只是問候，省一次呼叫
-        return False
+    if not t or len(t) > INTENT_MAX:
+        return "task"
     if t in _intent_cache:
         return _intent_cache[t]
-    if client is None:            # 沒 API key：退回關鍵字白名單（合約測試走這條）
-        return len(t) <= 24 and CHAT_RE.match(t) is not None
+    if client is None or time.monotonic() < _intent_down["until"]:   # 沒 API key（合約測試走這條）或剛失敗
+        return intent_rule(t)
     try:
         r = await client.messages.create(
             model=INTENT_MODEL, max_tokens=5,
             system=INTENT_SYSTEM,
             messages=[{"role": "user", "content": t}],
         )
-        reply = next((b.text for b in r.content if b.type == "text"), "")
-        verdict = reply.strip().lower().startswith("chat")
+        reply = next((b.text for b in r.content if b.type == "text"), "").strip().lower()
+        verdict = next((k for k in ("chat", "ask") if reply.startswith(k)), "task")
     except Exception as e:
-        print(f"⚠ 意圖判斷失敗（{type(e).__name__}），當成任務處理")
-        verdict = False
+        # 以前失敗＝一律當任務：API 額度用完那段時間，「辛苦了」也開一張任務卡、記一行「接到任務」（2026-10-21 回報）
+        _intent_down["until"] = time.monotonic() + 600
+        print(f"⚠ 意圖判斷失敗（{type(e).__name__}），十分鐘內改用關鍵字判斷")
+        return intent_rule(t)
     _intent_cache[t] = verdict
     return verdict
+
+
+async def is_chat(text: str) -> bool:
+    return await intent(text) == "chat"
 
 
 def office_bubble(kind: str, label: str) -> str | None:
@@ -2111,12 +2131,14 @@ async def office_event(ev: dict):
         await pose(aid, SIT_AT.get(aid, "sit_up"))
 
     chatting = aid in chat_mode  # 這一輪是閒聊：不開卡、不走位、不冒任務泡
+    asking = False               # 這一輪是追問：照樣開卡（花費、產出、帳本都要記），但不演「接到任務／▶ 開工」
     if kind == "start":
         busy.add(aid)
         stopped.discard(aid)   # 新任務＝上一次中止翻篇，別讓它吃掉這張卡的收尾
         pending_test.discard(aid)   # 上一件沒等到的測試結果，別記到這件頭上
         notify("roster")
-        if await is_chat(label) and last_report.get(aid):
+        said = await intent(label)
+        if said == "chat" and last_report.get(aid):
             # 閒聊（「nice job」「辛苦了」）不是任務：不開卡、不起身走工位，
             # 只在目前這張卡的串裡記一句對話——回一句問候卻被當成新任務很怪。
             chat_mode.add(aid)
@@ -2130,6 +2152,8 @@ async def office_event(ev: dict):
             # 沿用上一張未完成卡的任務名，才接得回中斷前那條工作串。
             task = label
             prev = None
+            asking = (said == "ask" and aid not in sched_running and aid not in pending_resume
+                      and not label.startswith(RESUME_NUDGE_PREFIX))
             if label.startswith(RESUME_NUDGE_PREFIX):
                 prev = next((t for t in reversed(history.get(aid, []))
                              if t["status"] in ("working", "lost", "superseded")
@@ -2157,7 +2181,8 @@ async def office_event(ev: dict):
             card["ts"] = time.time()
             audit("task.start", aid, card=card["id"], engine=card["engine"], session=card["session"],
                   task=task[:200], scheduled=aid in sched_running)
-            log_ev(aid, f"📋 接到任務：{task}")
+            # 追問不是一件新工作：記成老闆說的那句話，員工接著回就好（2026-10-21 回報：每句都「接到任務」很死板）
+            log_ev(aid, f"💬 老闆：{task}" if asking else f"📋 接到任務：{task}")
             # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
             # 或 cogito 改寫過任務名時，這行才帶來新資訊。
@@ -2170,7 +2195,8 @@ async def office_event(ev: dict):
                 log_ev(aid, note)
             if desk := WORK_DESK.get(aid):
                 await goto(aid, desk)
-            a.remember(f"接到工作任務「{label}」，開始上工", imp=6, kind="work")
+            a.remember(f"老闆問我「{label}」" if asking else f"接到工作任務「{label}」，開始上工",
+                       imp=4 if asking else 6, kind="work")
     elif kind == "turn":
         # 回合標記【只在真的安靜時】才記。它原本的用途是填補長考的空白——兩次工具呼叫之間
         # 如果什麼都沒有，看起來像 agent 掛了。但每輪都印就變成另一種噪音：使用者看到的是
@@ -2282,7 +2308,7 @@ async def office_event(ev: dict):
             audit("policy.denied", aid, tool=str(label)[:60], reason=str(ev.get("detail", ""))[:300], engine=ENGINE_COGITO)
 
     # 閒聊：接到/收工不是任務事件，不冒泡；回話（msg）照樣冒——那是員工在回應老闆
-    text = None if (chatting and kind in ("start", "done")) else office_bubble(kind, label)
+    text = None if ((chatting and kind in ("start", "done")) or (asking and kind == "start")) else office_bubble(kind, label)
     if text:
         await bubble(aid, text, collapsible=kind == "tool")
     return {"ok": True}
