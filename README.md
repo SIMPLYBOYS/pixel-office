@@ -92,6 +92,7 @@ pick workstations → set up each person); later, adjust it from 「👥 團隊�
 The result lives in `backend/team/` (not in git): one `pXX.yaml` (name / role / team / personality…) and one `pXX.md`
 (character sheet) per workstation. Templates are in `backend/templates/` (demo team, software team). Spec:
 [`docs/team-setup.md`](docs/team-setup.md). A 9th person needs a new character and seat in Unity; the web can't add one.
+Kanban (multi-person collaboration mode): [`docs/kanban.md`](docs/kanban.md) (Traditional Chinese).
 
 When `COGITO_CHANNELS=<cogito>/workspace/channels` is set, the bridge syncs each `pXX.md` on startup into
 that channel's `AGENTS.md` **and** `CLAUDE.md`, with identical content: cogito's PromptComposer reads the

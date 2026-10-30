@@ -79,6 +79,7 @@ cd backend
 結果寫在 `backend/team/`（不進 git）：每個工位一份 `pXX.yaml`（名字／職務／團隊／個性…）與 `pXX.md`（角色設定）。
 範本在 `backend/templates/`（示範團隊、軟體開發團隊）。規格見 [`docs/team-setup.md`](docs/team-setup.md)。
 第 9 個人要在 Unity 新增角色與座位，網頁上加不了。
+看板（多人協作模式）說明見 [`docs/kanban.md`](docs/kanban.md)。
 
 設了 `COGITO_CHANNELS=<cogito>/workspace/channels` 時，橋啟動會把 `pXX.md` 同步成各頻道的
 `AGENTS.md` **與** `CLAUDE.md`，內容同源：cogito 的 PromptComposer 讀前者、Claude Code（CLI 引擎）讀後者，
