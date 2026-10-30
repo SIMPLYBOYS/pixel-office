@@ -5873,9 +5873,11 @@ async def office_dispatch(d: dict):
             wt = worktree_path(aid, bound[0])
             # CLI 直接在 worktree 裡跑，所以措辭與 cogito 版不同：不必叫它 cd 進去，
             # 但「不要 push、不要碰原目錄」這條對誰都一樣。
-            text = (f"{text}\n\n【工作 repo】你現在就在 {repo['path']} 的 git worktree 裡"
-                    f"（分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
-                    "【不要 push、不要碰原目錄】——老闆會自己驗收合併。")
+            text = (f"{text}\n\n【工作 repo】你現在就在 {repo['path']} 的 git worktree 裡（{wt}，"
+                    f"分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
+                    "【不要自己 push、不要碰原目錄】——老闆會自己驗收合併。"
+                    # 對外的那一步只走辦公室的工具：員工沙箱沒網路也沒有 gh 登入；工具每次都過審批（tools/office_git_mcp.py）
+                    f"要提交 PR 時呼叫 mcp__office_git__open_pull_request（repo_dir 填 {wt}），它會先跳審批給老闆、准了才推上去開 PR。")
         # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:

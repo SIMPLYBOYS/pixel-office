@@ -522,6 +522,7 @@ def run() -> None:
     notebooklm_mcp()
     cli_relogin()
     office_browser()
+    office_git_pr()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -2372,6 +2373,67 @@ sys.exit(2)
                 main.auth_state[p_].update(at=0.0, status=None); main.auth_login[p_].clear()
             main.busy.discard(aid)
     print("  ✓ 重新登入：claude（網址、代碼、成功、失敗、取消）＋ NotebookLM（有在用才列、撞到就掛、登好自己收）")
+
+def office_git_pr() -> None:
+    """看板最後一步開 PR（tools/office_git_mcp.py）：只認員工工作區裡 office/… 分支的 worktree、要乾淨、要有新 commit；
+    只 push 那一條、不 force；同一條分支開過就回原本那個。gh 用假的，origin 是本機的裸 repo——不連網。"""
+    import importlib.util
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        t = Path(tmp).resolve()
+        root, log = t / "channels", t / "gh.log"
+        root.mkdir()
+        gh = t / "gh"
+        gh.write_text('#!/bin/sh\necho "$@" >> "$GH_LOG"\n'
+                      'case "$1 $2" in\n'
+                      '  "pr view") [ -f "$GH_LOG.made" ] && echo https://github.com/o/r/pull/7 && exit 0; exit 1;;\n'
+                      '  "pr create") cat > "$GH_LOG.body"; touch "$GH_LOG.made"; echo https://github.com/o/r/pull/7;;\n'
+                      'esac\n')
+        gh.chmod(0o755)
+        env0 = {k: os.environ.get(k) for k in ("OFFICE_WORKSPACE_ROOT", "OFFICE_GH_CMD", "GH_LOG")}
+        os.environ.update(OFFICE_WORKSPACE_ROOT=str(root), OFFICE_GH_CMD=str(gh), GH_LOG=str(log))
+        try:
+            spec = importlib.util.spec_from_file_location("office_git_mcp", Path(main.__file__).parent / "tools" / "office_git_mcp.py")
+            og = importlib.util.module_from_spec(spec); spec.loader.exec_module(og)
+            git = lambda *a, cwd=t: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+            git("init", "-q", "--bare", "-b", "main", "origin.git")
+            git("clone", "-q", str(t / "origin.git"), "src")
+            src = t / "src"
+            for k, v in (("user.email", "t@t"), ("user.name", "t")):
+                git("config", k, v, cwd=src)
+            (src / "a.md").write_text("a\n"); git("add", "-A", cwd=src); git("commit", "-qm", "init", cwd=src); git("push", "-q", "origin", "main", cwd=src)
+            git("remote", "set-head", "origin", "main", cwd=src)
+            wt = root / "office_p10" / "src"
+            git("worktree", "add", "-q", "-b", "office/p10-1030", str(wt), cwd=src)
+            other = root / "office_p10" / "other"
+            git("worktree", "add", "-q", "-b", "feature/x", str(other), cwd=src)
+
+            def call(**a):
+                r = og.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "open_pull_request", "arguments": a}})
+                return r["result"]["isError"], json.loads(r["result"]["content"][0]["text"])
+            ok = dict(title="docs: 看板說明", body="分工：小美寫用法、老徐寫架構")
+            assert call(repo_dir=str(src), **ok)[1]["error"].endswith("不在員工工作區裡，拒絕"), "工作區外的 repo 不准碰"
+            assert "office/" in call(repo_dir=str(other), **ok)[1]["error"], "不是 office/ 分支不准開"
+            assert "沒有比 main 多出" in call(repo_dir=str(wt), **ok)[1]["error"]
+            (wt / "a.md").write_text("改了\n")
+            assert "沒 commit" in call(repo_dir=str(wt), **ok)[1]["error"], "追蹤中的檔有修改沒 commit：不開"
+            (wt / "b.md").write_text("b\n")
+            git("add", "-A", cwd=wt); git("commit", "-qm", "docs", cwd=wt)
+            (wt / "meeting.md").write_text("會議逐字稿，不進 repo\n")   # 看板的會議檔：沒追蹤，不擋 PR
+            assert call(repo_dir=str(wt), title="", body="x")[0], "沒有標題不開"
+            err, r = call(repo_dir=str(wt), **ok)
+            assert not err and r == {"url": "https://github.com/o/r/pull/7", "branch": "office/p10-1030", "base": "main",
+                                     "commits": 1, "created": True, "not_in_pr": ["meeting.md"]}, r
+            assert git("rev-parse", "office/p10-1030", cwd=t / "origin.git") == git("rev-parse", "HEAD", cwd=wt), "分支真的推上去了"
+            assert "pr create --base main --head office/p10-1030 --title docs: 看板說明 --body-file -" in log.read_text()
+            assert Path(f"{log}.body").read_text() == ok["body"]
+            err, r = call(repo_dir=str(wt), **ok)
+            assert not err and r["created"] is False and log.read_text().count("pr create") == 1, "開過就回原本那個，不重開"
+            assert og.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"][0]["name"] == "open_pull_request"
+        finally:
+            for k, v in env0.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
 
 def office_browser() -> None:
     """員工的無頭瀏覽器（issue #1）：白名單網域（含子網域）才放行、其他與 localhost 一律 403；白名單讀員工 profile 的

@@ -91,3 +91,18 @@ if "mcp__browser" not in allow:
 json.dump(s, open(st, "w"), ensure_ascii=False, indent=2)
 print("mcpServers.browser 寫進", cj, "；allow 加 mcp__browser")
 PY
+
+# 開 PR（2026-10-30，看板的最後一步）：辦公室的 office_git MCP（tools/office_git_mcp.py）。員工沙箱沒網路、讀不到 gh 登入，
+# 這支跑在沙箱外、以老闆的 git／gh 身分執行，只做「把 office/… worktree 分支推上去開 PR」一件事，邊界在工具裡驗。
+# 【刻意不加進 allow】：每次呼叫都跳審批卡，老闆准了才開。沒設 COGITO_CHANNELS 就略過。
+if [ -n "$CHANNELS" ]; then
+  python3 - "$OFFICE/.claude.json" "$CHANNELS" "$(cd "$(dirname "$0")" && pwd)/office_git_mcp.py" <<'PY'
+import json, os, sys
+p, channels, server = sys.argv[1:4]
+d = json.load(open(p)) if os.path.exists(p) else {}
+d.setdefault("mcpServers", {})["office_git"] = {"type": "stdio", "command": server,
+                                                "env": {"OFFICE_WORKSPACE_ROOT": os.path.expanduser(channels)}}
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+print("mcpServers.office_git 寫進", p, "（不加 allow：每次開 PR 都要老闆審批）")
+PY
+fi
