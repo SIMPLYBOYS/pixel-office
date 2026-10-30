@@ -1089,6 +1089,18 @@ def board_archive() -> None:
                 for bad in ("../../../etc/passwd", "board.json", "沒這個.json"):
                     r = c.get("/office/board", params={"f": bad}).json()
                     assert r["ok"] is False and r["error"] == "找不到這塊封存板", (bad, r)
+
+                # 綁 repo 用 Claude Code 跑：卡上的工作目錄是 worktree，板子照守則寫在頻道根目錄（不能進 repo）——
+                # 面板兩處都要找（2026-10-30 實跑：板子寫好了面板卻說「還沒有進行中的協作任務」）
+                (k / "repo").mkdir()
+                main.report_card(main.KANBAN, "補文件", str(k / "repo"))
+                assert main.agent_dir(main.KANBAN) == k / "repo"
+                (k / "board.json").write_text(json.dumps({"task": "補文件", "tasks": [{"id": "doc", "title": "寫", "status": "todo"}]},
+                                                         ensure_ascii=False), encoding="utf-8")
+                r = c.get("/office/board").json()
+                assert r["ok"] and r["task"] == "補文件", r
+                assert [a["file"] for a in r["archives"]] == ["board.0812-123840.json"] and "_path" not in r["archives"][0], r
+                assert c.get("/office/board", params={"f": "board.0812-123840.json"}).json()["ok"], "根目錄的封存板也打得開"
         finally:
             main.CHANNELS_DIR = old_dir
 

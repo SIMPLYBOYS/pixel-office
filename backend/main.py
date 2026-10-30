@@ -1358,6 +1358,17 @@ def npc_by_name(name: str) -> str | None:
     return next((aid for aid, a in npcs().items() if a.name == name), None)
 
 
+def kanban_bases() -> list[Path]:
+    """主持人可能把板子寫在哪：最近一張卡的工作目錄，和看板自己的頻道工作區根目錄。
+    綁 repo 用 Claude Code 跑時兩者不同——卡上記的是 worktree，但板子與會議檔照守則寫在根目錄（不能進 repo）。
+    先前只看前者，板子寫好了面板卻說「還沒有進行中的協作任務」（2026-10-30 實跑踩到）。"""
+    out: list[Path] = []
+    for d in (agent_dir(KANBAN), CHANNELS_DIR / f"office_{KANBAN}" if CHANNELS_DIR else None):
+        if d is not None and d.is_dir() and d.resolve() not in [x.resolve() for x in out]:
+            out.append(d)
+    return out
+
+
 def archived_boards() -> list[dict]:
     """封存過的板（board.<時間>.json）。新的在前。
 
@@ -1365,14 +1376,11 @@ def archived_boards() -> list[dict]:
     全算出來是白花的。題目與卡數要讀檔才知道，但那是九次小 json——比讓使用者對著
     一排時間戳猜哪塊是哪塊划算得多。
     """
-    base = agent_dir(KANBAN)
-    if base is None:
-        return []
     out = []
-    for f in sorted(base.glob("board.*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for f in sorted((f for b in kanban_bases() for f in b.glob("board.*.json")), key=lambda p: p.stat().st_mtime, reverse=True):
         if f.name == "board.json":      # 那是活板，不是封存
             continue
-        item = {"file": f.name, "mtime": int(f.stat().st_mtime), "task": "", "n": 0}
+        item = {"file": f.name, "mtime": int(f.stat().st_mtime), "task": "", "n": 0, "_path": f}
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             item["task"] = d.get("task", "")
@@ -1393,13 +1401,8 @@ def board_file() -> Path | None:
     ⚠ 刻意【不】收 `board.<時間戳>.json`——那是「🗑 收掉」封存的舊板，用點號分隔正好區分。
     收進來的話會變成「封存了還一直顯示」。
     """
-    base = agent_dir(KANBAN)
-    if base is None:
-        return None
-    if (f := base / "board.json").exists():
-        return f
-    live = sorted(base.glob("board-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return live[0] if live else None
+    live = [f for b in kanban_bases() for f in ([b / "board.json"] if (b / "board.json").exists() else list(b.glob("board-*.json")))]
+    return max(live, key=lambda p: p.stat().st_mtime, default=None)
 
 
 def in_meeting(parent: str) -> bool:
@@ -3119,16 +3122,21 @@ def office_board(f: str = ""):
     if f:
         # 只認清單裡的檔名。不接受路徑、不做拼接——這是照使用者輸入去讀磁碟的入口，
         # 白名單比任何字串檢查都可靠。
-        if not any(a["file"] == f for a in arch):
-            return {"ok": False, "error": "找不到這塊封存板", "archives": arch}
-        picked = agent_dir(KANBAN) / f
-        return board_snapshot(picked, arch, archived=f)
+        picked = next((a["_path"] for a in arch if a["file"] == f), None)
+        if picked is None:
+            return {"ok": False, "error": "找不到這塊封存板", "archives": public_arch(arch)}
+        return board_snapshot(picked, public_arch(arch), archived=f)
     live = board_file()
     if live is None:
         r = meeting_progress() or {"ok": False, "error": "還沒有進行中的協作任務"}
-        r["archives"] = arch
+        r["archives"] = public_arch(arch)
         return r
-    return board_snapshot(live, arch)
+    return board_snapshot(live, public_arch(arch))
+
+
+def public_arch(arch: list[dict]) -> list[dict]:
+    """封存清單送給外殼時不帶磁碟路徑（_path 只給橋自己找檔用）。"""
+    return [{k: v for k, v in a.items() if k != "_path"} for a in arch]
 
 
 def board_snapshot(f: Path, arch: list[dict], archived: str = "") -> dict:
