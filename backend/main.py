@@ -1569,10 +1569,8 @@ async def adjourn(parent: str) -> None:
     會議中刻意【不】在每個人交件時就送他回位（那樣白板前永遠只有一兩個人，看起來不像
     在開會）。代價是散場要有人喊——就是這裡。
 
-    ⚠ 何時喊：【板子一寫好就散】，不是等整個任務做完。會議結束的時刻是「結論定案」，
-    定案之後大家就回位子開工——真實的節奏是這樣，而 in_meeting() 用的也是同一條判準
-    （有沒有 board.json）。先前綁在收工，等於畫面上「板子都出來了、人還圍在白板前」，
-    兩個投影各說各話。收工時再喊一次是兜底：有些任務只開會、不上板。
+    ⚠ 何時喊：開會那一輪收工（停下來問老闆要不要開工），或老闆說開工之後的第一則事件——跟 in_meeting() 同一條判準。
+    以前是「板子一寫好就散」：主持人一開始就先寫板子，會議在畫面上只活十幾秒（2026-11-02 回報），所以改成照流程。
     """
     if parent != KANBAN:
         return
@@ -1614,6 +1612,11 @@ def pick_sub_npc(parent: str, name: str) -> str | None:
         print(f"⚠ 委派用的 agent_type「{name}」不是員工姓名——cogito 那邊載不到人設，"
               f"實際跑的是沒有人設的探路者（守則要求用人名，如「小美」）")
     if cand in free:
+        return cand
+    # 會議中第二輪再點同一個人：他交過件後刻意留在 busy（不然生活迴圈會把他帶走），但人還坐在會議室、手上沒別的委派
+    # ——就是他本人，不找別人代打。以前會換成另一個閒著的人：會議室坐了六個人，小樺頂著小美的意見發言（2026-11-03 實跑）。
+    if (cand and parent == KANBAN and in_meeting(parent) and occupied.get(cand) in MEET_SPOTS
+            and sub_parent(cand) is None and in_pool(cand)):
         return cand
     return free[0] if free else None
 
@@ -1704,6 +1707,8 @@ def gist(text: str) -> str:
     for line in str(text or "").splitlines():
         if line.lstrip().startswith(("#", "|", "```")):   # 標題、表格、程式碼區塊不是一句話
             continue
+        if re.fullmatch(r"\s*(?:[-*]\s*)?(?:\d+\.\s*)?\*\*[^*]+\*\*\s*[:：]?\s*", line):   # 「**1. 被說服的**」這種小標（實跑踩到）
+            continue
         t = re.sub(r"^[>\-*\s0-9.]+", "", line)
         t = re.sub(r"[*`_]", "", t).strip()
         t = re.sub(r"^(結論|總結|摘要|重點|我的意見|意見)\s*[:：]\s*", "", t)
@@ -1735,7 +1740,7 @@ async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: s
             # 這一行是「會議室」的全部——投影的差異只有【去哪裡】，因為真實世界的差異也只有這個：
             # 會議階段大家在會議室談，上板之後各自回位子做事。
             # 規劃類的活也在白板前做（不佔工位，讓「這是在想、不是在寫」看得出來）。
-            spot = (meet_spot() if in_meeting(parent)
+            spot = ((occupied[npc] if occupied.get(npc) in MEET_SPOTS else meet_spot()) if in_meeting(parent)   # 已經坐在會議室就原位
                     else BOARD if name in ("planner", "correctness")
                     else WORK_DESK.get(npc))
             if spot:

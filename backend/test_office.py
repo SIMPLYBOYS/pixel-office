@@ -5143,6 +5143,15 @@ def standup_meeting() -> None:
             rep = main.last_report[closed]["report"]
             assert rep == "我的意見", f"卡片該只放自己那段，實際是 {rep!r}"
 
+            # 第二輪再點【同一個人】：他交過件、還坐在會議室——就是他本人接，原位不換座，不找別人代打
+            # （2026-11-03 實跑：小樺頂著小美的意見發言，會議室坐了六個人）
+            seat = main.occupied[closed]
+            post(c, agent=main.KANBAN, kind="tool", label=f"spawn_subagent:{main.agents[closed].name}")
+            assert closed in main.sub_active.get((main.KANBAN, main.agents[closed].name), []), main.sub_active
+            assert main.occupied[closed] == seat, "第二輪被換了座位"
+            assert main.gist("**1. 被說服的**\n阿哲的第 3 點說服我：行號會漂。") == "阿哲的第 3 點說服我：行號會漂。"
+            post(c, agent=main.KANBAN, kind="result", label=f"spawn_subagent:{main.agents[closed].name}", detail="第二輪的意見")
+
             # 而且要【一邊一個】：長桌兩側各三個位子，照 a1,a2,a3 順序填的話兩個人會擠在
             # 同一側、對面空著，看起來像在罰站而不是在談事情。
             sides = {s[len("meet_"):][0] for s in spots}
