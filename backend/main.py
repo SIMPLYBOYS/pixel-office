@@ -3342,24 +3342,84 @@ def office_repos(agent: str = "", sort: str = "recent"):
     return {"ok": True, "root": REPOS_DIR, "repos": repos, "sort": sort}
 
 
-def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
-    """把真實 repo 以 git worktree 掛進員工的頻道工作區。回 (目錄名, 分支)；str＝錯誤訊息。
+def git_rc(path, *args: str, timeout: int = 30) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=timeout,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return r.returncode, (r.stdout or "").strip()
+
+
+def repo_base(src: str) -> str:
+    """新工作從哪裡開：先 fetch，用 origin 的預設分支（origin/main 之類）；沒有 remote、或 fetch 不到就用原 repo 目前的 HEAD。
+    以前一律從原 repo 的 HEAD 開——那個目錄可能停在舊 commit、甚至別的分支上，員工一開工就落後。"""
+    git_rc(src, "fetch", "-q", "origin", timeout=60)   # 失敗（沒網路、沒 remote）就用手上已有的 refs
+    rc, ref = git_rc(src, "rev-parse", "--abbrev-ref", "origin/HEAD")
+    return ref if rc == 0 and ref.startswith("origin/") else "HEAD"
+
+
+def freshen_worktree(src: str, dst: Path, base: str) -> tuple[str, str]:
+    """沿用既有 worktree 前，讓它跟上 base。回 (動作, 給員工的說明)；動作 recycle＝呼叫端要收掉重開。
+    - 沒有自己的 commit：快轉到 base（分支名不變）
+    - 自己的 commit 都已經在 base 裡（PR 合併了）：recycle——舊分支已完成任務，新工作用新分支名從 base 開
+    - 有還沒合併的 commit：把 base 合併進來；有衝突就還原、照實講
+    - 有沒 commit 的修改（含沒追蹤的檔）：不動它，只講落後幾個 commit——那是員工做到一半的東西"""
+    _, branch = git_rc(dst, "branch", "--show-current")
+    _, behind = git_rc(dst, "rev-list", "--count", f"HEAD..{base}")
+    behind_n = int(behind) if behind.isdigit() else 0
+    if behind_n == 0:
+        return "keep", ""
+    _, dirty = git_rc(dst, "status", "--porcelain")
+    if dirty:
+        return "keep", (f"⚠ 這條分支落後 {base} {behind_n} 個 commit，而且有沒 commit 的修改，橋沒有動它——"
+                        f"先 commit，再 `git merge {base}` 跟上（有衝突就停下來回報）。")
+    _, start = git_rc(dst, "config", GIT_BASE_KEY)
+    _, head = git_rc(dst, "rev-parse", "HEAD")
+    if git_rc(dst, "merge-base", "--is-ancestor", "HEAD", base)[0] == 0:
+        if head and start and head != start:
+            return "recycle", f"上一條分支 {branch} 的工作已經併進 {base}，這次從最新的 {base} 開新分支。"
+        if git_rc(dst, "merge", "--ff-only", "-q", base)[0] == 0:
+            git_rc(dst, "config", GIT_BASE_KEY, git_rc(dst, "rev-parse", "HEAD")[1])
+            return "keep", f"已把這條分支快轉到最新的 {base}（原本落後 {behind_n} 個 commit）。"
+    if git_rc(dst, "merge", "--no-edit", "-q", base, timeout=60)[0] == 0:
+        git_rc(dst, "config", GIT_BASE_KEY, git_rc(dst, "rev-parse", base)[1])   # 之後的「改了什麼」從 base 算，不把合併進來的別人的改動算成他的
+        return "keep", f"這條分支落後 {base} {behind_n} 個 commit，已自動把 {base} 合併進來。"
+    git_rc(dst, "merge", "--abort")
+    return "keep", (f"⚠ 這條分支落後 {base} {behind_n} 個 commit，自動合併有衝突、已還原——"
+                    f"動手前先 `git merge {base}` 把衝突解掉（解不了就停下來回報）。")
+
+
+def bind_repo(aid: str, repo: dict) -> tuple[str, str, str] | str:
+    """把真實 repo 以 git worktree 掛進員工的頻道工作區。回 (目錄名, 分支, 給員工的說明)；str＝錯誤訊息。
 
     為什麼是 worktree 而不是 clone：worktree 與原 repo 共用物件庫，員工 commit 完，
     分支【立刻】出現在你的 repo 裡——驗收合併不必 fetch。也刻意不讓員工直接進原目錄：
     cogito 的檔案工具 rooted 在頻道工作區（越界是工具層硬擋），這條防線不拆。
-    已掛過就沿用同一個 worktree／分支——同一位員工對同一個 repo 的工作是連續的。
+    已掛過就沿用同一個 worktree／分支——同一位員工對同一個 repo 的工作是連續的；但沿用前先跟上 origin 的預設分支
+    （freshen_worktree）：2026-10-31 PR #17 合併後，看板的 worktree 還停在舊分支，下一輪會在落後 main 的程式碼上動工。
     """
     dst = worktree_path(aid, repo["name"])
     if dst is None:
         return "未設 COGITO_CHANNELS，找不到員工的頻道工作區"
+    base = repo_base(repo["path"])
+    note, old = "", ""
     if dst.exists():
-        r = subprocess.run(["git", "-C", str(dst), "branch", "--show-current"],
-                           capture_output=True, text=True, timeout=10)
-        return repo["name"], (r.stdout.strip() or "（沿用既有 worktree）")
+        act, note = freshen_worktree(repo["path"], dst, base)
+        _, old = git_rc(dst, "branch", "--show-current")
+        if act == "keep":
+            return repo["name"], (old or "（沿用既有 worktree）"), note
+        if git_rc(repo["path"], "worktree", "remove", str(dst))[0] != 0:
+            return repo["name"], old, "⚠ 舊分支的工作已經併進主線，但 worktree 收不掉，這次照舊沿用。"
+        if old:
+            git_rc(repo["path"], "branch", "-D", old)   # 已確認它的 commit 全在 base 裡，刪掉不會少任何東西
     dst.parent.mkdir(parents=True, exist_ok=True)
-    branch = f"office/{aid}-{time.strftime('%m%d-%H%M')}"
-    r = subprocess.run(["git", "-C", repo["path"], "worktree", "add", "-b", branch, str(dst)],
+    branch = stem = f"office/{aid}-{time.strftime('%m%d-%H%M')}"
+    n = 1
+    while branch == old or git_rc(repo["path"], "rev-parse", "--verify", "-q", f"refs/heads/{branch}")[0] == 0:
+        n += 1
+        branch = f"{stem}-{n}"   # 同一分鐘內重開（或撞到既有分支）：新工作要一眼看得出是新分支
+    r = subprocess.run(["git", "-C", repo["path"], "worktree", "add", "-b", branch, str(dst), base],
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         return f"worktree 開不出來：{(r.stderr or r.stdout).strip()[-120:]}"
@@ -3370,7 +3430,7 @@ def bind_repo(aid: str, repo: dict) -> tuple[str, str] | str:
                               capture_output=True, text=True, timeout=10)).returncode == 0:
         subprocess.run(["git", "-C", str(dst), "config", GIT_BASE_KEY, sha.stdout.strip()],
                        capture_output=True, text=True, timeout=10)
-    return repo["name"], branch
+    return repo["name"], branch, note
 
 
 def with_repo(text: str, name: str, src: str, branch: str) -> str:
@@ -3662,6 +3722,15 @@ def cli_done_events(d: dict) -> list[dict]:
     return out
 
 
+def cli_extra_dirs(aid: str, base: Path) -> list[str]:
+    """在 worktree 裡跑（cwd 在員工頻道目錄底下的子目錄）時，把頻道目錄本身加進可讀寫範圍；其他情況不加。"""
+    home = CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None
+    if home is None or not home.is_dir():
+        return []
+    b, h = base.resolve(), home.resolve()
+    return ["--add-dir", str(home)] if b != h and b.is_relative_to(h) else []
+
+
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
                        effort: str = "", notes: tuple = ()) -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
@@ -3691,8 +3760,11 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # 實測：第二則訊息會排隊、各自有一個 result；stdin 關掉行程才結束。
     # --permission-prompts none：實測【沒有它 PermissionRequest hook 根本不會被問】——-p 沒有人可提問時直接拒，
     # 帶了才會先問 hook（也就是問辦公室）、hook 不放行才拒。這不是「關掉提問」，是「提問改由 hook 回答」。
+    # 綁 repo 時 cwd 是 worktree，但看板的板子、會議檔、spec 照守則寫在頻道根目錄（不能進 repo）——那裡本來就是他的工作區，
+    # 不加進來的話每讀寫一次都要老闆審批（2026-10-31 實跑：一場十幾張）。只加他自己的頻道目錄，不擴大到工作區以外。
+    extra = cli_extra_dirs(aid, base)
     argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none",
+            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *extra,
             # 子 agent：人設隨派工帶上（session-only，永遠跟人設同步）；子 agent 的文字要轉發，橋才投影得出誰在說什麼
             "--agents", cli_agents_json(), "--forward-subagent-text", *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
@@ -5885,7 +5957,8 @@ async def office_dispatch(d: dict):
                     f"分支 {bound[1]}，與原 repo 共用歷史）。改完 commit 到這個分支即可，"
                     "【不要自己 push、不要碰原目錄】——老闆會自己驗收合併。"
                     # 對外的那一步只走辦公室的工具：員工沙箱沒網路也沒有 gh 登入；工具每次都過審批（tools/office_git_mcp.py）
-                    f"要提交 PR 時呼叫 mcp__office_git__open_pull_request（repo_dir 填 {wt}），它會先跳審批給老闆、准了才推上去開 PR。")
+                    f"要提交 PR 時呼叫 mcp__office_git__open_pull_request（repo_dir 填 {wt}），它會先跳審批給老闆、准了才推上去開 PR。"
+                    + (f"\n{bound[2]}" if bound[2] else ""))   # 跟上主線的結果（快轉／重開／合併／有衝突）照實講給員工
         # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
@@ -5979,7 +6052,7 @@ async def office_dispatch(d: dict):
         bound = bind_repo(aid, repo)
         if isinstance(bound, str):
             return {"ok": False, "error": bound}
-        text = with_repo(text, bound[0], repo["path"], bound[1])
+        text = with_repo(text, bound[0], repo["path"], bound[1]) + (f"\n{bound[2]}" if bound[2] else "")
     why = text[len(verb):].strip() if verb in ("approve", "reject") else ""
     if verb in ("approve", "reject") and cur_task:
         text = f"{verb} {cur_task}"   # cogito 把 approve 後面的字當任務 ID；理由只記在帳本

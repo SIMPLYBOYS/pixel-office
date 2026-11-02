@@ -523,6 +523,7 @@ def run() -> None:
     cli_relogin()
     office_browser()
     office_git_pr()
+    worktree_fresh()
     audit_archive()
     agent_env_allowlist()
     tool_guard()
@@ -1732,6 +1733,12 @@ for o in out:
                 # 實測：沒有 --permission-prompts none，PermissionRequest hook 不會被問，權限請求直接拒——審批線等於沒接
                 assert "--permission-prompts none" in sent, f"argv 沒帶 --permission-prompts none，審批 hook 不會被問：{sent}"
                 assert "--agents" in sent and "--forward-subagent-text" in sent, f"argv 要帶人設與子 agent 文字轉發：{sent[:200]}"
+                # 頻道根目錄跑：不加目錄；在 worktree（頻道目錄底下）跑：把頻道目錄加進來（會議檔、板子在那裡，免得每次審批）
+                assert "--add-dir" not in sent, sent
+                home = main.CHANNELS_DIR / "office_p05"
+                (home / "repo").mkdir(exist_ok=True)
+                assert main.cli_extra_dirs("p05", home / "repo") == ["--add-dir", str(home)]
+                assert main.cli_extra_dirs("p05", home) == [] and main.cli_extra_dirs("p05", Path(tmp)) == [], "工作區以外不加"
                 # 員工 CLI 走訂閱：橋的 ANTHROPIC_API_KEY 不能傳下去（Claude Code 會優先用 API key 計費；踩過「Credit balance is too low」）
                 assert "ENV_NO_API_KEY" in sent, "子行程拿到了 ANTHROPIC_API_KEY——員工會用 API 計費而不是訂閱"
                 evs = [e["text"] for e in card["events"]]
@@ -2385,6 +2392,70 @@ sys.exit(2)
                 main.auth_state[p_].update(at=0.0, status=None); main.auth_login[p_].clear()
             main.busy.discard(aid)
     print("  ✓ 重新登入：claude（網址、代碼、成功、失敗、取消）＋ NotebookLM（有在用才列、撞到就掛、登好自己收）")
+
+def worktree_fresh() -> None:
+    """派工綁 repo 時 worktree 一律跟上 origin 的預設分支（2026-10-31：PR #17 合併後看板的 worktree 停在舊分支）。
+    新開從 origin/main 開；沿用時：沒動過→快轉、已合併→換新分支重開、有未合併 commit→自動合併、衝突→還原並照實講、
+    有沒 commit 的修改→不動、只警告。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        t = Path(tmp).resolve()
+        git = lambda *a, cwd=t: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "--bare", "-b", "main", "origin.git")
+        for d in ("src", "peer"):
+            git("clone", "-q", str(t / "origin.git"), d)
+            for k, v in (("user.email", "t@t"), ("user.name", "t")):
+                git("config", k, v, cwd=t / d)
+        src, peer = t / "src", t / "peer"
+
+        def push_main(name: str, body: str = "x\n") -> None:   # 別人在主線上推了東西
+            if git("ls-remote", "--heads", "origin", "main", cwd=peer):
+                git("pull", "-q", "--no-rebase", "origin", "main", cwd=peer)
+            (peer / name).write_text(body); git("add", "-A", cwd=peer); git("commit", "-qm", name, cwd=peer)
+            git("push", "-q", "origin", "HEAD:main", cwd=peer)
+        push_main("a.md")
+        git("pull", "-q", "origin", "main", cwd=src); git("remote", "set-head", "origin", "main", cwd=src)
+        push_main("b.md")   # 原 repo 的 checkout 落後了一個 commit：新 worktree 也要有 b.md
+        old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, t / "ch"
+        repo = {"name": "src", "path": str(src)}
+        try:
+            name, br1, note = main.bind_repo("p05", repo)
+            wt = t / "ch" / "office_p05" / "src"
+            assert (wt / "b.md").exists() and note == "", "新開要從 origin 的預設分支開，不是原 repo 停住的 HEAD"
+            # ① 沒動過、主線前進 → 快轉，分支名不變
+            push_main("c.md")
+            _, br, note = main.bind_repo("p05", repo)
+            assert br == br1 and (wt / "c.md").exists() and "快轉" in note, note
+            # ② 有自己的 commit、主線也前進 → 自動合併
+            (wt / "mine.md").write_text("m\n"); git("add", "-A", cwd=wt); git("commit", "-qm", "mine", cwd=wt)
+            push_main("d.md")
+            _, br, note = main.bind_repo("p05", repo)
+            assert br == br1 and (wt / "d.md").exists() and (wt / "mine.md").exists() and "自動" in note, note
+            # ③ 有沒 commit 的修改 → 不動，只警告
+            push_main("e.md")
+            (wt / "wip.md").write_text("w\n")
+            _, br, note = main.bind_repo("p05", repo)
+            assert not (wt / "e.md").exists() and note.startswith("⚠") and "沒 commit" in note, note
+            (wt / "wip.md").unlink()
+            # ④ 衝突 → 還原、照實講
+            (wt / "e.md").write_text("我的版本\n"); git("add", "-A", cwd=wt); git("commit", "-qm", "e", cwd=wt)
+            _, br, note = main.bind_repo("p05", repo)
+            assert "衝突" in note and git("status", "--porcelain", cwd=wt) == "" and (wt / "e.md").read_text() == "我的版本\n", note
+            # ⑤ PR 合併了（他的 commit 全在主線上）→ 換新分支、從最新的主線重開
+            git("reset", "-q", "--hard", "HEAD~1", cwd=wt)                       # 丟掉衝突那筆，剩 mine 與先前的合併
+            git("push", "-q", "origin", f"HEAD:refs/heads/{br1}", cwd=wt)        # 推上去開 PR
+            git("pull", "-q", "--no-rebase", "origin", "main", cwd=peer)
+            git("fetch", "-q", "origin", cwd=peer)
+            git("merge", "-q", "--no-edit", f"origin/{br1}", cwd=peer)          # 老闆在 GitHub 按了合併
+            git("push", "-q", "origin", "HEAD:main", cwd=peer)
+            push_main("f.md")
+            _, br, note = main.bind_repo("p05", repo)
+            assert br != br1 and "併進" in note and (wt / "f.md").exists() and (wt / "mine.md").exists(), (br, note)
+            assert br1 not in [x.strip("*+ ") for x in git("branch", "--list", cwd=src).splitlines()], "已合併的舊分支要收掉"
+            assert git("rev-parse", "HEAD", cwd=wt) == git("rev-parse", "origin/main", cwd=src)
+        finally:
+            main.CHANNELS_DIR = old_ch
+
 
 def office_git_pr() -> None:
     """看板最後一步開 PR（tools/office_git_mcp.py）：只認員工工作區裡 office/… 分支的 worktree、要乾淨、要有新 commit；
@@ -3125,7 +3196,7 @@ def git_lens() -> None:
         old_repos, main.REPOS_DIR = main.REPOS_DIR, str(Path(tmp) / "repos")
         old_ch, main.CHANNELS_DIR = main.CHANNELS_DIR, Path(tmp) / "channels"
         try:
-            wt_name, _ = main.bind_repo("p12", {"name": "demo-app", "path": str(src)})
+            wt_name, _, _ = main.bind_repo("p12", {"name": "demo-app", "path": str(src)})
             wt = main.CHANNELS_DIR / "office_p12" / wt_name
             # 工作區【根】不套鏡頭：那裡不是我們掛的 worktree，mtime 才是對的權威。
             # ⚠ 這條要在「工作區本身就在一個 git repo 裡」的前提下驗才有意義——那正是
