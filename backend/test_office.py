@@ -5121,9 +5121,18 @@ def standup_meeting() -> None:
 
             # 真正的收件在 subagent_await 的結果裡，逐行對人設名收。
             # 一個 ✅ 一個 🟢＝只該收掉一張：🟢 是「這次沒等到」，卡片要繼續開著。
+            said: list[tuple[str, str]] = []
+            real_bubble = main.bubble
+
+            async def spy(a, t, collapsible=False):
+                said.append((a, t))
+            main.bubble = spy
             post(c, agent=main.KANBAN, kind="result", label="subagent_await",
                  detail="背景子 agent bg-1 []：✅ 已完成\n我的意見\n"
                         "背景子 agent bg-2 []：🟢 執行中，尚無結果。")
+            main.bubble = real_bubble
+            # 會議中交件＝這個人發言：頭上冒他意見的第一句，不是「✓ 回報完成」（2026-11-02：看不到 agent 在辦公室互動）
+            assert any(t == "我的意見" for _, t in said) and not any(t == "✓ 回報完成" for _, t in said), said
             left = [n for lst in main.sub_active.values() for n in lst]
             assert len(left) == 1, f"await 該只收掉 ✅ 那一張，實際剩 {left}"
 
@@ -5153,30 +5162,46 @@ def standup_meeting() -> None:
             assert len(done_yet) == len(still), \
                 f"會議中交過件的人被放出 busy，生活迴圈會把他帶走：{set(still) - main.busy}"
 
-            # 【板子一寫好就散會】——會議結束的時刻是「結論定案」，不是整個任務做完。
-            # 先前綁在收工，畫面上會變成「板子都出來了、人還圍在白板前」，兩個投影各說各話。
+            # 板子寫好【不散會】：那是停下來給老闆看的時刻，會議一直到老闆說「開工」。
+            # 以前「板子一寫好就散會」，主持人一開始就先寫板子，會議在畫面上只活十幾秒（2026-11-02 回報）。
             (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
             post(c, agent=main.KANBAN, kind="think", label="")   # 隨便一則事件觸發檢查
+            assert main.in_meeting(main.KANBAN), "板子寫好就被判成散會了"
             still = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
-            assert not still, f"板子出來了還有人圍在會議室：{still}"
+            assert still, "板子寫好就把人從會議室請走了"
 
+            # 這一輪收工（停下來問要不要開工）＝散會：還坐在會議室的人請回位子
+            post(c, agent=main.KANBAN, kind="done", label="ok")
+            left = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
+            assert not left, f"散會後還有人杵在會議室：{left}"
             # 散會也要【解除 busy】。會議期間刻意把人留在 busy，解除的責任就落在散會這裡；
             # 漏掉的話他回到工位後再也不會被生活迴圈碰到、也不會被挑去支援——變成一尊雕像。
             assert not (main.busy - {main.KANBAN}), f"散會後還有人卡在 busy：{main.busy}"
 
-            # 上板之後＝實作階段：新派的人改成各自回工位
+            # 老闆說「開工」＝執行輪：新派的人各自回工位做事
+            post(c, agent=main.KANBAN, kind="start", label="開工。照板子推進，先做相依都滿足的票，最多 3 人並行。")
+            assert main.last_report[main.KANBAN]["phase"] == "exec" and not main.in_meeting(main.KANBAN)
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             third = [n for lst in main.sub_active.values() for n in lst][-1]
             assert main.occupied[third] == main.WORK_DESK[third], \
-                f"上板後該回工位，實際去了 {main.occupied[third]}"
-            # 散會要有人喊：收工時把還站在白板前的人請回位子，否則他們會一直杵在那裡
-            # 直到生活迴圈下一輪隨機把人帶走——那段畫面同樣是錯的。
-            (wd / "board.json").unlink()          # 回到會議狀態，讓還有人站在白板前
-            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
-            assert any(s in main.MEET_SPOTS for s in main.occupied.values())
+                f"開工後該回工位，實際去了 {main.occupied[third]}"
             post(c, agent=main.KANBAN, kind="done", label="ok")
-            left = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
-            assert not left, f"散會後還有人杵在白板前：{left}"
+
+            # 下一題開會時，上一輪全部完成的板子自動封存——留著的話主持人會直接覆寫它
+            (wd / "board.json").write_text('{"task":"x","tasks":[{"id":"a","status":"done"},{"id":"b","status":"done"}]}',
+                                           encoding="utf-8")
+            post(c, agent=main.KANBAN, kind="start", label="下一題")
+            assert not (wd / "board.json").exists() and list(wd.glob("board.*.json")), "完成的舊板沒被封存"
+            assert main.last_report[main.KANBAN]["phase"] == "plan" and main.in_meeting(main.KANBAN)
+            post(c, agent=main.KANBAN, kind="done", label="ok")
+
+            # 開會那一輪綁了 repo：repo 唯讀（停一次是程式擋，不是約定）；開工之後才放開；不是看板、或沒綁 repo 不管
+            (wd / "repo").mkdir()
+            g = main.cli_plan_guard(main.KANBAN, "補文件", wd / "repo")
+            assert g[0] == "--disallowedTools" and f"Edit(/{wd / 'repo'}/**)" in g and "Bash(git commit:*)" in g \
+                and "mcp__office_git__open_pull_request" in g, g
+            assert main.cli_plan_guard(main.KANBAN, "開工。照板子推進", wd / "repo") == []
+            assert main.cli_plan_guard(main.KANBAN, "補文件", wd) == [] and main.cli_plan_guard("p05", "補文件", wd / "repo") == []
     main.CHANNELS_DIR = None
 
 

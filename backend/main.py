@@ -1405,27 +1405,47 @@ def board_file() -> Path | None:
     return max(live, key=lambda p: p.stat().st_mtime, default=None)
 
 
+# 老闆說「開工」：收件匣的鈕送「開工。照板子推進…」，手打的「好，開工」也算。
+KANBAN_GO_RE = re.compile(r"^\W*(?:好|可以|ok|OK)?\W*開工")
+
+
+def kanban_go(aid: str, text: str) -> bool:
+    """這一輪是不是【老闆說了開工之後】的執行輪。接著做／斷點續跑沿用被接的那一輪。"""
+    if aid != KANBAN:
+        return False
+    if KANBAN_GO_RE.match(text):
+        return True
+    pr = pending_resume.get(aid)
+    prev = find_card(aid, pr[0]) if pr else (last_report.get(aid) if text.startswith(RESUME_NUDGE_PREFIX) else None)
+    return bool(prev and prev.get("phase") == "exec")
+
+
 def in_meeting(parent: str) -> bool:
-    """這是【協作模式的會議階段】嗎——看板在跑、而且【這一輪】還沒上板。
+    """這是【協作模式的會議階段】嗎——看板在跑、而且這一輪不是老闆說了開工之後的執行輪。
 
-    判準跟任務板面板同一個（沒有板子＝還在開會），兩邊必須一致：畫面上寫著
-    「會議進行中」、人卻各自坐回工位，那是兩個投影說了不同的話。
-
-    ⚠「還沒上板」指的是【這一輪】，不是「工作區從來沒有過板子」。主持人照主題取名
-    （board-<主題>.json），所以舊板子會一直留在工作區——只看「有沒有板子」的話，
-    第二輪起從第一秒就被判成「會議已結束」，沒有人會進會議室。
-    實測踩過：工作區裡躺著 board-visitor.json 與 board-westwing-spaces.json，
-    整輪都沒開成會，六個人直接各自做事（回報：「幾乎沒有進到會議室開會就自行做任務」）。
-
-    所以比的是【時間】：板子要比這一輪開工還新才算數。work_last 是上工中 agent 的
-    心跳，它存在就代表這一輪還在跑。"""
+    以前用「這一輪的板子寫出來了沒」判斷：主持人一開工就先把板子寫好（或覆寫上一輪的），會議在畫面上只活十幾秒，
+    派去會議室的人坐下就被散會（2026-11-02 回報：「完全沒有看到 agent 在辦公室的互動」）。
+    改成照流程：從派工到老闆說「開工」整段都是會議——板子寫好正是「停下來給老闆看」的那一刻，不是散會的時刻；
+    開工之後被派的人各自回工位做事。執行輪的卡上記 phase=exec（看板收工、卡關了就不在會議中）。"""
     if parent != KANBAN or KANBAN not in busy:
         return False
-    f = board_file()
-    if f is None:
-        return True                      # 一塊板子都沒有：確實還在開會
-    started = task_start.get(KANBAN)
-    return started is not None and f.stat().st_mtime < started
+    return (last_report.get(KANBAN) or {}).get("phase") != "exec"
+
+
+def archive_board(f: Path) -> str:
+    """把一塊板封存成 board.<時間>.json（不刪：那是一次協作的完整紀錄）。回封存後的檔名。"""
+    # 封存名一律用點號分隔——board_file() 靠這個把封存檔排除在外，不然收掉之後它又會被當成「目前這塊板」撿回來。
+    dst = f.with_name(f"board.{time.strftime('%m%d-%H%M%S')}.json")
+    f.rename(dst)
+    return dst.name
+
+
+def board_finished(f: Path) -> bool:
+    try:
+        tasks = json.loads(f.read_text(encoding="utf-8")).get("tasks") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return bool(tasks) and all(isinstance(t, dict) and t.get("status") == "done" for t in tasks)
 
 
 def kill_tree(pid: int) -> int:
@@ -1663,7 +1683,10 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str, sub_id: str 
     if card:
         card["report"] = detail
     mark = "✔ 回報：" if ok else "✗ 失敗："
-    await bubble(npc, "✓ 回報完成" if ok else "⚠ 回報出錯了")
+    # 會議中交件＝這個人發言：把他意見的第一句冒在頭上，大家輪流講（像生活對話那樣），會議才看得出在談什麼。
+    # 以前只冒「✓ 回報完成」，誰說了什麼只在工作串裡（2026-11-02 回報：看不到 agent 在辦公室的互動）。
+    said = gist(detail) if ok and in_meeting(parent) else ""
+    await bubble(npc, said or ("✓ 回報完成" if ok else "⚠ 回報出錯了"))
     # 子 agent 的最後一段話多半已經以 msg 串流進這張卡（CLI 轉發子 agent 文字；cogito 的 [Subagent] msg 亦然），
     # 交件再整段貼一次就是同一段話出現兩次（實際回報：「訊息重疊」）。已在卡上的只留一行收件標記。
     head = detail.strip()[:40]
@@ -1671,6 +1694,23 @@ async def finish_sub(parent: str, name: str, ok: bool, detail: str, sub_id: str 
     log_ev(npc, f"{mark}（全文如上一則）" if streamed else f"{mark}{detail[:200]}")
     agents[npc].remember("完成了委派工作" if ok else "委派的工作失敗了")
     return True
+
+
+GIST_MAX = 24   # 頭上文字框 8 字一行、最多三行
+
+
+def gist(text: str) -> str:
+    """一段意見的第一句：去掉 Markdown 記號與「結論：」這類標頭，取到第一個句號，太長就截。"""
+    for line in str(text or "").splitlines():
+        if line.lstrip().startswith(("#", "|", "```")):   # 標題、表格、程式碼區塊不是一句話
+            continue
+        t = re.sub(r"^[>\-*\s0-9.]+", "", line)
+        t = re.sub(r"[*`_]", "", t).strip()
+        t = re.sub(r"^(結論|總結|摘要|重點|我的意見|意見)\s*[:：]\s*", "", t)
+        if t:
+            t = re.split(r"(?<=[。！？!?])", t, maxsplit=1)[0].strip()
+            return t if len(t) <= GIST_MAX else t[:GIST_MAX - 1] + "…"
+    return ""
 
 
 async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: str = "") -> bool:
@@ -2166,7 +2206,14 @@ async def office_event(ev: dict):
                     supersede_card(prev)
             # start 的 detail＝工作目錄。照記（卡上要顯示產出落在哪），但拿來讀檔、列目錄、開資料夾之前一律過 workdir_ok——
             # 邊界放在【用的那一刻】，狀態檔裡的舊卡、偽造的事件都一樣擋得住（2026-09-17 安全稽核 High #6）
+            go = kanban_go(aid, label)   # 要在 pending_resume 被取走之前判斷（接著做沿用被接那一輪的階段）
             card = report_card(aid, task, ev.get("detail", ""))
+            if aid == KANBAN:
+                card["phase"] = "exec" if go else "plan"
+                # 新的一輪會議開始時，上一輪已經全部完成的板子自動封存：留著的話主持人會直接覆寫它，
+                # 面板上也會先看到舊題目（2026-11-02 實跑：舊板子被拿來「換成這一題」）
+                if not go and not label.startswith(RESUME_NUDGE_PREFIX) and (f := board_file()) and board_finished(f):
+                    log_ev(aid, f"🗂 上一輪的板子已全部完成，自動封存為 {archive_board(f)}")
             # 老闆按了「接著做」：接在指定那張後面（沒在 RESUME_WINDOW 內開工就作廢，別黏到不相干的下一件）
             if (pr := pending_resume.pop(aid, None)) and time.monotonic() - pr[1] < RESUME_WINDOW:
                 prev = find_card(aid, pr[0]) or prev
@@ -3178,12 +3225,9 @@ def office_board_clear():
     f = board_file()
     if f is None:
         return {"ok": False, "error": "目前沒有板子"}
-    # 封存名一律用點號分隔（board.<時間>.json）——board_file() 靠這個把封存檔排除在外，
-    # 不然收掉之後它又會被當成「目前這塊板」撿回來。
-    dst = f.with_name(f"board.{time.strftime('%m%d-%H%M%S')}.json")
-    f.rename(dst)
+    name = archive_board(f)
     notify("agent", KANBAN)
-    return {"ok": True, "archived": dst.name}
+    return {"ok": True, "archived": name}
 
 
 @app.get("/office/wsfile/{aid}")
@@ -3731,6 +3775,17 @@ def cli_extra_dirs(aid: str, base: Path) -> list[str]:
     return ["--add-dir", str(home)] if b != h and b.is_relative_to(h) else []
 
 
+def cli_plan_guard(aid: str, text: str, base: Path) -> list[str]:
+    """看板開會那一輪（老闆還沒說開工）而且綁了 repo：repo 唯讀——改檔、git add／commit／push、開 PR 一律拒絕。
+    「板子寫好停一次問老闆」原本只是守則約定，主持人覺得題目小就自己動手改了（2026-11-02 實跑）；現在是程式擋。
+    會議紀錄、spec、板子在頻道根目錄，不受影響。實測（2026-11-03）：deny 規則壓過 acceptEdits，Edit 規則也擋 Write。
+    ponytail: Bash 的重新導向寫檔（echo > 檔）擋不到——沙箱允許寫 cwd；要全擋得在開會那輪換掉 cwd。"""
+    if aid != KANBAN or kanban_go(aid, text) or not cli_extra_dirs(aid, base):
+        return []
+    return ["--disallowedTools", f"Edit(/{base}/**)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
+            "mcp__office_git__open_pull_request"]
+
+
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
                        effort: str = "", notes: tuple = ()) -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
@@ -3762,7 +3817,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # 帶了才會先問 hook（也就是問辦公室）、hook 不放行才拒。這不是「關掉提問」，是「提問改由 hook 回答」。
     # 綁 repo 時 cwd 是 worktree，但看板的板子、會議檔、spec 照守則寫在頻道根目錄（不能進 repo）——那裡本來就是他的工作區，
     # 不加進來的話每讀寫一次都要老闆審批（2026-10-31 實跑：一場十幾張）。只加他自己的頻道目錄，不擴大到工作區以外。
-    extra = cli_extra_dirs(aid, base)
+    extra = cli_extra_dirs(aid, base) + cli_plan_guard(aid, text, base)
     argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *extra,
             # 子 agent：人設隨派工帶上（session-only，永遠跟人設同步）；子 agent 的文字要轉發，橋才投影得出誰在說什麼
