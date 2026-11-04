@@ -1280,7 +1280,7 @@ const headFace = id => `<img class="face lg" src="/avatars/${id}.png" alt=""
 const headRole = id => (agentsData[id] || {}).role ? `<div class="role">${esc(agentsData[id].role)}</div>` : '';
 
 // 指令頁：這位員工、這個引擎能打的指令。清單來自橋（/office/commands，跟分流寫在一起），外殼不自己列——
-// Codex 不收插話，這裡就不能出現插話。點一下帶進輸入框，要改、要送都還是你決定。
+// 引擎不收的指令（例：cogito 以外的引擎沒有某些指令）這裡就不能出現。點一下帶進輸入框，要改、要送都還是你決定。
 const ENGINE_NAME = { cli: 'Claude Code', cogito: 'cogito', codex: 'Codex' };
 const CMD_WHEN = { busy: '工作中才有效', approval: '有待審批時才有效', idle: '閒置時才有效' };
 const cmdsCache = {};   // key → {r, t}：一分鐘有效（引擎裝了什麼會隨員工開工更新）
@@ -1619,12 +1619,12 @@ function paintEngineRow(a, workingNow) {
   const cli = sel.value === 'cli';
   paintCodexLogin(sel.value === 'codex' && !!modelInfo.codex_login_needed);
   if (sel.value === 'codex') {
-    // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
+    // Codex 缺什麼（目前：子 agent）照能力表事先講清楚，不讓人按了才發現
     $('engineNote').textContent = (modelInfo.codex_login_needed
       ? '還沒登入 Codex：按下面的按鈕，用瀏覽器登入你的 ChatGPT 帳號（員工用自己的一份登入，不碰你本人的 ~/.codex）'
       : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止${lacks('codex').length ? '，暫不支援' + lacks('codex').join('、') : ''}`
         // 工具講出來：Codex 員工的 MCP 照抄 Claude Code 員工的，網頁走 Codex 內建搜尋（任務裡的 WebFetch／WebSearch 對應它）
-        + `；工具：網頁搜尋、shell 可連網${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
+        + `；工具：網頁搜尋、shell（不連網）${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
       + (selected === 'kanban' && engCaps('codex').subagents === false ? '　⚠ 看板暫不支援 Codex' : '');
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;

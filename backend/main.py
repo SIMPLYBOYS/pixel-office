@@ -2533,7 +2533,7 @@ async def office_chat(ev: dict):
         approval_backlog.setdefault(aid, []).append({"agent": ev.get("agent", ""), "text": text, "approval": meta})
         audit("approval.asked", aid, tool=meta["tool"], params=meta["params"][:300], task_id=meta["task_id"],
               source=ev.get("agent", ""), queued=len(approval_backlog[aid]),
-              engine=ENGINE_CLI if aid in cli_procs else ENGINE_COGITO)
+              engine=proc_engine(aid) if aid in cli_procs else ENGINE_COGITO)
         log_ev(aid, f"⚠ 又一個操作在等審批（排第 {len(approval_backlog[aid])} 張）——前一張處理完才會顯示，一次決定一張")
         notify("roster", aid, alert="approval")
         return {"ok": True, "queued": len(approval_backlog[aid])}
@@ -2544,7 +2544,7 @@ async def office_chat(ev: dict):
         approval_at[aid] = time.time()
         m = approval_meta.get(aid) or {}
         audit("approval.asked", aid, tool=m.get("tool"), params=str(m.get("params") or "")[:300], task_id=m.get("task_id"),
-              source=approval_src.get(aid, ""), engine=ENGINE_CLI if aid in cli_procs else ENGINE_COGITO)
+              source=approval_src.get(aid, ""), engine=proc_engine(aid) if aid in cli_procs else ENGINE_COGITO)
         # 等審批也算工作中：不標 busy 的話生活 idle 迴圈會把罰站走位蓋掉
         busy.add(aid)
         work_last[aid] = time.monotonic()
@@ -3978,9 +3978,14 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
 # - 人設：Codex 讀工作區的 AGENTS.md——橋本來就同步了那個檔，不用另外帶。
 # - 接續：`codex exec resume <thread_id>`；老闆派的活接同一條（跟 Claude Code 的固定 session 同一個語意），班表每次開新的。
 #   resume 不帶 -m 會換成 Codex 的「目前預設」（實測從 gpt-5.6-sol 被換成 gpt-6-astra 並警告），所以 resume 時帶回那條 thread 記錄的模型。
-# - 沒有插話（exec 不吃第二則訊息）、沒有審批（exec 的 approval_policy 是 never，沙箱外的操作直接失敗讓模型自己改道）——
-#   兩者都明講不支援，不假裝。審批要走 Codex 的 hooks 或 app-server，是下一步。
 # - 訂閱計費：跟 Claude Code 同一個坑——子行程不帶 OPENAI_API_KEY／CODEX_API_KEY，免得它改走 API 計費。
+# 2026-11-04 改走 `codex app-server`（JSON-RPC over stdio；openbot、t3code 也都這樣接 Codex），補上 exec 沒有的兩樣：
+# - 插話：turn/steer（帶 expectedTurnId）把老闆的話塞進進行中的這一輪。實測 0.154：模型照做、同一輪收工。
+# - 審批：approvalPolicy=on-request。實測 MCP 工具沒放行時來 mcpServer/elicitation/request（_meta.codex_approval_kind=
+#   mcp_tool_call）→ 開審批卡等老闆。跳出沙箱的請求（指令／改檔／加權限）照舊一律拒：Claude Code 員工的
+#   allowUnsandboxedCommands 是 false、shell 不連網是稽核 #2 的決定，換成 Codex 不能變成「老闆按一下就全開」。
+#   （granular 政策能叫 Codex 自己不問，但要 experimentalApi，不用。）
+# - 一個任務一支 app-server 行程，收工就收掉：跟 exec 一樣的生命週期，中止、逾時、接續 thread 的邏輯都不變。
 CODEX_CMD = os.environ.get("OFFICE_CODEX_CMD", "codex")
 CODEX_SANDBOX = os.environ.get("OFFICE_CODEX_SANDBOX", "workspace-write")   # read-only｜workspace-write（danger-full-access 由 codex_blocked 拒絕）
 ENGINE_CODEX = "codex"
@@ -4009,7 +4014,7 @@ def codex_logged_in() -> bool:
 def codex_setup_problem() -> str:
     """登入以外、使用者在畫面上解決不了的問題（空字串＝沒有）。2026-09-17 安全稽核 High #8：
     - 員工不能共用你本人的 ~/.codex：你的 ChatGPT 登入、把 /Users/mac 標成 trusted 的設定都會跟著走。
-    - OFFICE_CODEX_SANDBOX=danger-full-access：完全關掉沙箱，而 exec 模式的審批政策是 never，等於把機器交出去。"""
+    - OFFICE_CODEX_SANDBOX=danger-full-access：完全關掉沙箱，跳出沙箱的請求又一律自動拒——沒有沙箱就沒有東西可拒，等於把機器交出去。"""
     if shutil.which(CODEX_CMD) is None:
         return "找不到 codex 指令"
     if CODEX_SANDBOX not in ("read-only", "workspace-write"):
@@ -4162,8 +4167,8 @@ def codex_parity_args(aid: str, base: Path) -> list[str]:
     - shell 不連網（稽核 #2，2026-09-24 Aaron 決定收回 9/18 的 B 案）：Codex 的網路只有全開／全關、沒有網域白名單，
       workspace-write 沙箱又讀得到整台機器——開著就是「讀金鑰＋送出去」一條龍。代價：內建網頁搜尋開不了 RSS、
       GitHub API、LinkedIn 訪客 API，這些來源在 Codex 上做不到（班表全走 CLI 引擎，不受影響）。
-    - MCP 核准：exec 模式的審批政策是 never，沒設就一律擋（實測：「MCP tool call requires approval」）。
-      跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的照樣被擋。
+    - MCP 核准：跟 Claude Code 員工同一條權限線——profile 放行的伺服器設 approve，沒放行的每次跳審批卡
+      （app-server 的 elicitation，見 codex_server_request；exec 時代是一律擋）。
     - 你本人的 ~/.agents/skills 關掉：Claude Code 員工看不到它們；實測 firecrawl 技能寫著「MUST replace WebFetch and WebSearch」，
       直接跟辦公室的工具對照打架。Codex 自己內建的技能（CODEX_HOME 底下）不動。"""
     out = ["-c", "project_root_markers=[]", "-c", 'web_search="live"',
@@ -4253,52 +4258,188 @@ def codex_thread_model(tid: str) -> str:
     return model
 
 
+CODEX_APPROVAL = "on-request"   # 審批政策（見上方說明）：MCP 未放行的來問，跳出沙箱的橋一律拒
+codex_rpc: dict[str, "CodexRpc"] = {}   # aid -> 正在跑的 app-server 連線（插話要找它；也用來分辨 cli_procs 裡哪支是 Codex）
+
+
+def proc_engine(aid: str) -> str:
+    """cli_procs 裡這個人的行程是哪個引擎（Claude Code 與 Codex 共用那張表）。"""
+    return ENGINE_CODEX if aid in codex_rpc else ENGINE_CLI
+
+
+class CodexRpcError(Exception):
+    pass
+
+
+class CodexRpc:
+    """codex app-server 的 JSON-RPC：stdio、一行一則 JSON、不帶 jsonrpc 欄位（實測 0.154）。
+    回應由 run_codex_task 的讀取迴圈交給 resolve()；行程沒了就 fail_all()，等著的呼叫不會卡到逾時。"""
+
+    def __init__(self, proc: asyncio.subprocess.Process):
+        self.proc = proc
+        self.n = 0
+        self.waiting: dict[int, asyncio.Future] = {}
+        self.thread = ""
+        self.turn = ""
+        self.mcp_item: dict = {}   # 最近開始的 MCP 工具呼叫：elicitation 請求本身不帶工具名稱，從這裡補
+
+    async def _send(self, obj: dict) -> None:
+        assert self.proc.stdin is not None
+        self.proc.stdin.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+        await self.proc.stdin.drain()
+
+    async def call(self, method: str, params: dict, timeout: float = 60.0) -> dict:
+        self.n += 1
+        i = self.n
+        fut = asyncio.get_running_loop().create_future()
+        self.waiting[i] = fut
+        try:
+            await self._send({"id": i, "method": method, "params": params})
+            r = await asyncio.wait_for(fut, timeout)
+        finally:
+            self.waiting.pop(i, None)
+        if "error" in r:
+            raise CodexRpcError(str((r.get("error") or {}).get("message") or r["error"])[:300])
+        return r.get("result") or {}
+
+    async def notify(self, method: str) -> None:
+        await self._send({"method": method})
+
+    async def reply(self, rid, result: dict | None = None, error: str = "") -> None:
+        await self._send({"id": rid, "error": {"code": -32000, "message": error}} if error else {"id": rid, "result": result or {}})
+
+    def resolve(self, d: dict) -> None:
+        if (fut := self.waiting.get(d.get("id"))) and not fut.done():
+            fut.set_result(d)
+
+    def fail_all(self, why: str) -> None:
+        for fut in self.waiting.values():
+            if not fut.done():
+                fut.set_result({"error": {"message": why}})
+
+
+def codex_cmd_text(it: dict) -> str:
+    """app-server 給的指令是包過一層的（/bin/zsh -lc '…'）；只有一個動作時用它解析好的那段，給人看的是原本那句。"""
+    acts = it.get("commandActions") or []
+    if len(acts) == 1 and isinstance(acts[0], dict) and acts[0].get("command"):
+        return str(acts[0]["command"])
+    return str(it.get("command") or "")
+
+
 def codex_events(d: dict) -> list[dict]:
-    """一筆 Codex 事件 → 零到多筆 office 事件（收工那兩種在 run_codex_task 處理，要帶用量與模型）。
+    """一則 app-server 通知 → 零到多筆 office 事件（收工、用量、審批在 run_codex_task 處理）。
     沒見過的 item 型別照樣投影成工具事件（名稱就是型別），寧可多一行不認得的，也不要無聲吃掉。"""
-    t = d.get("type")
+    m, p = d.get("method"), d.get("params") or {}
     out: list[dict] = []
-    if t in ("item.started", "item.completed"):
-        it = d.get("item") or {}
+    if m in ("item/started", "item/completed"):
+        it = p.get("item") or {}
         typ = str(it.get("type") or "")
-        done = t == "item.completed"
-        if typ == "agent_message":
+        done = m == "item/completed"
+        if typ == "userMessage":   # 派工文字與插話：橋送出去時自己記過了
+            return out
+        if typ == "agentMessage":
             if done and str(it.get("text") or "").strip():
                 out.append({"kind": "msg", "label": str(it["text"])})
         elif typ == "reasoning":
             if done:
                 out.append({"kind": "think", "label": ""})
-        elif typ == "error":   # item 型的 error 是警告（例：resume 換了模型），真的失敗走 turn.failed
-            if done:
-                out.append({"kind": "msg", "label": f"⚠ {str(it.get('message') or '')[:300]}"})
-        elif typ == "command_execution":
+        elif typ == "commandExecution":
             if not done:
-                out.append({"kind": "tool", "label": "shell", "detail": str(it.get("command") or "")})
+                out.append({"kind": "tool", "label": "shell", "detail": codex_cmd_text(it)})
             else:
-                ok = it.get("exit_code") in (0, None) and str(it.get("status") or "completed") == "completed"
+                ok = it.get("exitCode") in (0, None) and str(it.get("status") or "completed") == "completed"
                 out.append({"kind": "result" if ok else "error", "label": "shell",
-                            "detail": str(it.get("aggregated_output") or "")[:400]})
-        elif typ == "web_search":
+                            "detail": str(it.get("aggregatedOutput") or "").strip()[:400]})
+        elif typ == "webSearch":
             if not done:
                 out.append({"kind": "tool", "label": "web_search", "detail": str(it.get("query") or "")})
-        else:   # file_change、mcp_tool_call、…：先照型別名投影
+        elif typ == "mcpToolCall":
+            name = f"mcp:{it.get('server', '')}.{it.get('tool', '')}"
+            if not done:
+                out.append({"kind": "tool", "label": name, "detail": json.dumps(it.get("arguments"), ensure_ascii=False)[:400]})
+            else:
+                bad = str(it.get("status") or "") in ("failed", "declined", "error")
+                body = (it.get("error") or {}).get("message") if bad and isinstance(it.get("error"), dict) else it.get("result")
+                if isinstance(body, dict) and isinstance(body.get("content"), list):   # MCP 的結果：只留文字段落給人看
+                    body = "\n".join(str(x.get("text") or "") for x in body["content"] if isinstance(x, dict)).strip() or body
+                out.append({"kind": "error" if bad else "result", "label": name,
+                            "detail": (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))[:400]})
+        else:   # fileChange、dynamicToolCall、…：先照型別名投影
             name = typ or "tool"
-            if typ == "mcp_tool_call":
-                name = f"mcp:{it.get('server', '')}.{it.get('tool', '')}"
-            detail = json.dumps({k: v for k, v in it.items() if k not in ("id", "type", "status")}, ensure_ascii=False)[:400]
+            detail = json.dumps({k: v for k, v in it.items() if k not in ("id", "type", "status") and v is not None},
+                                ensure_ascii=False)[:400]
             if not done:
                 out.append({"kind": "tool", "label": name, "detail": detail})
             else:
                 bad = str(it.get("status") or "") in ("failed", "declined", "error")
                 out.append({"kind": "error" if bad else "result", "label": name, "detail": detail})
-    elif t == "error":
-        out.append({"kind": "msg", "label": f"⚠ {str(d.get('message') or '')[:300]}"})
+    elif m == "error":
+        e = p.get("error") or {}
+        out.append({"kind": "msg", "label": f"⚠ {str(e.get('message') or '')[:300]}" + ("（Codex 會自動重試）" if p.get("willRetry") else "")})
+    elif m == "warning":
+        out.append({"kind": "msg", "label": f"⚠ {str(p.get('message') or '')[:300]}"})
     return out
+
+
+async def codex_server_request(aid: str, rpc: CodexRpc, d: dict) -> None:
+    """app-server 反過來問我們的請求。MCP 工具核准 → 審批卡；跳出沙箱 → 一律拒；其他 → 回錯誤。
+    每一種都一定要回：不回的話那個工具呼叫就一直卡著，直到整個任務逾時。"""
+    m, p, rid = str(d.get("method") or ""), d.get("params") or {}, d.get("id")
+    meta = p.get("_meta") if isinstance(p.get("_meta"), dict) else {}
+    try:
+        if m == "mcpServer/elicitation/request" and meta.get("codex_approval_kind") == "mcp_tool_call":
+            server = str(p.get("serverName") or "?")
+            tool = str(rpc.mcp_item.get("tool") or "") if rpc.mcp_item.get("server") == server else ""
+            if not tool and (hit := re.search(r'run tool "([^"]+)"', str(p.get("message") or ""))):
+                tool = hit.group(1)
+            name = f"mcp__{server}__{tool or '?'}"   # 跟 Claude Code 的審批卡同一種寫法
+            params = json.dumps(meta.get("tool_params"), ensure_ascii=False) if meta.get("tool_params") is not None else ""
+            if aid in sched_running:
+                log_ev(aid, f"⛔ 班表任務無人值守，需審批的操作一律拒絕：{name}｜{params[:120]}")
+                audit("policy.denied", aid, tool=name, params=params[:300], reason="unattended", engine=ENGINE_CODEX)
+                await rpc.reply(rid, {"action": "decline"})
+                return
+            allowed, why = await boss_approval(aid, name, params, "codex-" + uuid.uuid4().hex[:12], ENGINE_CODEX)
+            await rpc.reply(rid, {"action": "accept", "content": {}} if allowed else {"action": "decline"})
+            return
+        if m in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval",
+                 "execCommandApproval", "applyPatchApproval"):
+            what = str(p.get("command") or p.get("reason") or p.get("grantRoot") or json.dumps(p.get("permissions"), ensure_ascii=False) or "")[:200]
+            log_ev(aid, f"⛔ Codex 想跳出沙箱：{what}——辦公室規定員工不能跳出沙箱，已自動拒絕")
+            audit("policy.denied", aid, tool=m, params=what, reason="sandbox-escape", engine=ENGINE_CODEX)
+            if m in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+                await rpc.reply(rid, {"decision": "decline"})
+            else:
+                await rpc.reply(rid, error="辦公室規定員工不能跳出沙箱，已拒絕")
+            return
+        await rpc.reply(rid, error=f"辦公室不支援 {m}" + ("（沒人能即時回答問題：照你的判斷做，或在報告裡說明）" if "requestUserInput" in m else ""))
+    except (OSError, ConnectionError, RuntimeError):
+        pass   # 行程已經沒了：沒有人要聽這個回覆
+
+
+async def codex_steer(aid: str, text: str) -> bool:
+    """插話：turn/steer 塞進進行中的這一輪。送不進去（這輪剛收工、行程沒了）回 False，不假裝送了。"""
+    rpc = codex_rpc.get(aid)
+    # 剛派工時 app-server 還在握手、這一輪還沒開（實測要幾秒）：老闆一派完就補一句很常見，等這一輪開了再送
+    for _ in range(100):
+        if rpc is None or codex_rpc.get(aid) is not rpc:
+            return False
+        if rpc.thread and rpc.turn:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        return False
+    try:
+        await rpc.call("turn/steer", {"threadId": rpc.thread, "expectedTurnId": rpc.turn,
+                                      "input": [{"type": "text", "text": text}]}, timeout=15)
+    except (CodexRpcError, asyncio.TimeoutError, OSError, ConnectionError, RuntimeError):
+        return False
+    return True
 
 
 async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
                          effort: str = "", notes: tuple = ()) -> None:
-    """在員工工作區跑 `codex exec --json`，事件翻成 office 事件（投影同 run_cli_task）。"""
+    """在員工工作區開一支 `codex app-server`、跑一輪，事件翻成 office 事件（投影同 run_cli_task）。"""
     base = cwd or agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
     if base is None:
         await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80], "engine": ENGINE_CODEX})
@@ -4310,12 +4451,9 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     if tid and codex_rollout(tid) is None:
         tid = ""   # 那條紀錄不在了（換了 CODEX_HOME、被清掉）：開新的，工作串會講
     want = model or (codex_thread_model(tid) if tid else "") or os.environ.get("OFFICE_CODEX_MODEL", "").strip()
-    argv = [CODEX_CMD, "exec", "--json", "--skip-git-repo-check", "-s", CODEX_SANDBOX, "-C", str(base), *codex_parity_args(aid, base)]
-    if want:
-        argv += ["-m", want]
+    argv = [CODEX_CMD, "app-server", *codex_parity_args(aid, base)]
     if effort:
         argv += ["-c", f"model_reasoning_effort={effort}"]
-    argv += ["resume", tid, "-"] if tid else ["-"]   # 提示從 stdin 送（長文、換行都安全）
     await office_event({"v": 1, "agent": aid, "kind": "start", "label": text[:80], "detail": str(base),
                         "engine": ENGINE_CODEX, "session": tid, "effort": effort})
     for n in notes:   # 同 run_cli_task：派工時的說明寫進【這張】卡
@@ -4334,84 +4472,139 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     except OSError as e:
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": f"起不了 Codex（{CODEX_CMD}）：{e}"})
         return
+    rpc = CodexRpc(proc)
     cli_procs[aid] = proc   # 中止走同一條（/stop 砍 cli_procs 裡的行程）
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(text.encode("utf-8"))
-        await proc.stdin.drain()
-        proc.stdin.close()
-    except (OSError, ConnectionError) as e:
-        cli_procs.pop(aid, None)
-        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": f"提示送不進 Codex：{e}"})
-        return
+    codex_rpc[aid] = rpc
+    finished: asyncio.Future = asyncio.get_running_loop().create_future()   # 這一輪的 turn（收工），或 None（行程先沒了）
+    usage = {"in": 0, "out": 0, "cache_read": 0, "cache_create": 0}
+    asks: set[asyncio.Task] = set()
     done_sent = False
     thread = tid
-    try:
-        async def pump() -> None:
-            nonlocal done_sent, thread
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("{"):
-                    continue
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                t = d.get("type")
-                if t == "thread.started" and d.get("thread_id"):
-                    thread = str(d["thread_id"])
-                    if not fresh:
-                        codex_threads[key] = thread
-                        globals()["_dirty"] = True
-                    card = last_report.get(aid)
-                    if card and card.get("status") == "working" and card.get("engine") == ENGINE_CODEX and card.get("session") != thread:
-                        card["session"] = thread   # 新 thread 的 id 開跑後才知道：補回卡上（開卡時填的是頻道名的預設值）
-                        audit("codex.thread", aid, card=card.get("id"), session=thread, engine=ENGINE_CODEX)
-                    continue
-                if t in ("turn.completed", "turn.failed"):
-                    done_sent = True
-                    m = codex_thread_model(thread)
-                    if m:
-                        codex_model[aid] = m
-                        globals()["_dirty"] = True
-                    if t == "turn.failed":
-                        msg = str((d.get("error") or {}).get("message") or "Codex 回報失敗")
-                        await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": msg[:300], "model": m})
-                    else:
-                        u = d.get("usage") or {}
-                        usage = {"in": int(u.get("input_tokens") or 0), "out": int(u.get("output_tokens") or 0),
-                                 "cache_read": int(u.get("cached_input_tokens") or 0),
-                                 "cache_create": int(u.get("cache_write_input_tokens") or 0)}
-                        ev = {"v": 1, "agent": aid, "kind": "done", "label": "ok", "detail": "", "model": m}
-                        if any(usage.values()):
-                            ev["usage"] = usage
-                        await office_event({**ev, "run": run})
-                    continue
+
+    async def pump() -> None:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            m = d.get("method")
+            if m is None:
+                rpc.resolve(d)
+                continue
+            if "id" in d:   # 反過來問我們的（審批）：等老闆要好幾分鐘，不能擋住讀取
+                t = asyncio.create_task(codex_server_request(aid, rpc, d))
+                asks.add(t)
+                t.add_done_callback(asks.discard)
+                continue
+            p = d.get("params") or {}
+            if m == "turn/started":
+                rpc.turn = str((p.get("turn") or {}).get("id") or rpc.turn)
+            elif m == "thread/tokenUsage/updated":   # 每次模型呼叫一則，last＝那一次；加總＝這一輪
+                last = (p.get("tokenUsage") or {}).get("last") or {}
+                for k, src in (("in", "inputTokens"), ("out", "outputTokens"), ("cache_read", "cachedInputTokens"),
+                               ("cache_create", "cacheWriteInputTokens")):
+                    usage[k] += int(last.get(src) or 0)
+            elif m == "turn/completed":
+                turn = p.get("turn") or {}
+                if not rpc.turn or turn.get("id") == rpc.turn:
+                    if not finished.done():
+                        finished.set_result(turn)
+            else:
+                it = p.get("item") or {}
+                if m == "item/started" and it.get("type") == "mcpToolCall":
+                    rpc.mcp_item = it
                 for ev in codex_events(d):
                     await office_event({"v": 1, "agent": aid, "run": run, **ev})
-        await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
-        await proc.wait()
+        rpc.fail_all("Codex 行程已結束")
+        if not finished.done():
+            finished.set_result(None)
+
+    async def drive() -> dict | None:
+        nonlocal thread
+        await rpc.call("initialize", {"clientInfo": {"name": "pixel-office", "title": "Pixel Office", "version": "1"}})
+        await rpc.notify("initialized")
+        params: dict = {"cwd": str(base), "sandbox": CODEX_SANDBOX, "approvalPolicy": CODEX_APPROVAL}
+        if want:
+            params["model"] = want
+        r: dict = {}
+        if thread:
+            try:
+                r = await rpc.call("thread/resume", {"threadId": thread, **params})
+            except CodexRpcError as e:
+                log_ev(aid, f"ℹ 接不回上次的 Codex 對話（{e}），這次開一條新的")
+                thread = ""
+        if not thread:
+            r = await rpc.call("thread/start", params)
+        thread = str((r.get("thread") or {}).get("id") or "")
+        rpc.thread = thread
+        if m := str(r.get("model") or ""):
+            codex_model[aid] = m
+            globals()["_dirty"] = True
+        if thread and not fresh and codex_threads.get(key) != thread:
+            codex_threads[key] = thread
+            globals()["_dirty"] = True
+        card = last_report.get(aid)
+        if thread and card and card.get("status") == "working" and card.get("engine") == ENGINE_CODEX and card.get("session") != thread:
+            card["session"] = thread   # 新 thread 的 id 開跑後才知道：補回卡上（開卡時填的是頻道名的預設值）
+            audit("codex.thread", aid, card=card.get("id"), session=thread, engine=ENGINE_CODEX)
+        t = await rpc.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": text}]})
+        rpc.turn = rpc.turn or str((t.get("turn") or {}).get("id") or "")
+        return await finished
+
+    reader = asyncio.create_task(pump())
+    try:
+        try:
+            turn = await asyncio.wait_for(drive(), timeout=CLI_TIMEOUT)
+        except CodexRpcError as e:   # 握手、開 thread、開這一輪任何一步被拒——或行程先沒了（那就走下面「行程已結束」）
+            turn = None if finished.done() and finished.result() is None else {"status": "failed", "error": {"message": str(e)}}
+        done_sent = turn is not None
+        if turn is not None:
+            m = codex_thread_model(thread) or codex_model.get(aid, "")
+            if m:
+                codex_model[aid] = m
+                globals()["_dirty"] = True
+            st = str(turn.get("status") or "")
+            if st == "completed":
+                ev = {"v": 1, "agent": aid, "kind": "done", "label": "ok", "detail": "", "model": m}
+                if any(usage.values()):
+                    ev["usage"] = usage
+                await office_event({**ev, "run": run})
+            else:
+                msg = str((turn.get("error") or {}).get("message") or ("Codex 這一輪被中斷" if st == "interrupted" else "Codex 回報失敗"))
+                await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": msg[:300], "model": m})
     except asyncio.TimeoutError:
-        kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": f"Codex 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
-        kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                             "detail": "老闆中止了這個任務" if aid in stopped else "橋關閉或任務被取消，Codex 行程被中斷（不是老闆按的）"})
         done_sent = True
         raise
     finally:
+        # app-server 不會自己結束：收工、逾時、中止都在這裡收掉（連它開的 MCP 伺服器）
+        kill_tree(proc.pid)
         if cli_procs.get(aid) is proc:   # 只收自己的（同 run_cli_task：新任務的行程別被舊的收尾拿掉）
             cli_procs.pop(aid, None)
+            codex_rpc.pop(aid, None)
+            if (fut := cli_permission.get(aid)) and not fut.done():   # 行程沒了，等著的審批也沒有意義
+                fut.set_result((False, "Codex 行程已結束"))
+        for t in list(asks):
+            t.cancel()
+        reader.cancel()
         if not done_sent:
             err = ""
             if proc.stderr is not None:
-                err = (await proc.stderr.read())[-200:].decode("utf-8", "replace").strip()
+                try:
+                    err = (await asyncio.wait_for(proc.stderr.read(), 2))[-200:].decode("utf-8", "replace").strip()
+                except asyncio.TimeoutError:
+                    pass
+            await proc.wait()
             what = "Codex 行程已結束" if aid in stopped else "Codex 異常結束"
-            await office_event({"v": 1, "agent": aid, "kind": "done", "label": "error",
+            await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
                                 "detail": f"{what}（退出碼 {proc.returncode}）{('：' + err) if err else ''}"})
 
 
@@ -4726,7 +4919,7 @@ def approval_permit(aid: str) -> str | None:
     """眼前這張審批能不能「以後都准」：只有 Claude Code 的（常駐許可靠 --allowedTools 帶），而且推得出規則的。
     規則從【這張卡】的 approval_meta 推——跟核准綁同一張卡（稽核 #5），看的是 A 就不會准到 B。"""
     m = approval_meta.get(aid)
-    if aid not in cli_permission or not m:
+    if aid not in cli_permission or not m or proc_engine(aid) != ENGINE_CLI:   # Codex 不吃 --allowedTools：准了也記不住
         return None
     try:
         ti = json.loads(str(m.get("params") or ""))
@@ -4807,17 +5000,23 @@ async def office_permission(d: dict):
         audit("policy.denied", aid, tool=tool, params=params[:300], reason="unattended", engine=ENGINE_CLI, permit=rule)
         return {"behavior": "deny", "message": "班表任務為無人值守執行，需審批的操作已自動拒絕；改用不需審批的方式，或在報告裡說明做不到"
                 + ("。已送進老闆的待批清單，批了之後下次就能用" if queued else "")}
+    allowed, why = await boss_approval(aid, tool, params, str(d.get("tool_use_id") or ""), ENGINE_CLI)
+    return {"behavior": "allow" if allowed else "deny", "message": why}
+
+
+async def boss_approval(aid: str, tool: str, params: str, task_id: str, engine: str) -> tuple[bool, str]:
+    """開一張審批卡、等老闆決定（Claude Code 的 hook 與 Codex app-server 的請求共用）。回 (准不准, 理由)。"""
     # 同一個人（看板＝主持人加一批子 agent）同時來好幾張：排隊等前一張處理完，不直接拒——
     # 實測三個子 agent 同時讀檔，第二、三張被「上一張還在等」拒掉，等於只有一個人拿得到權限。
     deadline = time.time() + CLI_APPROVAL_S
     while aid in cli_permission or aid in pending_approval:
         if time.time() > deadline:
-            return {"behavior": "deny", "message": "前一張審批一直沒處理完，這一個等到逾時，拒絕"}
+            return False, "前一張審批一直沒處理完，這一個等到逾時，拒絕"
         await asyncio.sleep(0.3)
     # 沿用 cogito 審批卡的樣板（文字給人看）＋同一組審批欄位（橋只認這個，稽核 #10）：外殼的版面、倒數全部不用改
     # 每張卡都要有獨一無二的 ID（稽核 #5：決定綁在看過的那張卡上）。Claude Code 的 PermissionRequest hook 實測不帶
     # tool_use_id，以前一律寫 '-'——所有 CLI 卡同一個 ID，卡換了也分不出來，綁 ID 等於沒綁。
-    tid = str(d.get("tool_use_id") or "cli-" + uuid.uuid4().hex[:12])
+    tid = task_id or "cli-" + uuid.uuid4().hex[:12]
     text = (f"{APPROVAL_PREFIX}\nAgent 試圖執行：\n• 工具: `{tool}`\n• 參數: `{params}`\n"
             f"任務 ID: `{tid}`\n"
             f"👉 直接回復 `approve` / `reject` 即可。{max(1, int(CLI_APPROVAL_S // 60))} 分鐘內無響應將自動拒絕。")
@@ -4829,22 +5028,23 @@ async def office_permission(d: dict):
         allowed, why = await asyncio.wait_for(fut, timeout=CLI_APPROVAL_S)
     except asyncio.TimeoutError:
         allowed, why = False, "無人回應，逾時自動拒絕"
-        audit("approval.timeout", aid, tool=tool, engine=ENGINE_CLI)
+        audit("approval.timeout", aid, tool=tool, engine=engine)
         clear_approval(aid)
         await sync_emote(aid)
         log_ev(aid, f"⏰ 審批逾時無人回應，自動拒絕：{tool}")
     finally:
-        cli_permission.pop(aid, None)
-    return {"behavior": "allow" if allowed else "deny", "message": why}
+        if cli_permission.get(aid) is fut:
+            cli_permission.pop(aid, None)
+    return allowed, why
 
 
 async def resolve_cli_permission(aid: str, allowed: bool, why: str) -> bool:
-    """老闆按了放行／駁回：把決定交回等著的 hook，並做跟 cogito 那條一樣的收卡投影。"""
+    """老闆按了放行／駁回：把決定交回等著的 hook（或 Codex 的請求），並做跟 cogito 那條一樣的收卡投影。"""
     fut = cli_permission.get(aid)
     if fut is None or fut.done():
         return False
     fut.set_result((allowed, why))
-    audit("approval.approved" if allowed else "approval.rejected", aid, by="office-web", why=why[:200], engine=ENGINE_CLI)
+    audit("approval.approved" if allowed else "approval.rejected", aid, by="office-web", why=why[:200], engine=proc_engine(aid))
     clear_approval(aid)
     await sync_emote(aid)
     notify("agent", aid, alert="done")
@@ -5510,7 +5710,7 @@ ENGINE_CAPS = {
     # effort：派工時能不能指定思考力度（Claude Code --effort、Codex model_reasoning_effort、cogito /task 的 effort）
     ENGINE_COGITO: {"name": "cogito", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": True},
     ENGINE_CLI: {"name": "Claude Code", "resume": True, "approval": True, "steer": True, "subagents": True, "effort": True},
-    ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": False, "steer": False, "subagents": False, "effort": True},
+    ENGINE_CODEX: {"name": "Codex", "resume": True, "approval": True, "steer": True, "subagents": False, "effort": True},   # 審批與插話：app-server（2026-11-04）
 }
 CAP_LABEL = {"steer": "插話", "approval": "審批", "subagents": "子 agent"}   # 會缺的那幾項，講給人聽的名字
 IN_FLIGHT = ("approve", "reject", "/stop", "/steer")   # 任務進行中的互動（不是派新任務）
@@ -5519,7 +5719,7 @@ IN_FLIGHT = ("approve", "reject", "/stop", "/steer")   # 任務進行中的互�
 def running_engine(aid: str) -> str:
     """正在跑這件事的引擎；沒在工作就回空字串。工作中的互動要找【它】，不是設定面板現在選的那個。"""
     if aid in cli_permission:
-        return ENGINE_CLI   # Claude Code 的審批 hook 正在等：這件一定是它在跑（比卡片上記的更確定）
+        return proc_engine(aid)   # 橋自己的子行程有審批在等：這件一定是它在跑（比卡片上記的更確定）
     c = last_report.get(aid) or {}
     return str(c.get("engine") or ENGINE_COGITO) if aid in busy and c.get("status") == "working" else ""
 model_sent: dict[str, str] = {}   # aid -> cogito 那邊 office 頻道現在的模型設定（橋最後一次告訴它的；""＝cogito 預設；沒有這個鍵＝不知道）
@@ -5865,9 +6065,9 @@ def engine_caps(eng: str) -> dict:
             skills.append({"name": fm.get("name") or f.parent.name, "description": fm.get("description", "")[:200]})
         allowed = office_mcp_allowed()
         return {"source": f"{home}/skills（Codex 員工自己的設定目錄）", "skills": skills,
-                "mcp": [{"name": n, "description": "自動核准（員工 profile 有放行）" if n in allowed else "要核准——exec 模式沒人能按，會被擋"}
+                "mcp": [{"name": n, "description": "自動核准（員工 profile 有放行）" if n in allowed else "每次跳審批卡（班表無人值守時自動拒）"}
                         for n in office_mcp_servers()],
-                "note": "Codex 會自己判斷要不要用技能；它的 slash 指令只在互動介面有，辦公室走 codex exec 用不到。你本人的 ~/.agents/skills 不給 Codex 員工。"}
+                "note": "Codex 會自己判斷要不要用技能；它的 slash 指令只在互動介面有，辦公室走 codex app-server 用不到。你本人的 ~/.agents/skills 不給 Codex 員工。"}
     return {}
 
 
@@ -5883,7 +6083,7 @@ def office_commands(agent: str = "", engine: str = ""):
              if eng in c.get("engines", ENGINE_CAPS) and (not c.get("cap") or cap[c["cap"]]) and agent in c.get("agents", (agent,))]
     notes = ["閒置時，其他任何文字都是派一件新任務。", "換引擎、模型、工作 repo：輸入框下方的 ⚙ 設定。"]
     if lack := [v for k, v in CAP_LABEL.items() if not cap[k]]:
-        notes.append(f"{cap['name']} 引擎目前不支援{'、'.join(lack)}：要補充就等它收工再派，或中止重派。")
+        notes.append(f"{cap['name']} 引擎目前不支援{'、'.join(lack)}" + ("。" if cap["steer"] else "：要補充就等它收工再派，或中止重派。"))
     return {"ok": True, "engine": eng, "items": items, "notes": notes, "caps": engine_caps(eng)}
 
 
@@ -5986,7 +6186,7 @@ async def office_dispatch(d: dict):
         asyncio.create_task(show_rejected(aid))   # 丟出，演完才回工位繼續
         return {"ok": True, "delivered": not how}
 
-    # 不假裝：能力表說沒有的，明講（例：Codex 的 exec 模式沒有第二則訊息的入口，審批政策是 never）
+    # 不假裝：能力表說沒有的，明講（例：Codex 還沒有子 agent，看板開不了）
     if verb == "/steer" and not cap["steer"]:
         return {"ok": False, "error": f"{cap['name']} 引擎目前不支援插話——要補充就等它收工再派，或中止重派"}
     if verb in ("approve", "reject") and not cap["approval"]:
@@ -6073,13 +6273,14 @@ async def office_dispatch(d: dict):
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
                                          notes=tuple(notes)))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want, "effort": cli_eff}
-    if cli_mode:
+    if cli_mode or codex_mode:
         if verb in ("approve", "reject"):
             why = text[len(verb):].strip()
             always = verb == "approve" and bool(d.get("always"))
             rule = approval_permit(aid) if always else None   # 先推（核准後卡就收了）；推不出來就整個不做，不要准了這次卻沒記住
             if always and not rule:
-                return {"ok": False, "error": "這個操作不能設成以後都准（只有網域、MCP 工具、單一 Bash 指令可以）——請按一般的核准"}
+                return {"ok": False, "error": ("Codex 的審批不能設成以後都准（要長期放行，請在員工 profile 放行整台 MCP 伺服器）" if codex_mode else
+                                               "這個操作不能設成以後都准（只有網域、MCP 工具、單一 Bash 指令可以）") + "——請按一般的核准"}
             if await resolve_cli_permission(aid, verb == "approve", why or ("老闆核准" if verb == "approve" else "老闆駁回")):
                 if rule:   # 真的送到了才記：送不到的核准不該留下一條許可
                     grant_permit(aid, rule, "當場審批")
@@ -6087,14 +6288,19 @@ async def office_dispatch(d: dict):
                 return {"ok": True}
             return {"ok": False, "error": f"{agents[aid].name} 沒有待審批的操作"}
         if verb == "/steer":
-            if not await cli_send(aid, text[len("/steer"):].strip()):
-                return {"ok": False, "error": "插話送不進 CLI（stdin 已關或行程不在）——這一次的任務已經在收尾"}
-            cli_turns[aid] = cli_turns.get(aid, 1) + 1    # 多一則訊息＝多等一個 result
-            log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
-            audit("steer", aid, by="office-web", text=text[len('/steer'):].strip()[:200], engine=ENGINE_CLI)
+            said = text[len("/steer"):].strip()
+            if codex_mode:   # Codex：turn/steer 塞進同一輪，不會多一個收工
+                if not await codex_steer(aid, said):
+                    return {"ok": False, "error": "插話送不進 Codex（這一輪已經在收尾，或行程不在）"}
+            else:
+                if not await cli_send(aid, said):
+                    return {"ok": False, "error": "插話送不進 CLI（stdin 已關或行程不在）——這一次的任務已經在收尾"}
+                cli_turns[aid] = cli_turns.get(aid, 1) + 1    # 多一則訊息＝多等一個 result
+            log_ev(aid, f"🧑‍💼 老闆插話：{said[:200]}")
+            audit("steer", aid, by="office-web", text=said[:200], engine=eng_now)
             await bubble(aid, "📨 插話")
             return {"ok": True}
-        return {"ok": False, "error": f"CLI 模式不支援「{verb}」"}
+        return {"ok": False, "error": f"{cap['name']} 不支援「{verb}」"}
     if not COGITO_HTTP:
         return {"ok": False, "error": "未設 COGITO_HTTP——cogito 的 HTTP 派工入口未啟用"}
     # 人數上限只對看板有意義（其他人本來就是一個人做），而且不能套在 approve/reject//stop
