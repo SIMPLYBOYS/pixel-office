@@ -1893,11 +1893,25 @@ TURN_QUIET = 12.0                       # 距上一則事件超過這麼久，�
 last_ev_at: dict[str, float] = {}       # aid -> 最後一則事件的時間（monotonic）
 
 NOTE_MARK = "🧑‍💼 老闆交辦："
+NOTE_MAX = 4000   # 老闆的原話寄放多長（工作串要看得到全文；貼一整份文件進來也不至於撐爆狀態檔）
 
 
 def note_body(note: str) -> str:
     """剝掉「老闆交辦：」前綴，只留老闆真正說的那句話。"""
     return note.removeprefix(NOTE_MARK).strip()
+
+
+def boss_note(text: str) -> str:
+    return NOTE_MARK + (text[:NOTE_MAX] + f"…（後略；全文 {len(text)} 字已交給員工）" if len(text) > NOTE_MAX else text)
+
+
+def full_said(title: str, note: str | None) -> str:
+    """卡片標題是老闆原話截出來的（三個引擎都截 80 字：CLI／Codex 的 text[:80]、cogito 的 TruncRunes 80＋…）。
+    工作串的「接到任務」那行改放全文——貼一段多行需求進來，畫面上只剩第一行的前 80 字，看起來就像只貼進一行
+    （2026-11-05 回報）。標題不是原話的開頭（續跑、cogito 改寫過）就照標題。"""
+    body = note_body(note) if note and note.startswith(NOTE_MARK) else ""
+    head = title.strip().removesuffix("…").strip()
+    return body if head and len(body) > len(head) and body.startswith(head) else title
 
 
 def body_of(text: str) -> str:
@@ -2194,7 +2208,8 @@ async def office_event(ev: dict):
             if ev.get("run"):   # 閒聊不開卡、話記在目前這張：這一段對話的事件（帶新的 run）也要認得這張卡
                 last_report[aid]["run"] = str(ev["run"])
             await pose(aid, "face_down")   # 有人在跟他講話：轉頭面向鏡頭（原本背對）
-            log_ev(aid, f"💬 老闆：{label}")
+            # CLI／Codex 派工時一律寄放了原話（閒聊判斷在這裡才做）：收走，別掛到下一張卡上
+            log_ev(aid, f"💬 老闆：{full_said(label, pending_note.pop(aid, None))}")
         else:
             # 斷點續跑：cogito 送的 prompt 是那句系統提示，拿它當卡片標題沒人看得懂做過什麼。
             # 沿用上一張未完成卡的任務名，才接得回中斷前那條工作串。
@@ -2236,12 +2251,13 @@ async def office_event(ev: dict):
             card["ts"] = time.time()
             audit("task.start", aid, card=card["id"], engine=card["engine"], session=card["session"],
                   task=task[:200], scheduled=aid in sched_running)
+            note = pending_note.pop(aid, None)
             # 追問不是一件新工作：記成老闆說的那句話，員工接著回就好（2026-10-21 回報：每句都「接到任務」很死板）
-            log_ev(aid, f"💬 老闆：{task}" if asking else f"📋 接到任務：{task}")
+            shown = full_said(task, note)
+            log_ev(aid, f"💬 老闆：{shown}" if asking else f"📋 接到任務：{shown}")
             # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
             # 或 cogito 改寫過任務名時，這行才帶來新資訊。
-            note = pending_note.pop(aid, None)
             # 來源記在卡上（任務看板要用）：寄放的那行知道是誰派的——內容跟標題一樣時它不會寫進卡上，
             # 所以不能事後掃事件猜；事件也有 150 則上限，長任務最早那幾行會被截掉。
             card["origin"] = ("班表" if aid in sched_running or (note or "").startswith("🗓 班表任務")
@@ -6094,6 +6110,7 @@ async def office_dispatch(d: dict):
     aid, text = d.get("agent", ""), (d.get("text") or "").strip()
     if aid not in agents or not text:
         return {"ok": False, "error": "缺 agent 或 text"}
+    said = text   # 老闆的原話：底下會接上人數限制、綁 repo 的說明，工作串要記的是這句
     verb = text.split()[0]
     # 防呆：工作中不收新任務（cogito 也會擋，這裡先給即時回饋）。
     # approve/reject/stop/steer 是任務【進行中】的互動，一律放行——擋住中止等於沒有中止，
@@ -6249,6 +6266,8 @@ async def office_dispatch(d: dict):
             eff = codex_effort_for(aid, codex_want)
             notes = model_note + ((f"ℹ {codex_want or 'Codex 預設型號'} 不收思考力度 {codex_effort_pick[aid]}，這次用它自己的預設",)
                                   if codex_effort_pick.get(aid) and not eff else ())
+            if not d.get("scheduled"):   # 老闆的原話（綁 repo 的說明接上去之前）：工作串的「接到任務」放全文，不只卡片標題那 80 字
+                pending_note[aid] = boss_note(said)
             asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want, "effort": eff}
         if pick == MODEL_RESET:
@@ -6270,6 +6289,8 @@ async def office_dispatch(d: dict):
         elif epick:
             notes.append(f"ℹ Claude Code 沒有「{epick}」這個思考力度，這次沿用 {cli_effort_pick.get(aid) or 'Claude Code 預設'}")
         cli_eff = cli_effort_pick.get(aid, "")
+        if not d.get("scheduled"):   # 同上
+            pending_note[aid] = boss_note(said)
         asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
                                          notes=tuple(notes)))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want, "effort": cli_eff}
@@ -6288,16 +6309,16 @@ async def office_dispatch(d: dict):
                 return {"ok": True}
             return {"ok": False, "error": f"{agents[aid].name} 沒有待審批的操作"}
         if verb == "/steer":
-            said = text[len("/steer"):].strip()
+            msg = text[len("/steer"):].strip()
             if codex_mode:   # Codex：turn/steer 塞進同一輪，不會多一個收工
-                if not await codex_steer(aid, said):
+                if not await codex_steer(aid, msg):
                     return {"ok": False, "error": "插話送不進 Codex（這一輪已經在收尾，或行程不在）"}
             else:
-                if not await cli_send(aid, said):
+                if not await cli_send(aid, msg):
                     return {"ok": False, "error": "插話送不進 CLI（stdin 已關或行程不在）——這一次的任務已經在收尾"}
                 cli_turns[aid] = cli_turns.get(aid, 1) + 1    # 多一則訊息＝多等一個 result
-            log_ev(aid, f"🧑‍💼 老闆插話：{said[:200]}")
-            audit("steer", aid, by="office-web", text=said[:200], engine=eng_now)
+            log_ev(aid, f"🧑‍💼 老闆插話：{msg[:NOTE_MAX]}")
+            audit("steer", aid, by="office-web", text=msg[:200], engine=eng_now)
             await bubble(aid, "📨 插話")
             return {"ok": True}
         return {"ok": False, "error": f"{cap['name']} 不支援「{verb}」"}
@@ -6370,7 +6391,7 @@ async def office_dispatch(d: dict):
         return {"ok": False, "error": approve_hint(verb, f"cogito 回 {r.status_code}：{r.text[:120]}")}
     if verb == "/steer":
         # 投影：插話上工作串（卡片正開著，直接掛進去）＋泡泡。cogito 端下一輪生效。
-        log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:200]}")
+        log_ev(aid, f"🧑‍💼 老闆插話：{text[len('/steer'):].strip()[:NOTE_MAX]}")
         audit("steer", aid, by="office-web", text=text[len('/steer'):].strip()[:200], engine=ENGINE_COGITO)
         await bubble(aid, "📨 插話")
     elif verb in ("approve", "reject"):
@@ -6388,7 +6409,7 @@ async def office_dispatch(d: dict):
             # ⚠ 不能直接 log_ev：這一刻上一張卡已經收了、cogito 的 start 還沒到，
             # log_ev 會為了放這行字開一張「（雜項）」卡並掛成「進行中」，永遠不會關。
             # 寄放著，等 start 開出真的任務卡再掛進去——這行本來就屬於它要開始的那件事。
-            pending_note[aid] = f"{NOTE_MARK}{text[:200]}"
+            pending_note[aid] = boss_note(said)
     return {"ok": True}
 
 

@@ -528,6 +528,7 @@ def run() -> None:
     agent_env_allowlist()
     tool_guard()
     codex_engine()
+    boss_full_text()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1852,7 +1853,10 @@ for o in out:
                 try:
                     main.busy.discard("p05")
                     before2 = (main.last_report.get("p05") or {}).get("id")
-                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "看一下這個專案",
+                    # 派工文字用多行長文（2026-11-05 回報：貼多行進來，工作串只剩第一行的前 80 字）
+                    long_ask = ("看一下這個專案，整理一份需求清單給我，內容要包含登入流程、權限檢查、錯誤訊息的中文化，"
+                                "還有部署前要跑的檢查項目與負責人分工，越具體越好\n1. 登入\n2. 權限\n\n3. 部署")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": long_ask,
                                                          "engine": "cli", "repo": "demo-app"}).json()
                     assert r["ok"] and r.get("repo") is True, r
                     wt = main.CHANNELS_DIR / "office_p05" / "demo-app"
@@ -1867,6 +1871,10 @@ for o in out:
                     card = main.last_report.get("p05")
                     assert card and card.get("workdir", "").endswith("/demo-app"), \
                         f"CLI 應在 worktree 裡跑，實際 workdir={card.get('workdir')!r}"
+                    # 卡片標題照舊是前 80 字；工作串那行放老闆的完整原話——換行都在，不帶橋接上去的 repo 說明
+                    evs = [e["text"] for e in card["events"]]
+                    assert len(card["task"]) <= 80 and any(t in (f"📋 接到任務：{long_ask}", f"💬 老闆：{long_ask}") for t in evs), evs[:3]
+                    assert not any("【工作 repo】" in t for t in evs), "橋接上去的 repo 說明是給員工的，不是老闆說的話"
                 finally:
                     main.REPOS_DIR = old_repos
         finally:
@@ -1884,6 +1892,43 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def boss_full_text() -> None:
+    """工作串的「接到任務」放老闆的完整原話（2026-11-05 回報：貼多行需求進來，畫面上只剩第一行的前 80 字）。
+    標題照舊截短；標題不是原話開頭（續跑、改寫）就照標題；閒聊那條也要收走寄放的原話，別掛到下一張卡。"""
+    long_ask = "第一行要夠長才會被截：" + "需求說明" * 25 + "\n第二行\n\n第四行"
+    note = main.boss_note(long_ask)
+    assert main.full_said(long_ask[:80], note) == long_ask, "CLI／Codex 的標題是 text[:80]"
+    assert main.full_said(long_ask[:79] + "…", note) == long_ask, "cogito 的標題是 TruncRunes(80) 加「…」"
+    assert main.full_said("🔄 續跑：別的任務", note) == "🔄 續跑：別的任務", "標題不是原話開頭：照標題"
+    assert main.full_said("短句", main.boss_note("短句")) == "短句" and main.full_said(long_ask[:80], None) == long_ask[:80]
+    huge = "字" * (main.NOTE_MAX + 50)
+    assert main.boss_note(huge).endswith(f"…（後略；全文 {len(huge)} 字已交給員工）"), "超過上限要講明後面還有、而且員工拿到的是全文"
+    with TestClient(main.app) as c:
+        aid = "p07"
+        main.busy.discard(aid)
+        main.pending_note[aid] = note
+        post(c, agent=aid, kind="start", label=long_ask[:79] + "…")   # cogito 送來的樣子
+        evs = [e["text"] for e in main.last_report[aid]["events"]]
+        assert any(t in (f"📋 接到任務：{long_ask}", f"💬 老闆：{long_ask}") for t in evs), evs[:3]
+        assert aid not in main.pending_note
+        post(c, agent=aid, kind="done", label="ok")
+        # 閒聊（CLI／Codex 派工時一律寄放了原話）：收走，不留給下一張卡
+        main.busy.discard(aid)
+        main.pending_note[aid] = main.boss_note("辛苦了")
+
+        async def chat(_t):
+            return "chat"
+        old_intent, main.intent = main.intent, chat
+        try:
+            post(c, agent=aid, kind="start", label="辛苦了")
+        finally:
+            main.intent = old_intent
+        assert aid in main.chat_mode and aid not in main.pending_note, "閒聊沒收走寄放的原話：下一張卡會掛上這句"
+        post(c, agent=aid, kind="done", label="ok")
+        main.busy.discard(aid); main.chat_mode.discard(aid); main.pending_note.pop(aid, None)
+    print("  ✓ 工作串放老闆的完整原話：CLI／Codex／cogito 的截短標題都認得、續跑照標題、閒聊收走寄放、全文上限講明")
 
 
 def status_emote() -> None:

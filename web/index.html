@@ -868,6 +868,7 @@ function setBoxH(px) {
   g.addEventListener('pointerdown', e => {
     e.preventDefault();
     g.setPointerCapture(e.pointerId);
+    delete $('box').dataset.auto;   // 你自己拉的高度：從這一刻起算偏好，要記住
     startY = e.clientY;
     startH = $('box').getBoundingClientRect().height;
     document.body.classList.add('vdragging');
@@ -2509,9 +2510,23 @@ addEventListener('DOMContentLoaded', () => {
   const box = $('box');
   if (localStorage.boxH) box.style.height = localStorage.boxH;
   new ResizeObserver(() => {
-    if (box.style.height) localStorage.boxH = box.style.height;
+    if (box.style.height && !box.dataset.auto) localStorage.boxH = box.style.height;   // 自動長高的不算你的偏好
   }).observe(box);
+  // 貼上（或打）超過框高的多行文字：自動長高到放得下（上限同 CSS 的 45vh）。只長不縮、不記進偏好，
+  // 送出清空後回到你拉的高度（restoreBox）。62px 只看得到兩三行：貼完一大段只看到最後兩行，
+  // 會以為只貼進一行（2026-11-05 回報）。
+  box.addEventListener('input', () => {
+    if (box.scrollHeight <= box.clientHeight) return;
+    box.dataset.auto = '1';
+    setBoxH(box.scrollHeight + 2);
+  });
 });
+function restoreBox() {
+  const box = $('box');
+  if (!box.dataset.auto) return;
+  delete box.dataset.auto;
+  box.style.height = localStorage.boxH || BOX_DEF;
+}
 
 const SEND_GRACE = 1600;   // ms：夠按到 Esc，又不會讓人覺得卡住
 let pendingSend = null;    // {timer, text}
@@ -2521,6 +2536,7 @@ function cancelSend() {
   clearTimeout(pendingSend.timer);
   $('box').value = pendingSend.text;   // 原文放回去，游標接著改
   $('box').disabled = false;
+  $('box').dispatchEvent(new Event('input'));   // 放回來的是長文：照樣長高
   $('box').focus();
   pendingSend = null;
   $('hint').textContent = '已取消，回到編輯 ✎';
@@ -2542,6 +2558,7 @@ function queueSend(text) {
   const box = $('box');
   pendingSend = { text: box.value, timer: 0 };
   box.value = '';
+  restoreBox();
   box.disabled = true;
   $('hint').textContent = '即將送出…（Esc 取消）';
   pendingSend.timer = setTimeout(() => {
@@ -2569,7 +2586,7 @@ async function steer(text) {
     body: JSON.stringify({ agent: selected, text: '/steer ' + text }),
   })).json();
   $('hint').textContent = r.ok ? '已插話 📨 下一輪生效——不打斷正在跑的那一步' : `插話失敗：${r.error}`;
-  if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
+  if (r.ok) { $('box').value = ''; restoreBox(); updateComposer(); feed(); }
 }
 
 async function dispatch(text, task, resume, always) {
@@ -3014,8 +3031,8 @@ function markdown(box, text) {
       continue;
     }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
-    // 清單：把 markdown 的記號換成真的項目符號，縮排照原樣留著（巢狀才看得出層次）
-    const li = line.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/);
+    // 清單：- * + 換成真的項目符號；有編號的留著編號（「1. 2. 3.」是順序，換成 • 就丟了）。縮排照原樣留著（巢狀才看得出層次）
+    const li = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       box.appendChild(el('span', undefined, 'hr'));
       continue;                                 // 分隔線自己就是一塊，不再補換行
@@ -3025,8 +3042,8 @@ function markdown(box, text) {
       inlineFmt(span, h[2]);
       box.appendChild(span);
     } else if (li) {
-      box.appendChild(document.createTextNode(li[1] + '• '));
-      inlineFmt(box, li[2]);
+      box.appendChild(document.createTextNode(li[1] + (/\d/.test(li[2]) ? li[2] : '•') + ' '));
+      inlineFmt(box, li[3]);
     } else {
       inlineFmt(box, line);
     }
