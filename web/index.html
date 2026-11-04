@@ -1024,6 +1024,7 @@ async function memocard(id) {
   // 以端點為準，不看 agentsData.memo：那份計數是 sweep 更新的，放行之後還會停在舊數字，
   // 用它當守門會讓面板在「已經清空」時仍舊顯示、或在剛歸零時提早關掉。
   const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`)).json();
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的記憶提案畫上去
   if (!r.ok || !r.items.length) { box.hidden = true; return; }
   box.hidden = false;
   const rows = r.items.map(it => `
@@ -1914,6 +1915,7 @@ async function board(id) {
   // 時多跳一次（量到 feed 高度 573→245 隔了一整幀），看起來就是閃一下。
   if (lastBoard) box.hidden = false;
   const r = await (await fetch('/office/board' + (viewArch ? `?f=${encodeURIComponent(viewArch)}` : ''))).json();
+  if (id !== selected) return;   // 回來時已經換人（看板面板只屬於看板）：交給新選的人那次 board() 決定顯不顯示
   const arch = r.archives || [];
   if (viewArch && !r.ok) { viewArch = ''; return board(id); }   // 那塊板被刪了：退回目前的板
   box.hidden = !r.ok && !arch.length;
@@ -2057,6 +2059,7 @@ function fileTime(t) {
 async function workspace(id, path) {
   const box = $('ws');
   const r = await (await fetch(`/office/ws/${id}?p=${encodeURIComponent(path)}`)).json();
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的工作區畫上去
   box.hidden = !r.ok;
   if (!r.ok) return;
   wsPath = path;
@@ -2121,6 +2124,7 @@ async function lifecard(id) {
   const box = $('life');
   let r;
   try { r = id && await (await fetch(`/office/life?agent=${encodeURIComponent(id)}`)).json(); } catch { return; }
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的生活頁畫上去
   const me = r && r.ok && r.mode === 'life' ? r.agents[id] : null;
   if (!me) { box.hidden = true; return; }
   const sig = JSON.stringify([id, r.spend, r.paused, me, r.chats]);
@@ -2153,7 +2157,7 @@ async function profile(id) {
   const box = $('profile');
   box.hidden = true;
   const r = await (await fetch(`/office/profile/${id}`)).json();
-  if (!r.ok) return;
+  if (id !== selected || !r.ok) return;   // 回來時已經換人：別把上一位的檔案畫上去
   box.hidden = false;
   box.open = localStorage.profOpen === '1';
   const icon = agentsData[id] && agentsData[id].npc === false ? '📋' : '👤';   // 模式不是人
@@ -3483,8 +3487,12 @@ function sync(el, t, bodySel, live) {
 
 async function feed() {
   if (!selected) return;
+  const id = selected;
   try {
-    const r = await (await fetch(`/office/report/${selected}`)).json();
+    const r = await (await fetch(`/office/report/${id}`)).json();
+    // 回來的時候已經換人了：這份是【上一位】的，丟掉。以前照畫，前一位的任務卡就混進新選的人的工作串
+    // （切換時常有一個請求還在路上；正在做事的人每則事件都會觸發一次。2026-11-04 回報：看某人的串被別人的訊息蓋過）
+    if (id !== selected) return;
     const f = $('feed');
     if (!r.ok) {
       $('head').innerHTML = `<div class="headrow">${headFace(selected)}<div class="headmain">
