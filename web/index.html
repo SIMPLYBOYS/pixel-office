@@ -1359,6 +1359,8 @@ const TASK_COLS = [
 ];
 const TASK_COL_MAX = 30;
 const ORIGIN_CLS = { 老闆: 'boss', 班表: 'sched', 委派: 'dele' };
+// 標籤講的是【誰派的】，不是誰在做：只寫「老闆」會被讀成負責人（2026-11-07 回報：以為老闆自己在開發）
+const ORIGIN_TXT = { 老闆: '老闆派' };
 const STATUS_MARK = { error: ' ✗ 失敗', stopped: ' 🛑 中止', lost: ' ⚠ 失聯', superseded: ' ↻ 已由續跑接手' };
 const VERDICT_MARK = { accepted: ' ✓ 已驗收', changes: ' ↺ 要求修改', skipped: ' ⏭ 略過驗收' };
 let taskScope = 'all';   // all＝全辦公室；me＝只看目前選的這位
@@ -1366,7 +1368,7 @@ const taskCardHtml = c => `<button type="button" class="tk" data-agent="${esc(c.
   <span class="tkwho">${esc(c.name)}${c.engine ? `<small>${esc(ENGINE_NAME[c.engine] || c.engine)}</small>` : ''}</span>
   <span class="tktask">${esc(c.task)}</span>
   <span class="tkmeta">${esc((c.day || '').slice(5).replace('-', '/'))} ${esc(c.at || '')}${
-    c.origin ? `<i class="og ${ORIGIN_CLS[c.origin] || ''}">${esc(c.origin)}${c.from && agentsData[c.from] ? '・' + esc(agentsData[c.from].name) : ''}</i>` : ''
+    c.origin ? `<i class="og ${ORIGIN_CLS[c.origin] || ''}">${esc(ORIGIN_TXT[c.origin] || c.origin)}${c.from && agentsData[c.from] ? '・' + esc(agentsData[c.from].name) : ''}</i>` : ''
   }${STATUS_MARK[c.status] || ''}${VERDICT_MARK[c.verdict] || ''}</span></button>`;
 async function taskboard() {
   const box = $('tasks');

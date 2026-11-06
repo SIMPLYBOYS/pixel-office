@@ -529,6 +529,7 @@ def run() -> None:
     tool_guard()
     codex_engine()
     boss_full_text()
+    kanban_host_wrote()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1892,6 +1893,98 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def kanban_host_wrote() -> None:
+    """開工後看板主持人自己寫交付物（2026-11-07 回報：「開工」那張從頭到尾主持人自己改檔、commit、開 PR，沒人分到工）：
+    橋從事件串流分得出誰在動手——子 agent 改檔、主持人寫板子／會議紀錄都不算；主持人自己改交付物 → 工作串警告、記帳、
+    自動提醒主持人一次（多等一個 result）。開會那一輪不盯（綁 repo 時本來就唯讀）。"""
+    import tempfile
+    fake = r"""#!/usr/bin/env python3
+import json, os, sys
+ch = os.environ["FAKE_CH"]
+sys.stdin.readline()   # 派工那則
+def out(o):
+    print(json.dumps(o, ensure_ascii=False), flush=True)
+tool = lambda tid, name, path, parent=None: out({"type": "assistant", "parent_tool_use_id": parent,
+    "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": {"file_path": path}}]}})
+out({"type": "system", "subtype": "init", "model": "m", "cwd": ch, "tools": ["Edit", "Agent"]})
+out({"type": "system", "subtype": "task_started", "tool_use_id": "A1", "subagent_type": "xiaomei", "description": "寫文件"})
+tool("s1", "Edit", ch + "/notes/sub.md", parent="A1")      # 子 agent 改交付物：該做的
+tool("h0", "Write", ch + "/board.json")                     # 主持人寫板子：本分
+tool("h1", "Edit", ch + "/notes/host.md")                   # 主持人自己改交付物：要被盯
+tool("h2", "Edit", ch + "/notes/host2.md")                  # 同一輪第二次：不再提醒
+say = lambda t: out({"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}})
+say("第一輪做完了")
+out({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": "第一輪做完了"})
+nudge = sys.stdin.readline()   # 橋的自動提醒（沒送就讀到 EOF）
+open(os.environ["FAKE_NUDGE"], "a", encoding="utf-8").write(nudge)
+if nudge:
+    say("好，剩下的派給小美")
+    out({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": "好，剩下的派給小美"})
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakeclaude"; bin_.write_text(fake, encoding="utf-8"); bin_.chmod(0o755)
+        nudge_log = Path(tmp) / "nudge.log"
+        old = (main.CLI_CMD, main.CHANNELS_DIR, main.CLI_SESSION_DIR)
+        main.CLI_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
+        main.CLI_SESSION_DIR = Path(tmp) / "sessions"; main.CLI_SESSION_DIR.mkdir()
+        ch = main.CHANNELS_DIR / f"office_{main.KANBAN}"
+        saved = {k: os.environ.get(k) for k in ("FAKE_CH", "FAKE_NUDGE", "OFFICE_AGENT_ENV_PASS")}
+        os.environ.update({"FAKE_CH": str(ch), "FAKE_NUDGE": str(nudge_log), "OFFICE_AGENT_ENV_PASS": "FAKE_CH,FAKE_NUDGE"})
+
+        def run(c, text: str) -> dict:
+            main.busy.discard(main.KANBAN)
+            before = (main.last_report.get(main.KANBAN) or {}).get("id")
+            r = c.post("/office/dispatch", json={"agent": main.KANBAN, "text": text, "engine": "cli"}).json()
+            assert r["ok"] and r.get("engine") == "cli", r
+            for _ in range(200):
+                time.sleep(0.05)
+                cur = main.last_report.get(main.KANBAN)
+                if cur and cur.get("id") != before and cur["status"] != "working":
+                    return cur
+            raise AssertionError(f"主持人沒收工：{main.last_report.get(main.KANBAN)}")
+        try:
+            with TestClient(main.app) as c:
+                card = run(c, "開工。照板子推進，先做相依都滿足的票，最多 3 人並行。")
+                assert card.get("phase") == "exec", card.get("phase")
+                warns = [e["text"] for e in card["events"] if "主持人自己改了交付物" in e["text"]]
+                assert warns == ["⚠ 主持人自己改了交付物 notes/host.md——開工後交付物要派給板子上的負責人寫，主持人只做整合"], \
+                    f"子 agent 改檔、主持人寫板子都不算；同一輪只警告一次：{warns}"
+                nudge = nudge_log.read_text(encoding="utf-8")
+                assert "辦公室自動提醒" in nudge and "notes/host.md" in nudge, f"要提醒主持人本人（自動插話）：{nudge[:200]!r}"
+                evs = [e["text"] for e in card["events"]]
+                reply = next((i for i, t in enumerate(evs) if "剩下的派給小美" in t), None)
+                fin = next((i for i, t in enumerate(evs) if t.startswith("✔")), None)
+                assert card["status"] == "ok" and reply is not None and fin is not None and reply < fin, \
+                    f"送了提醒就要多等一個 result 再收工——主持人被提醒後的回覆要在收工之前：{evs[-4:]}"
+                assert any(e["kind"] == "kanban.host_wrote" and e.get("path") == "notes/host.md" for e in main.audit_recent(main.KANBAN))
+                # 任務看板：主持人那張寫明是主持人（只寫「看板」會跟任務看板本身混在一起）
+                tk = [x for x in c.get("/office/tasks").json()["cards"] if x["agent"] == main.KANBAN]
+                assert tk and tk[0]["name"] == main.agents[main.KANBAN].name + "主持人" and tk[0]["origin"] == "老闆", tk[:1]
+                # 開會那一輪不盯（綁 repo 時 repo 本來就唯讀；會議紀錄、spec 是主持人的本分）
+                nudge_log.unlink()
+                card = run(c, "討論一下文件要補哪些常見問題")
+                assert card.get("phase") == "plan" and not any("主持人自己改了交付物" in e["text"] for e in card["events"]), card.get("phase")
+                assert nudge_log.read_text(encoding="utf-8") == "", "開會那一輪不該送提醒"
+            # 判斷本身：路徑在頻道目錄外、會議檔、子 agent、非寫檔工具都不算
+            hd = main.host_deliverable
+            main.CHANNELS_DIR = Path(tmp) / "channels"
+            ev = lambda label, path, **kw: {"kind": "tool", "label": label, "detail": json.dumps({"file_path": path}), **kw}
+            assert hd(ev("Edit", str(ch / "repo" / "a.py"))) == "repo/a.py"
+            assert hd(ev("Edit", str(ch / "meeting-x.md"))) == hd(ev("Write", str(ch / "spec.md"))) == hd(ev("Edit", str(ch / "board-x.json"))) == ""
+            assert hd(ev("Edit", "/etc/hosts")) == "" and hd(ev("Read", str(ch / "a.md"))) == ""
+            assert hd(ev("Edit", str(ch / "a.md"), sub_id="A1")) == "", "子 agent 的不算"
+            assert hd(ev("Edit", str(ch / "repo" / "meeting-notes.md"))) == "", "名字是會議檔的一律不算（不論在哪一層）"
+        finally:
+            main.CLI_CMD, main.CHANNELS_DIR, main.CLI_SESSION_DIR = old
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            main.busy.discard(main.KANBAN); main.engine_sent.pop(main.KANBAN, None)
+    print("  ✓ 看板主持人開工後自己寫交付物：工作串警告、記帳、自動提醒一次；子 agent、板子與會議檔、開會那一輪都不算")
 
 
 def boss_full_text() -> None:

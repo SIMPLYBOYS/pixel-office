@@ -3881,10 +3881,11 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     subs: dict[str, dict] = {}        # 子 agent 狀態（見 cli_events）
     bg_tasks: set[str] = set()        # 還在跑的背景子 agent：它們沒回來之前，result 不是收工
     warned: set[str] = set()
+    nudged = False   # 主持人自己寫交付物：一輪只提醒一次
     done_sent = False
     try:
         async def pump() -> None:
-            nonlocal done_sent
+            nonlocal done_sent, nudged
             assert proc.stdout is not None
             async for raw in proc.stdout:
                 line = raw.decode("utf-8", "replace").strip()
@@ -3953,6 +3954,10 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                             continue
                         warned.add(ev["label"])
                     await office_event({"v": 1, "agent": aid, "run": run, **ev})
+                    if (aid == KANBAN and not nudged and (last_report.get(aid) or {}).get("phase") == "exec"   # 開會那輪 repo 本來就唯讀
+                            and (rel := host_deliverable(ev))):
+                        nudged = True
+                        await kanban_host_wrote(aid, rel)
         await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
@@ -5096,6 +5101,39 @@ async def cli_send(aid: str, text: str) -> bool:
     return True
 
 
+# 看板主持人自己動手寫交付物（2026-11-07 回報：任務看板上「開工」那張從頭到尾是主持人自己改檔、commit、開 PR，
+# 沒有一張票分給成員）。守則要它開工後只做整合；這裡是程式那一半：橋從事件串流分得出誰在動手——
+# 子 agent 的工具事件帶 [Subagent:…] 前綴與 sub_id，主持人自己的沒有。看到就在工作串標出來、記帳，
+# 並提醒主持人一次（自動插話）。不硬擋：deny 規則會連子 agent 一起擋（它們共用同一個 session 的權限），
+# hook 能不能分辨主持人與子 agent 文件沒保證、這版也還沒實測過。
+HOST_WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+KANBAN_OWN_FILE = re.compile(r"^(meeting|spec|board)[^/]*\.(md|json)$")   # 會議紀錄、spec、板子：主持人的本分
+
+
+def host_deliverable(ev: dict) -> str:
+    """看板主持人【自己】寫了交付物嗎：回相對頻道目錄的路徑，不是就空字串。"""
+    if ev.get("kind") != "tool" or ev.get("label") not in HOST_WRITE_TOOLS or ev.get("sub_id") or CHANNELS_DIR is None:
+        return ""
+    try:
+        ti = json.loads(str(ev.get("detail") or "{}"))
+        p = Path(str(ti.get("file_path") or ti.get("notebook_path") or "")).resolve()
+        rel = p.relative_to((CHANNELS_DIR / f"office_{KANBAN}").resolve())
+    except (ValueError, OSError, AttributeError):
+        return ""
+    return "" if not rel.parts or KANBAN_OWN_FILE.match(p.name) else str(rel)
+
+
+HOST_NUDGE = ("（辦公室自動提醒，不是老闆打的字）你剛自己改了 {rel}。這是交付物——開工後交付物要派給板子上的負責人寫，"
+              "你只做整合（板子、spec、commit、開 PR）。還沒做的改動請派給成員；已經改的，請負責人審閱一遍再 commit。")
+
+
+async def kanban_host_wrote(aid: str, rel: str) -> None:
+    log_ev(aid, f"⚠ 主持人自己改了交付物 {rel}——開工後交付物要派給板子上的負責人寫，主持人只做整合")
+    audit("kanban.host_wrote", aid, path=rel[:200], engine=ENGINE_CLI)
+    if await cli_send(aid, HOST_NUDGE.format(rel=rel)):
+        cli_turns[aid] = cli_turns.get(aid, 1) + 1   # 同插話：多一則訊息＝多等一個 result
+
+
 def cli_turn_done(aid: str) -> bool:
     """收到一個 result：是不是最後一個？插話會多一輪，中間的 result 不是收工。"""
     cli_turns[aid] = max(0, cli_turns.get(aid, 1) - 1)
@@ -5947,7 +5985,8 @@ def office_tasks():
         for c in cards:
             if c.get("status") == "note":
                 continue   # 雜記卡不是任務
-            out.append({"agent": aid, "name": agents[aid].name, "id": c.get("id"),
+            # 看板那張寫明是「主持人」：只寫「看板」會跟任務看板本身混在一起，看不出是一個在做事的角色
+            out.append({"agent": aid, "name": agents[aid].name + ("主持人" if aid == KANBAN else ""), "id": c.get("id"),
                         "task": str(c.get("task") or "")[:160], "status": c.get("status"),
                         "day": c.get("day", ""), "at": c.get("at", ""), "end": c.get("end", ""),
                         "engine": c.get("engine") or "",   # 早期的卡沒記引擎：留空，不猜
