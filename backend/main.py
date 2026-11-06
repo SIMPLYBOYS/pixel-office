@@ -1448,6 +1448,34 @@ def board_finished(f: Path) -> bool:
     return bool(tasks) and all(isinstance(t, dict) and t.get("status") == "done" for t in tasks)
 
 
+HOST_OWNERS = ("主持人", "看板")   # 主持人自己的整合票（收斂 spec、commit、開 PR）
+
+
+def board_assignments() -> str:
+    """老闆說「開工」那一刻，照板子講清楚【誰做哪張】——之後主持人一張張派出去，畫面上才對得起來。
+    沒排負責人的交付票標出來：那就是會被主持人默默自己做掉的那幾張（2026-11-07 回報）。沒有板子或全做完就回空字串。"""
+    if (f := board_file()) is None:
+        return ""
+    try:
+        tasks = json.loads(f.read_text(encoding="utf-8")).get("tasks") or []
+    except (OSError, ValueError, AttributeError):
+        return ""
+    left = [t for t in tasks if isinstance(t, dict) and t.get("status") != "done"]
+    if not left:
+        return ""
+    by: dict[str, list[str]] = {}
+    for t in left:
+        o = str(t.get("owner") or "").strip()
+        by.setdefault(o, []).append(str(t.get("title") or t.get("id") or "?")[:30])
+    parts = [f"{o}：{'、'.join(v)}" for o, v in by.items() if o]
+    line = "📋 照板子分工——" + ("；".join(parts) if parts else "（沒有一張排了負責人）")
+    if by.get(""):
+        line += f"\n⚠ 沒排負責人：{'、'.join(by[''])}——這幾張主持人會派給誰，看下面的「🤝 委派給」"
+    if by and set(by) <= set(HOST_OWNERS) | {""}:
+        line += "\n⚠ 沒有一張交給成員：照這塊板，接下來是主持人自己做"
+    return line
+
+
 def kill_tree(pid: int) -> int:
     """SIGKILL 這個行程連同它所有子孫，回報子孫有幾個。員工 CLI／Codex 的中止、逾時、橋關閉都走這條。
 
@@ -1718,6 +1746,23 @@ def gist(text: str) -> str:
     return ""
 
 
+SUB_TASK_MAX = 60
+
+
+def sub_task_text(detail: str) -> str:
+    """派工時寫的工作說明 → 一行給人看（Claude Code：Agent 的 description；cogito：spawn_subagent 的參數 JSON）。
+    以前畫面上只寫人名——「🤝 委派給 小美：小美」「支援看板：小美」——看不出派了什麼工（2026-11-07 回報）。"""
+    t = str(detail or "").strip()
+    try:
+        d = json.loads(t)
+        if isinstance(d, dict):
+            t = str(d.get("description") or d.get("task_prompt") or d.get("prompt") or d.get("task") or "")
+    except ValueError:
+        pass
+    line = next((x.strip() for x in t.splitlines() if x.strip()), "")
+    return line if len(line) <= SUB_TASK_MAX else line[:SUB_TASK_MAX - 1] + "…"
+
+
 async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: str = "") -> bool:
     """子 agent 事件分流；回傳 True＝已投影完畢（主流程不再處理）。"""
     spawn = SPAWN_RE.match(label)
@@ -1734,7 +1779,8 @@ async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: s
             busy.add(npc)
             sub_since[npc] = time.monotonic()
             notify("roster")
-            child = report_card(npc, f"支援{agents[parent].name}：{shown}")
+            what = sub_task_text(detail) or shown   # 派了什麼工（說不出來才退回人名）
+            child = report_card(npc, f"支援{agents[parent].name}：{what}")
             child["origin"], child["from"] = "委派", parent
             # 開會中就進會議室入座，否則各自回工位。
             # 這一行是「會議室」的全部——投影的差異只有【去哪裡】，因為真實世界的差異也只有這個：
@@ -1752,12 +1798,12 @@ async def project_sub(parent: str, kind: str, label: str, detail: str, sub_id: s
             if side := DESK_SIDE.get(npc):   # 主 agent 走到對方桌邊站著看
                 await goto(parent, side)
             await bubble(parent, "→ 交辦")
-            await bubble(npc, "★ 支援中")
+            await bubble(npc, f"📋 {what}" if len(what) <= GIST_MAX - 2 else f"📋 {what[:GIST_MAX - 3]}…")   # 頭上就看得到接了什麼工
             # 委派事件掛上子卡引用 → 主任務串裡直接看得到對方在做什麼
-            log_ev(parent, f"🤝 委派給 {agents[npc].name}：{shown}",
+            log_ev(parent, f"🤝 委派給 {agents[npc].name}：{what}",
                    sub={"agent": npc, "id": child["id"]})
-            log_ev(npc, f"📋 支援{agents[parent].name}：{shown}")
-            agents[npc].remember(f"接下{agents[parent].name}委派的{shown}工作")
+            log_ev(npc, f"📋 支援{agents[parent].name}：{what}")
+            agents[npc].remember(f"接下{agents[parent].name}委派的工作「{what}」")
             return True
         if kind in ("result", "error"):  # 委派收工
             # background=true 只是【啟動】成功，不是交件。卡片繼續開著、人繼續忙，
@@ -2255,6 +2301,8 @@ async def office_event(ev: dict):
             # 追問不是一件新工作：記成老闆說的那句話，員工接著回就好（2026-10-21 回報：每句都「接到任務」很死板）
             shown = full_said(task, note)
             log_ev(aid, f"💬 老闆：{shown}" if asking else f"📋 接到任務：{shown}")
+            if aid == KANBAN and go and (plan := board_assignments()):   # 開工：先把誰做哪張攤出來
+                log_ev(aid, plan)
             # 派工那行掛回它要開始的任務。但【內容相同就不重覆記】——多數情況下卡片標題
             # 就是老闆那句話，兩行並排只是同一段文字說兩次。只有續跑（標題被換成「🔄 續跑：」）
             # 或 cogito 改寫過任務名時，這行才帶來新資訊。
@@ -4871,6 +4919,7 @@ FEEDBACK_KEEP = 10   # ponytail: 只留最近 10 則；要更聰明（歸納成�
 PERMIT_HOST_RE = re.compile(r"[a-z0-9.-]+")
 PERMIT_WORD_RE = re.compile(r"[A-Za-z0-9._+-]+")
 PERMIT_COMPOUND_RE = re.compile(r"[;&|`$<>()\n]")
+GIT_PERMIT_SUBS = ("status", "diff", "log", "show", "rev-parse", "add", "commit")   # 能設「以後都准」的 git 子指令（都只動本機）
 
 
 def load_prefs() -> dict:
@@ -4899,8 +4948,16 @@ def permit_rule(tool: str, ti) -> str | None:
         return tool
     if tool == "Bash":
         cmd = str(ti.get("command") or "").strip()
-        first = cmd.split(maxsplit=1)[0] if cmd else ""
-        return f"Bash({first}:*)" if PERMIT_WORD_RE.fullmatch(first) and not PERMIT_COMPOUND_RE.search(cmd) else None
+        words = cmd.split(maxsplit=2)
+        first = words[0] if words else ""
+        if PERMIT_COMPOUND_RE.search(cmd):
+            return None
+        if first == "git":
+            # git 是一整組指令：只放到子指令那層。以前推成 Bash(git:*)——為了不再被問 git log，按一下就連
+            # git push、git reset --hard、git clean 都放行了（2026-11-07 整理看板審批時發現）。
+            sub = words[1] if len(words) > 1 else ""
+            return f"Bash(git {sub}:*)" if sub in GIT_PERMIT_SUBS else None
+        return f"Bash({first}:*)" if PERMIT_WORD_RE.fullmatch(first) else None
     return None
 
 

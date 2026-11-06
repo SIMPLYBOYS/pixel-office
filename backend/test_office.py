@@ -203,13 +203,14 @@ def run() -> None:
             assert recv(ws)["text"] == "● bash"
 
             # 委派上工：spawn code-reviewer → 小美（p01）起身入座 + 雙泡 + 掛起
+            # 泡泡、卡片、工作串寫的是【派了什麼工】，不是人名（2026-11-07 回報：「委派給 小美：小美」看不出誰做什麼）
             post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
-                 detail='{"agent_type":"code-reviewer"}')
+                 detail='{"agent_type":"code-reviewer","task_prompt":"審 a.py 的錯誤處理\\n細節看 spec.md"}')
             assert recv(ws) == {"agent_id": "p01", "action": "move_to", "target": "chair_2"}
             # 主 agent 走到對方桌邊站著看——「兩人在同一張桌子旁」是唯一看得出協作的畫面語言
             assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "side_2"}
             pair = {(m["agent_id"], m["text"]) for m in (recv(ws), recv(ws))}
-            assert pair == {("p17", "→ 交辦"), ("p01", "★ 支援中")}  # 兩條佇列並行，順序不保證
+            assert pair == {("p17", "→ 交辦"), ("p01", "📋 審 a.py 的錯誤處理")}  # 兩條佇列並行，順序不保證
             assert "p01" in main.busy
 
             # 委派中的內部事件 → 泡泡掛到小美頭上（前綴剝掉）
@@ -234,14 +235,14 @@ def run() -> None:
             assert any("委派" in x for x in main.agents["p01"].memory_texts)
             r = c.get("/office/report/p01").json()  # 委派也有報告卡
             assert (r["task"], r["status"], r["report"]) == (
-                "支援阿哲：code-reviewer", "ok", "LGTM，無阻塞問題")
+                "支援阿哲：審 a.py 的錯誤處理", "ok", "LGTM，無阻塞問題")
 
             # 無名子 agent（探路者）：兩側正規化成空名，一樣開卡
             post(c, agent="p17", kind="tool", label="spawn_subagent")
             assert recv(ws)["agent_id"] == "p01"  # 又輪到有空的小美（move_to）
             assert recv(ws) == {"agent_id": "p17", "action": "move_to", "target": "side_2"}
             texts = {recv(ws)["text"], recv(ws)["text"]}
-            assert texts == {"→ 交辦", "★ 支援中"}
+            assert texts == {"→ 交辦", "📋 探路者"}   # 說不出派了什麼：退回名字
 
             # 主任務收工：✔ 泡 + 釋放主 agent，順手收掉沒關的委派卡
             post(c, agent="p17", kind="done", label="ok")
@@ -260,12 +261,12 @@ def run() -> None:
             tl = [e["text"] for e in r["timeline"]]
             assert tl[0] == "📋 接到任務：盤點 repo 的 TODO"
             assert "▸ bash｜grep -rn TODO" in tl and "✓ bash" in tl
-            assert "🤝 委派給 小美：code-reviewer" in tl and tl[-1] == "✔ 任務完成"
+            assert "🤝 委派給 小美：審 a.py 的錯誤處理" in tl and tl[-1] == "✔ 任務完成"
             # 委派事件在主任務串裡內嵌子卡（誰接手、做了什麼、回報什麼）
             p17 = c.get("/office/report/p17").json()
             cur = p17["history"][-1]
             sub_ev = next(e for e in cur["events"] if "委派給" in e["text"])
-            assert sub_ev["text"] == "🤝 委派給 小美：code-reviewer"
+            assert sub_ev["text"] == "🤝 委派給 小美：審 a.py 的錯誤處理"
             sc = sub_ev["subcard"]
             assert (sc["agent"], sc["name"], sc["status"]) == ("p01", "小美", "ok")
             assert sc["report"] == "LGTM，無阻塞問題"
@@ -273,10 +274,10 @@ def run() -> None:
 
             p01 = c.get("/office/report/p01").json()
             assert [t["task"] for t in p01["history"]] == [
-                "支援阿哲：code-reviewer", "支援阿哲：探路者"]  # 任務卡分組
+                "支援阿哲：審 a.py 的錯誤處理", "支援阿哲：探路者"]  # 任務卡分組
             assert [t["status"] for t in p01["history"]] == ["ok", "lost"]  # 探路者沒回報→lost
             sub_tl = [e["text"] for t in p01["history"] for e in t["events"]]
-            assert "📋 支援阿哲：code-reviewer" in sub_tl
+            assert "📋 支援阿哲：審 a.py 的錯誤處理" in sub_tl
             assert "▸ read_file" in sub_tl and "✔ 回報：LGTM，無阻塞問題" in sub_tl
 
             # 閒聊不當任務：短問候不開新卡、不走工位，只在現有工作串記一句對話
@@ -610,7 +611,7 @@ def hurt_projection() -> None:
         post(c, agent="p17", kind="start", label="整合")
         post(c, agent="p17", kind="tool", label="spawn_subagent:code-reviewer",
              detail='{"agent_type":"code-reviewer"}')
-        until(ws, "p01", lambda m: m.get("text") == "★ 支援中")
+        until(ws, "p01", lambda m: m.get("text") == "📋 code-reviewer")
         post(c, agent="p17", kind="error", label="spawn_subagent:code-reviewer", detail="炸了")
         # 失敗後支援者一定會被叫回座位（move_to）——拿它當哨兵，閃紅要在它之前
         m = until(ws, "p01", lambda m: m.get("action") in ("use", "move_to"))
@@ -1946,8 +1947,16 @@ if nudge:
             raise AssertionError(f"主持人沒收工：{main.last_report.get(main.KANBAN)}")
         try:
             with TestClient(main.app) as c:
+                ch.mkdir(parents=True, exist_ok=True)
+                tk = lambda i, title, status, owner: {"id": i, "title": title, "deps": [], "status": status, "owner": owner, "out": None}
+                (ch / "board.json").write_text(json.dumps({"task": "t", "tasks": [
+                    tk("pick", "挑題", "done", "小美"), tk("write", "改寫常見問題", "todo", "小美"),
+                    tk("test", "補測試", "todo", None), tk("pr", "開 PR", "todo", "主持人")]}, ensure_ascii=False), encoding="utf-8")
                 card = run(c, "開工。照板子推進，先做相依都滿足的票，最多 3 人並行。")
                 assert card.get("phase") == "exec", card.get("phase")
+                # 開工那一刻先把「誰做哪張」攤出來；沒排負責人的標出來（做完的不列）
+                plan = [e["text"] for e in card["events"] if e["text"].startswith("📋 照板子分工")]
+                assert plan == ["📋 照板子分工——小美：改寫常見問題；主持人：開 PR\n⚠ 沒排負責人：補測試——這幾張主持人會派給誰，看下面的「🤝 委派給」"], plan
                 warns = [e["text"] for e in card["events"] if "主持人自己改了交付物" in e["text"]]
                 assert warns == ["⚠ 主持人自己改了交付物 notes/host.md——開工後交付物要派給板子上的負責人寫，主持人只做整合"], \
                     f"子 agent 改檔、主持人寫板子都不算；同一輪只警告一次：{warns}"
@@ -1960,8 +1969,8 @@ if nudge:
                     f"送了提醒就要多等一個 result 再收工——主持人被提醒後的回覆要在收工之前：{evs[-4:]}"
                 assert any(e["kind"] == "kanban.host_wrote" and e.get("path") == "notes/host.md" for e in main.audit_recent(main.KANBAN))
                 # 任務看板：主持人那張寫明是主持人（只寫「看板」會跟任務看板本身混在一起）
-                tk = [x for x in c.get("/office/tasks").json()["cards"] if x["agent"] == main.KANBAN]
-                assert tk and tk[0]["name"] == main.agents[main.KANBAN].name + "主持人" and tk[0]["origin"] == "老闆", tk[:1]
+                tks = [x for x in c.get("/office/tasks").json()["cards"] if x["agent"] == main.KANBAN]
+                assert tks and tks[0]["name"] == main.agents[main.KANBAN].name + "主持人" and tks[0]["origin"] == "老闆", tks[:1]
                 # 開會那一輪不盯（綁 repo 時 repo 本來就唯讀；會議紀錄、spec 是主持人的本分）
                 nudge_log.unlink()
                 card = run(c, "討論一下文件要補哪些常見問題")
@@ -1970,6 +1979,12 @@ if nudge:
             # 判斷本身：路徑在頻道目錄外、會議檔、子 agent、非寫檔工具都不算
             hd = main.host_deliverable
             main.CHANNELS_DIR = Path(tmp) / "channels"
+            # 板子上沒有一張交給成員：開工那行直接講明「接下來是主持人自己做」
+            (ch / "board.json").write_text(json.dumps({"task": "t", "tasks": [tk("write", "改文件", "todo", None), tk("pr", "開 PR", "todo", "主持人")]},
+                                                      ensure_ascii=False), encoding="utf-8")
+            assert main.board_assignments().endswith("⚠ 沒有一張交給成員：照這塊板，接下來是主持人自己做"), main.board_assignments()
+            (ch / "board.json").write_text(json.dumps({"task": "t", "tasks": [tk("x", "做完了", "done", "小美")]}), encoding="utf-8")
+            assert main.board_assignments() == "", "全做完就不講"
             ev = lambda label, path, **kw: {"kind": "tool", "label": label, "detail": json.dumps({"file_path": path}), **kw}
             assert hd(ev("Edit", str(ch / "repo" / "a.py"))) == "repo/a.py"
             assert hd(ev("Edit", str(ch / "meeting-x.md"))) == hd(ev("Write", str(ch / "spec.md"))) == hd(ev("Edit", str(ch / "board-x.json"))) == ""
@@ -6127,6 +6142,10 @@ def permits_feedback() -> None:
         assert R("WebFetch", {"url": "https://techorange.com/feed/"}) == "WebFetch(domain:techorange.com)"
         assert R("mcp__jobspy__search_jobs", {}) == "mcp__jobspy__search_jobs"
         assert R("Bash", {"command": "cat /x/y.txt"}) == "Bash(cat:*)"
+        # git 只放到子指令那層：按一次「以後都准 git log」不能連 push、reset --hard 都放
+        assert R("Bash", {"command": "git log --oneline -5"}) == "Bash(git log:*)" and R("Bash", {"command": "git commit -m x"}) == "Bash(git commit:*)"
+        for cmd in ("git push origin x", "git reset --hard", "git clean -fd", "git", "git --no-pager diff", "git status && git push"):
+            assert R("Bash", {"command": cmd}) is None, cmd
         for tool, ti in [("Bash", {"command": "cd x && cat y"}), ("Bash", {"command": 'echo "$(date)"'}), ("Write", {"file_path": "/x"}),
                          ("WebFetch", {"url": "https://a)b/"}), ("WebFetch", {"url": "nope"}), ("mcp__x;y", {})]:
             assert R(tool, ti) is None, (tool, ti)
