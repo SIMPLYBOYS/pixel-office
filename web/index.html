@@ -868,6 +868,7 @@ function setBoxH(px) {
   g.addEventListener('pointerdown', e => {
     e.preventDefault();
     g.setPointerCapture(e.pointerId);
+    delete $('box').dataset.auto;   // 你自己拉的高度：從這一刻起算偏好，要記住
     startY = e.clientY;
     startH = $('box').getBoundingClientRect().height;
     document.body.classList.add('vdragging');
@@ -1024,6 +1025,7 @@ async function memocard(id) {
   // 以端點為準，不看 agentsData.memo：那份計數是 sweep 更新的，放行之後還會停在舊數字，
   // 用它當守門會讓面板在「已經清空」時仍舊顯示、或在剛歸零時提早關掉。
   const r = await (await fetch(`/office/proposed/${encodeURIComponent(id)}`)).json();
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的記憶提案畫上去
   if (!r.ok || !r.items.length) { box.hidden = true; return; }
   box.hidden = false;
   const rows = r.items.map(it => `
@@ -1279,7 +1281,7 @@ const headFace = id => `<img class="face lg" src="/avatars/${id}.png" alt=""
 const headRole = id => (agentsData[id] || {}).role ? `<div class="role">${esc(agentsData[id].role)}</div>` : '';
 
 // 指令頁：這位員工、這個引擎能打的指令。清單來自橋（/office/commands，跟分流寫在一起），外殼不自己列——
-// Codex 不收插話，這裡就不能出現插話。點一下帶進輸入框，要改、要送都還是你決定。
+// 引擎不收的指令（例：cogito 以外的引擎沒有某些指令）這裡就不能出現。點一下帶進輸入框，要改、要送都還是你決定。
 const ENGINE_NAME = { cli: 'Claude Code', cogito: 'cogito', codex: 'Codex' };
 const CMD_WHEN = { busy: '工作中才有效', approval: '有待審批時才有效', idle: '閒置時才有效' };
 const cmdsCache = {};   // key → {r, t}：一分鐘有效（引擎裝了什麼會隨員工開工更新）
@@ -1618,12 +1620,12 @@ function paintEngineRow(a, workingNow) {
   const cli = sel.value === 'cli';
   paintCodexLogin(sel.value === 'codex' && !!modelInfo.codex_login_needed);
   if (sel.value === 'codex') {
-    // Codex：exec 模式沒有插話、沒有審批（沙箱外的操作直接失敗）——事先講清楚，不讓人按了才發現
+    // Codex 缺什麼（目前：子 agent）照能力表事先講清楚，不讓人按了才發現
     $('engineNote').textContent = (modelInfo.codex_login_needed
       ? '還沒登入 Codex：按下面的按鈕，用瀏覽器登入你的 ChatGPT 帳號（員工用自己的一份登入，不碰你本人的 ~/.codex）'
       : `用 ${esc(modelInfo.codex_cmd || 'codex')} 跑（ChatGPT 訂閱）——可中止${lacks('codex').length ? '，暫不支援' + lacks('codex').join('、') : ''}`
         // 工具講出來：Codex 員工的 MCP 照抄 Claude Code 員工的，網頁走 Codex 內建搜尋（任務裡的 WebFetch／WebSearch 對應它）
-        + `；工具：網頁搜尋、shell 可連網${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
+        + `；工具：網頁搜尋、shell（不連網）${(modelInfo.codex_mcp || []).length ? '、MCP（' + modelInfo.codex_mcp.join('、') + '）' : '（沒有 MCP）'}`)
       + (selected === 'kanban' && engCaps('codex').subagents === false ? '　⚠ 看板暫不支援 Codex' : '');
     paintCodexModelRow(workingNow);   // Codex 的型號跟 Claude 那份清單不同：換成 Codex 自己的清單
     return;
@@ -1914,6 +1916,7 @@ async function board(id) {
   // 時多跳一次（量到 feed 高度 573→245 隔了一整幀），看起來就是閃一下。
   if (lastBoard) box.hidden = false;
   const r = await (await fetch('/office/board' + (viewArch ? `?f=${encodeURIComponent(viewArch)}` : ''))).json();
+  if (id !== selected) return;   // 回來時已經換人（看板面板只屬於看板）：交給新選的人那次 board() 決定顯不顯示
   const arch = r.archives || [];
   if (viewArch && !r.ok) { viewArch = ''; return board(id); }   // 那塊板被刪了：退回目前的板
   box.hidden = !r.ok && !arch.length;
@@ -2057,6 +2060,7 @@ function fileTime(t) {
 async function workspace(id, path) {
   const box = $('ws');
   const r = await (await fetch(`/office/ws/${id}?p=${encodeURIComponent(path)}`)).json();
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的工作區畫上去
   box.hidden = !r.ok;
   if (!r.ok) return;
   wsPath = path;
@@ -2121,6 +2125,7 @@ async function lifecard(id) {
   const box = $('life');
   let r;
   try { r = id && await (await fetch(`/office/life?agent=${encodeURIComponent(id)}`)).json(); } catch { return; }
+  if (id !== selected) return;   // 回來時已經換人：別把上一位的生活頁畫上去
   const me = r && r.ok && r.mode === 'life' ? r.agents[id] : null;
   if (!me) { box.hidden = true; return; }
   const sig = JSON.stringify([id, r.spend, r.paused, me, r.chats]);
@@ -2153,7 +2158,7 @@ async function profile(id) {
   const box = $('profile');
   box.hidden = true;
   const r = await (await fetch(`/office/profile/${id}`)).json();
-  if (!r.ok) return;
+  if (id !== selected || !r.ok) return;   // 回來時已經換人：別把上一位的檔案畫上去
   box.hidden = false;
   box.open = localStorage.profOpen === '1';
   const icon = agentsData[id] && agentsData[id].npc === false ? '📋' : '👤';   // 模式不是人
@@ -2505,9 +2510,23 @@ addEventListener('DOMContentLoaded', () => {
   const box = $('box');
   if (localStorage.boxH) box.style.height = localStorage.boxH;
   new ResizeObserver(() => {
-    if (box.style.height) localStorage.boxH = box.style.height;
+    if (box.style.height && !box.dataset.auto) localStorage.boxH = box.style.height;   // 自動長高的不算你的偏好
   }).observe(box);
+  // 貼上（或打）超過框高的多行文字：自動長高到放得下（上限同 CSS 的 45vh）。只長不縮、不記進偏好，
+  // 送出清空後回到你拉的高度（restoreBox）。62px 只看得到兩三行：貼完一大段只看到最後兩行，
+  // 會以為只貼進一行（2026-11-05 回報）。
+  box.addEventListener('input', () => {
+    if (box.scrollHeight <= box.clientHeight) return;
+    box.dataset.auto = '1';
+    setBoxH(box.scrollHeight + 2);
+  });
 });
+function restoreBox() {
+  const box = $('box');
+  if (!box.dataset.auto) return;
+  delete box.dataset.auto;
+  box.style.height = localStorage.boxH || BOX_DEF;
+}
 
 const SEND_GRACE = 1600;   // ms：夠按到 Esc，又不會讓人覺得卡住
 let pendingSend = null;    // {timer, text}
@@ -2517,6 +2536,7 @@ function cancelSend() {
   clearTimeout(pendingSend.timer);
   $('box').value = pendingSend.text;   // 原文放回去，游標接著改
   $('box').disabled = false;
+  $('box').dispatchEvent(new Event('input'));   // 放回來的是長文：照樣長高
   $('box').focus();
   pendingSend = null;
   $('hint').textContent = '已取消，回到編輯 ✎';
@@ -2538,6 +2558,7 @@ function queueSend(text) {
   const box = $('box');
   pendingSend = { text: box.value, timer: 0 };
   box.value = '';
+  restoreBox();
   box.disabled = true;
   $('hint').textContent = '即將送出…（Esc 取消）';
   pendingSend.timer = setTimeout(() => {
@@ -2565,7 +2586,7 @@ async function steer(text) {
     body: JSON.stringify({ agent: selected, text: '/steer ' + text }),
   })).json();
   $('hint').textContent = r.ok ? '已插話 📨 下一輪生效——不打斷正在跑的那一步' : `插話失敗：${r.error}`;
-  if (r.ok) { $('box').value = ''; updateComposer(); feed(); }
+  if (r.ok) { $('box').value = ''; restoreBox(); updateComposer(); feed(); }
 }
 
 async function dispatch(text, task, resume, always) {
@@ -3010,8 +3031,8 @@ function markdown(box, text) {
       continue;
     }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
-    // 清單：把 markdown 的記號換成真的項目符號，縮排照原樣留著（巢狀才看得出層次）
-    const li = line.match(/^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/);
+    // 清單：- * + 換成真的項目符號；有編號的留著編號（「1. 2. 3.」是順序，換成 • 就丟了）。縮排照原樣留著（巢狀才看得出層次）
+    const li = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       box.appendChild(el('span', undefined, 'hr'));
       continue;                                 // 分隔線自己就是一塊，不再補換行
@@ -3021,8 +3042,8 @@ function markdown(box, text) {
       inlineFmt(span, h[2]);
       box.appendChild(span);
     } else if (li) {
-      box.appendChild(document.createTextNode(li[1] + '• '));
-      inlineFmt(box, li[2]);
+      box.appendChild(document.createTextNode(li[1] + (/\d/.test(li[2]) ? li[2] : '•') + ' '));
+      inlineFmt(box, li[3]);
     } else {
       inlineFmt(box, line);
     }
@@ -3483,8 +3504,12 @@ function sync(el, t, bodySel, live) {
 
 async function feed() {
   if (!selected) return;
+  const id = selected;
   try {
-    const r = await (await fetch(`/office/report/${selected}`)).json();
+    const r = await (await fetch(`/office/report/${id}`)).json();
+    // 回來的時候已經換人了：這份是【上一位】的，丟掉。以前照畫，前一位的任務卡就混進新選的人的工作串
+    // （切換時常有一個請求還在路上；正在做事的人每則事件都會觸發一次。2026-11-04 回報：看某人的串被別人的訊息蓋過）
+    if (id !== selected) return;
     const f = $('feed');
     if (!r.ok) {
       $('head').innerHTML = `<div class="headrow">${headFace(selected)}<div class="headmain">

@@ -528,6 +528,7 @@ def run() -> None:
     agent_env_allowlist()
     tool_guard()
     codex_engine()
+    boss_full_text()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1852,7 +1853,10 @@ for o in out:
                 try:
                     main.busy.discard("p05")
                     before2 = (main.last_report.get("p05") or {}).get("id")
-                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "看一下這個專案",
+                    # 派工文字用多行長文（2026-11-05 回報：貼多行進來，工作串只剩第一行的前 80 字）
+                    long_ask = ("看一下這個專案，整理一份需求清單給我，內容要包含登入流程、權限檢查、錯誤訊息的中文化，"
+                                "還有部署前要跑的檢查項目與負責人分工，越具體越好\n1. 登入\n2. 權限\n\n3. 部署")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": long_ask,
                                                          "engine": "cli", "repo": "demo-app"}).json()
                     assert r["ok"] and r.get("repo") is True, r
                     wt = main.CHANNELS_DIR / "office_p05" / "demo-app"
@@ -1867,6 +1871,10 @@ for o in out:
                     card = main.last_report.get("p05")
                     assert card and card.get("workdir", "").endswith("/demo-app"), \
                         f"CLI 應在 worktree 裡跑，實際 workdir={card.get('workdir')!r}"
+                    # 卡片標題照舊是前 80 字；工作串那行放老闆的完整原話——換行都在，不帶橋接上去的 repo 說明
+                    evs = [e["text"] for e in card["events"]]
+                    assert len(card["task"]) <= 80 and any(t in (f"📋 接到任務：{long_ask}", f"💬 老闆：{long_ask}") for t in evs), evs[:3]
+                    assert not any("【工作 repo】" in t for t in evs), "橋接上去的 repo 說明是給員工的，不是老闆說的話"
                 finally:
                     main.REPOS_DIR = old_repos
         finally:
@@ -1884,6 +1892,43 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def boss_full_text() -> None:
+    """工作串的「接到任務」放老闆的完整原話（2026-11-05 回報：貼多行需求進來，畫面上只剩第一行的前 80 字）。
+    標題照舊截短；標題不是原話開頭（續跑、改寫）就照標題；閒聊那條也要收走寄放的原話，別掛到下一張卡。"""
+    long_ask = "第一行要夠長才會被截：" + "需求說明" * 25 + "\n第二行\n\n第四行"
+    note = main.boss_note(long_ask)
+    assert main.full_said(long_ask[:80], note) == long_ask, "CLI／Codex 的標題是 text[:80]"
+    assert main.full_said(long_ask[:79] + "…", note) == long_ask, "cogito 的標題是 TruncRunes(80) 加「…」"
+    assert main.full_said("🔄 續跑：別的任務", note) == "🔄 續跑：別的任務", "標題不是原話開頭：照標題"
+    assert main.full_said("短句", main.boss_note("短句")) == "短句" and main.full_said(long_ask[:80], None) == long_ask[:80]
+    huge = "字" * (main.NOTE_MAX + 50)
+    assert main.boss_note(huge).endswith(f"…（後略；全文 {len(huge)} 字已交給員工）"), "超過上限要講明後面還有、而且員工拿到的是全文"
+    with TestClient(main.app) as c:
+        aid = "p07"
+        main.busy.discard(aid)
+        main.pending_note[aid] = note
+        post(c, agent=aid, kind="start", label=long_ask[:79] + "…")   # cogito 送來的樣子
+        evs = [e["text"] for e in main.last_report[aid]["events"]]
+        assert any(t in (f"📋 接到任務：{long_ask}", f"💬 老闆：{long_ask}") for t in evs), evs[:3]
+        assert aid not in main.pending_note
+        post(c, agent=aid, kind="done", label="ok")
+        # 閒聊（CLI／Codex 派工時一律寄放了原話）：收走，不留給下一張卡
+        main.busy.discard(aid)
+        main.pending_note[aid] = main.boss_note("辛苦了")
+
+        async def chat(_t):
+            return "chat"
+        old_intent, main.intent = main.intent, chat
+        try:
+            post(c, agent=aid, kind="start", label="辛苦了")
+        finally:
+            main.intent = old_intent
+        assert aid in main.chat_mode and aid not in main.pending_note, "閒聊沒收走寄放的原話：下一張卡會掛上這句"
+        post(c, agent=aid, kind="done", label="ok")
+        main.busy.discard(aid); main.chat_mode.discard(aid); main.pending_note.pop(aid, None)
+    print("  ✓ 工作串放老闆的完整原話：CLI／Codex／cogito 的截短標題都認得、續跑照標題、閒聊收走寄放、全文上限講明")
 
 
 def status_emote() -> None:
@@ -3566,30 +3611,28 @@ def schedule_file_valid() -> None:
 
 def commands_page() -> None:
     """指令頁：列出來的必須是【這個引擎真的收】的指令。表跟 office_dispatch 同一份事實——
-    Codex 列了插話、按下去卻被拒，就是一頁在說謊的說明書。"""
+    列了插話、按下去卻被當成不支援擋掉，就是一頁在說謊的說明書。"""
     with TestClient(main.app) as c:
         cmds = lambda aid, eng: {x["cmd"].strip() for x in c.get(f"/office/commands?agent={aid}&engine={eng}").json()["items"]}
         office = {"/stop", "/steer", "approve", "reject"}
-        assert cmds("p05", "codex") == {"/stop"}, "Codex 不支援插話與審批：只能中止"
+        assert cmds("p05", "codex") == office, "Codex 走 app-server 後：中止、插話、審批都收"
         assert cmds("p05", "cli") == office, cmds("p05", "cli")
         cog = cmds("p05", "cogito")
         assert office <= cog and {"status", "apply memory", "reject memory", "memory list"} <= cog, cog
         assert "model" not in cog and not any(x.startswith("pair") for x in cog), "換模型走設定、授權只給管理員：不列"
         assert not any("開工" in x for x in cmds("p05", "cogito")) and any("開工" in x for x in cmds(main.KANBAN, "cogito")), "開工只給看板"
         r = c.get("/office/commands?agent=p05&engine=codex").json()
-        assert r["engine"] == "codex" and any("不支援插話" in n for n in r["notes"]), r
+        assert r["engine"] == "codex" and not any("不支援插話" in n for n in r["notes"]), r
         assert c.get("/office/commands?agent=沒這個人").json()["ok"] is False
-        # 對照分流：Codex 沒列的辦公室指令，送出去確實被拒；有列的 /stop 不會被當成「不支援」擋掉
+        # 對照分流：列了的指令，送出去不會被當成「不支援」擋掉（沒有行程在跑時被拒，原因要是「送不進／沒有待審批」）
         # （Codex 要先「可用」，否則被拒的原因是沒登入，不是不支援——那樣驗不到這張表）
         old_avail, old_blocked = main.codex_available, main.codex_blocked
         main.codex_available, main.codex_blocked = (lambda: True), (lambda: "")
         main.busy.add("p05")
         try:
-            for verb in ("/steer 換個方向", "approve", "reject 不行"):
+            for verb in ("/steer 換個方向", "approve", "reject 不行", "/stop"):
                 r = asyncio.run(main.office_dispatch({"agent": "p05", "text": verb, "engine": "codex"}))
-                assert r["ok"] is False and ("不支援" in r["error"] or "沒有審批" in r["error"]), (verb, r)
-            r = asyncio.run(main.office_dispatch({"agent": "p05", "text": "/stop", "engine": "codex"}))
-            assert not any(w in str(r.get("error", "")) for w in ("不支援", "沒有審批")), f"列了 /stop 就不能被當成不支援擋掉：{r}"
+                assert not any(w in str(r.get("error", "")) for w in ("不支援", "沒有審批——")), f"列了 {verb} 就不能被當成不支援擋掉：{r}"
         finally:
             main.busy.discard("p05")
             main.codex_available, main.codex_blocked = old_avail, old_blocked
@@ -3626,7 +3669,7 @@ def commands_page() -> None:
             cx = main.engine_caps("codex")
             assert cx["skills"] == [{"name": "imagegen", "description": "產生或編輯圖片"}], cx["skills"]
             mcp = {x["name"]: x["description"] for x in cx["mcp"]}
-            assert "自動核准" in mcp["jobspy"] and "會被擋" in mcp["other"], mcp
+            assert "自動核准" in mcp["jobspy"] and "審批卡" in mcp["other"], mcp
             fake = dict(main.cli_caps)
             with TestClient(main.app) as c:
                 # 啟動時會 load_state()，把存檔裡的能力清單載回來蓋掉剛塞的——所以開了之後再塞一次
@@ -3638,7 +3681,7 @@ def commands_page() -> None:
                 os.environ.pop("CLAUDE_CONFIG_DIR", None)
             else:
                 os.environ["CLAUDE_CONFIG_DIR"] = old_cfg
-    print("  ✓ 指令頁：各引擎只列真的收的指令（Codex 只有中止、cogito 多自己的指令、開工只給看板），跟分流一致；"
+    print("  ✓ 指令頁：各引擎只列真的收的指令（Codex 跟 Claude Code 同一組、cogito 多自己的指令、開工只給看板），跟分流一致；"
           "下半列技能（說明從 SKILL.md 補）、CLI 內建指令、子 agent、MCP")
 
 
@@ -4221,7 +4264,7 @@ def isolation_at_import() -> None:
 
 
 def codex_engine() -> None:
-    """Codex 引擎（實測 0.154.0 的事件形狀）：派工 → codex exec --json，提示走 stdin；不帶 OPENAI_API_KEY（走訂閱）；
+    """Codex 引擎（實測 0.154.0 app-server 的協定形狀）：派工 → codex app-server，提示走 turn/start；不帶 OPENAI_API_KEY（走訂閱）；
     事件翻成工具／結果／訊息；收工帶用量與 rollout 裡實際跑的模型；老闆派的活接同一條 thread（resume ＋ 那條的模型），
     班表開新的；回溯讀 rollout；不支援的插話、看板明講；失敗（turn.failed）標中斷。"""
     import tempfile
@@ -4244,37 +4287,89 @@ if argv[:1] == ["login"]:   # 照實測 0.154 的 device-auth 輸出（帶 ANSI 
     open(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "w").write("{}")
     print("Successfully logged in", flush=True)
     sys.exit(0)
-prompt = sys.stdin.read()
+assert argv[:1] == ["app-server"], argv
 home = os.environ.get("CODEX_HOME", "")
-with open(os.environ["FAKE_CODEX_LOG"], "a", encoding="utf-8") as f:
-    f.write(json.dumps({"argv": argv, "prompt": prompt, "has_openai_key": "OPENAI_API_KEY" in os.environ, "home": home}, ensure_ascii=False) + "\n")
-tid = argv[argv.index("resume") + 1] if "resume" in argv else "01a0-new-%d" % len(open(os.environ["FAKE_CODEX_LOG"]).read().splitlines())
-day = os.path.join(home, "sessions", "2026", "09", "17"); os.makedirs(day, exist_ok=True)
-import datetime
-now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-with open(os.path.join(day, "rollout-2026-09-17T10-00-00-%s.jsonl" % tid), "a", encoding="utf-8") as f:
-    for rec in ({"timestamp": "2026-09-17T02:00:00Z", "type": "turn_context", "payload": {"model": "gpt-test-model"}},
-                {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<系統注入>"}]}},
-                {"timestamp": now, "type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": "cat a.py"}},
-                {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "看完了"}]}}):
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-out = [{"type": "thread.started", "thread_id": tid}, {"type": "turn.started"}]
-if os.environ.get("FAKE_CODEX_FAIL"):
-    out.append({"type": "turn.failed", "error": {"message": "模型不支援"}})
-else:
-    out += [
-      {"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "我先讀檔"}},
-      {"type": "item.started", "item": {"id": "i1", "type": "command_execution", "command": "cat a.py", "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
-      {"type": "item.completed", "item": {"id": "i1", "type": "command_execution", "command": "cat a.py", "aggregated_output": "print(1)", "exit_code": 0, "status": "completed"}},
-      {"type": "item.started", "item": {"id": "i2", "type": "command_execution", "command": "curl x", "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
-      {"type": "item.completed", "item": {"id": "i2", "type": "command_execution", "command": "curl x", "aggregated_output": "network blocked", "exit_code": 6, "status": "failed"}},
-      {"type": "item.completed", "item": {"id": "i3", "type": "error", "message": "resume 換了模型"}},
-      {"type": "item.completed", "item": {"id": "i4", "type": "agent_message", "text": "看完了"}},
-      {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 60, "cache_write_input_tokens": 0, "output_tokens": 20}},
-    ]
-for o in out:
+LOG = os.environ["FAKE_CODEX_LOG"]
+rec = {"argv": argv, "has_openai_key": "OPENAI_API_KEY" in os.environ, "home": home, "replies": {}, "steer": []}
+def out(o):
     print(json.dumps(o, ensure_ascii=False), flush=True)
-sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
+def wait_reply(rid):   # 反過來問橋的請求：等同一個 id 的回覆
+    for line in sys.stdin:
+        d = json.loads(line)
+        if d.get("id") == rid and "method" not in d:
+            rec["replies"][str(rid)] = d
+            return d
+thread, turn = None, "turn-1"
+for line in sys.stdin:
+    d = json.loads(line)
+    m, p = d.get("method"), d.get("params") or {}
+    if m == "initialize":
+        out({"id": d["id"], "result": {"userAgent": "fake"}})
+    elif m in ("thread/start", "thread/resume"):
+        if os.environ.get("FAKE_CODEX_SLOW"):   # 握手慢（實測 MCP 啟動要幾秒）：這段時間裡這一輪還沒開
+            import time; time.sleep(1)
+        rec["thread"] = {"method": m, "params": p}
+        try:
+            n = len(open(LOG, encoding="utf-8").read().splitlines())
+        except FileNotFoundError:
+            n = 0
+        thread = p.get("threadId") or "01a0-new-%d" % (n + 1)
+        day = os.path.join(home, "sessions", "2026", "09", "17"); os.makedirs(day, exist_ok=True)
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with open(os.path.join(day, "rollout-2026-09-17T10-00-00-%s.jsonl" % thread), "a", encoding="utf-8") as f:
+            for r in ({"timestamp": "2026-09-17T02:00:00Z", "type": "turn_context", "payload": {"model": "gpt-test-model"}},
+                      {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<系統注入>"}]}},
+                      {"timestamp": now, "type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": "cat a.py"}},
+                      {"timestamp": now, "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "看完了"}]}}):
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        out({"id": d["id"], "result": {"thread": {"id": thread}, "model": p.get("model") or "gpt-test-model"}})
+        out({"method": "thread/started", "params": {"thread": {"id": thread}}})
+    elif m == "turn/start":
+        prompt = rec["prompt"] = p["input"][0]["text"]
+        assert p["threadId"] == thread, p
+        out({"id": d["id"], "result": {"turn": {"id": turn, "items": [], "status": "inProgress"}}})
+        out({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "inProgress"}}})
+        it = lambda m2, item: out({"method": m2, "params": {"threadId": thread, "turnId": turn, "item": item}})
+        if os.environ.get("FAKE_CODEX_FAIL"):
+            open(LOG, "a", encoding="utf-8").write(json.dumps(rec, ensure_ascii=False) + "\n")
+            out({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "status": "failed", "error": {"message": "模型不支援"}, "items": []}}})
+            continue
+        if "等插話" in prompt:   # 停在這一輪，等老闆插話（turn/steer 要帶這一輪的 id）
+            for line2 in sys.stdin:
+                s = json.loads(line2)
+                if s.get("method") == "turn/steer":
+                    assert s["params"]["expectedTurnId"] == turn and s["params"]["threadId"] == thread, s
+                    rec["steer"].append(s["params"]["input"][0]["text"])
+                    out({"id": s["id"], "result": {"turnId": turn}})
+                    break
+        if "要開 PR" in prompt:   # 沒放行的 MCP 工具：elicitation 請求本身不帶工具名稱（實測 0.154）
+            it("item/started", {"type": "mcpToolCall", "id": "m1", "server": "office_git", "tool": "open_pull_request", "status": "inProgress", "arguments": {"repo_dir": "/w"}})
+            out({"id": 0, "method": "mcpServer/elicitation/request", "params": {"threadId": thread, "turnId": turn, "serverName": "office_git", "mode": "form",
+                 "message": 'Allow the office_git MCP server to run tool "open_pull_request"?', "requestedSchema": {"type": "object", "properties": {}},
+                 "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {"repo_dir": "/w"}}}})
+            ok = wait_reply(0)["result"]["action"] == "accept"
+            it("item/completed", {"type": "mcpToolCall", "id": "m1", "server": "office_git", "tool": "open_pull_request", "arguments": {"repo_dir": "/w"},
+                                  "status": "completed" if ok else "failed", "result": {"content": [{"type": "text", "text": "https://github.com/x/y/pull/1"}]} if ok else None,
+                                  "error": None if ok else {"message": "user rejected MCP tool call"}})
+        if "要跳出沙箱" in prompt:
+            out({"id": 1, "method": "item/commandExecution/requestApproval", "params": {"threadId": thread, "turnId": turn, "itemId": "c9",
+                 "startedAtMs": 0, "command": "curl https://evil.example", "reason": "需要網路"}})
+            wait_reply(1)
+        it("item/completed", {"type": "userMessage", "id": "u1", "content": [{"type": "text", "text": prompt}]})
+        it("item/completed", {"type": "agentMessage", "id": "i0", "text": "我先讀檔", "phase": "commentary"})
+        it("item/started", {"type": "commandExecution", "id": "i1", "command": "/bin/zsh -lc 'cat a.py'", "commandActions": [{"type": "read", "command": "cat a.py"}], "status": "inProgress"})
+        it("item/completed", {"type": "commandExecution", "id": "i1", "command": "/bin/zsh -lc 'cat a.py'", "commandActions": [{"type": "read", "command": "cat a.py"}], "aggregatedOutput": "print(1)", "exitCode": 0, "status": "completed"})
+        it("item/started", {"type": "commandExecution", "id": "i2", "command": "/bin/zsh -lc 'curl x'", "commandActions": [{"type": "unknown", "command": "curl x"}], "status": "inProgress"})
+        it("item/completed", {"type": "commandExecution", "id": "i2", "command": "/bin/zsh -lc 'curl x'", "commandActions": [{"type": "unknown", "command": "curl x"}], "aggregatedOutput": "network blocked", "exitCode": 6, "status": "failed"})
+        out({"method": "warning", "params": {"threadId": thread, "message": "resume 換了模型"}})
+        for i_, c_, o_ in ((60, 30, 12), (40, 30, 8)):   # 每次模型呼叫一則，last 加總＝這一輪
+            out({"method": "thread/tokenUsage/updated", "params": {"threadId": thread, "turnId": turn, "tokenUsage": {
+                "total": {"inputTokens": 999}, "last": {"inputTokens": i_, "cachedInputTokens": c_, "cacheWriteInputTokens": 0, "outputTokens": o_}}}})
+        it("item/completed", {"type": "agentMessage", "id": "i4", "text": "看完了" + ("；收到插話：" + rec["steer"][0] if rec["steer"] else ""), "phase": "final_answer"})
+        open(LOG, "a", encoding="utf-8").write(json.dumps(rec, ensure_ascii=False) + "\n")
+        out({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "status": "completed", "items": []}}})
+# 真的 app-server 不會自己結束（橋收工時砍掉）；這裡 stdin 關了才離開
 """
     with tempfile.TemporaryDirectory() as tmp:
         bin_ = Path(tmp) / "fakecodex"; bin_.write_text(fake, encoding="utf-8"); bin_.chmod(0o755)
@@ -4282,7 +4377,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
         old = (main.CODEX_CMD, main.CHANNELS_DIR, main.AUDIT_DIR)
         main.CODEX_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
         main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
-        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS", "FAKE_CODEX_APPROVE", "CLAUDE_CONFIG_DIR")}
+        saved_env = {k: os.environ.get(k) for k in ("FAKE_CODEX_SLOW", "FAKE_CODEX_LOG", "OFFICE_CODEX_HOME", "OPENAI_API_KEY", "FAKE_CODEX_FAIL", "OFFICE_CODEX_MODEL", "OFFICE_AGENT_ENV_PASS", "FAKE_CODEX_APPROVE", "CLAUDE_CONFIG_DIR")}
         prof = Path(tmp) / "claude-office"; prof.mkdir()
         (prof / ".claude.json").write_text(json.dumps({"mcpServers": {
             "jobspy": {"type": "stdio", "command": "node", "args": ["/mcp/jobspy/index.js"], "env": {"DOCKER_CMD": "docker"}},
@@ -4297,11 +4392,17 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
             (main.USER_AGENT_SKILLS / sk).mkdir(parents=True); (main.USER_AGENT_SKILLS / sk / "SKILL.md").write_text("x", encoding="utf-8")
         gate = Path(tmp) / "approve"
         os.environ.update({"FAKE_CODEX_LOG": str(log), "OFFICE_CODEX_HOME": str(Path(tmp) / "codexhome"), "OPENAI_API_KEY": "sk-test-not-real",
-                           "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL,FAKE_CODEX_APPROVE", "FAKE_CODEX_APPROVE": str(gate)})
+                           "OFFICE_AGENT_ENV_PASS": "FAKE_CODEX_LOG,FAKE_CODEX_FAIL,FAKE_CODEX_APPROVE,FAKE_CODEX_SLOW", "FAKE_CODEX_APPROVE": str(gate)})
         old_default = main.CODEX_HOME_DEFAULT
         (Path(tmp) / "codexhome").mkdir(); (Path(tmp) / "codexhome" / "auth.json").write_text("{}", encoding="utf-8")   # 獨立 home 已登入
         os.environ.pop("FAKE_CODEX_FAIL", None); os.environ.pop("OFFICE_CODEX_MODEL", None)
         main.engine_sent.pop("p05", None); main.codex_threads.clear(); main.codex_model.clear()
+
+        def sent() -> dict:   # 假 app-server 最後一次收到的：argv、開／接 thread 的參數、提示、插話、它收到的回覆
+            return json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+
+        def sent_model() -> str | None:
+            return sent()["thread"]["params"].get("model")
 
         def run(body: dict) -> dict:
             main.busy.discard("p05")
@@ -4348,9 +4449,12 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 dev = next(x for x in wt_cs if x.startswith("developer_instructions="))
                 wt_dev = json.loads(dev.split("=", 1)[1])
                 assert wt_dev.startswith(f"# 你是{main.agents['p05'].name}") and "工具對照" in wt_dev, wt_dev[:80]
-                assert a[:2] == ["exec", "--json"] and "--skip-git-repo-check" in a and a[a.index("-s") + 1] == "workspace-write" \
-                    and a[a.index("-C") + 1] == str(base) and a[-1] == "-" and "resume" not in a and "-m" not in a, a
-                assert rec["prompt"] == "看一下 a.py", "提示走 stdin"
+                th = rec["thread"]
+                assert a[0] == "app-server" and th["method"] == "thread/start" and th["params"]["cwd"] == str(base) \
+                    and th["params"]["sandbox"] == "workspace-write" and "model" not in th["params"], rec
+                # 審批：stable 的 on-request（MCP 未放行會來問）；跳出沙箱的由橋一律拒（見下面「要跳出沙箱」）
+                assert th["params"]["approvalPolicy"] == "on-request", th
+                assert rec["prompt"] == "看一下 a.py", "提示走 turn/start"
                 assert rec["has_openai_key"] is False, "子行程拿到 OPENAI_API_KEY——Codex 會改走 API 計費而不是訂閱"
                 assert rec["home"] == str(Path(tmp) / "codexhome"), "OFFICE_CODEX_HOME 要傳成 CODEX_HOME"
                 assert card["status"] == "ok" and card["engine"] == "codex" and card["session"].startswith("01a0-new-"), card
@@ -4366,8 +4470,8 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 tid = card["session"]
                 # 老闆再派一件：接同一條 thread，帶回那條的模型（不帶的話 resume 會被換成 Codex 目前的預設）
                 card2 = run({"text": "繼續"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[-3:] == ["resume", tid, "-"] and a[a.index("-m") + 1] == "gpt-test-model", a
+                th = sent()["thread"]
+                assert th["method"] == "thread/resume" and th["params"]["threadId"] == tid and th["params"]["model"] == "gpt-test-model", th
                 assert card2["session"] == tid, card2
                 # 班表任務開新的，也不蓋掉老闆那條
                 main.busy.discard("p05")
@@ -4378,8 +4482,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                     cur = main.last_report.get("p05")
                     if cur and cur.get("id") != before and cur["status"] != "working":
                         break
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert "resume" not in a, a
+                assert sent()["thread"]["method"] == "thread/start", sent()["thread"]
                 assert list(main.codex_threads.values()) == [tid], main.codex_threads
                 # 模型清單：讀 Codex 自己的 models_cache，只列 visibility=list、照 priority 排
                 (Path(tmp) / "codexhome" / "models_cache.json").write_text(json.dumps({"models": [
@@ -4390,25 +4493,25 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 assert [x["id"] for x in m["codex_list"]] == ["gpt-astra", "gpt-luna"] and m["codex_effective"] == {}, m["codex_list"]
                 # 選了就用、會記住，而且蓋過接續那條 thread 的模型；Claude 型號不送；還原收回
                 card4 = run({"text": "用 luna", "engine": "codex", "model": "gpt-luna"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[a.index("-m") + 1] == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", a
+                a = sent()["argv"]
+                assert sent_model() == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", a
                 assert "p05" not in main.model_sent or main.model_sent["p05"] != "gpt-luna", "Codex 的選擇不能寫進 Claude 那份"
                 run({"text": "沒選模型"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[a.index("-m") + 1] == "gpt-luna", f"選過的要記住：{a}"
+                a = sent()["argv"]
+                assert sent_model() == "gpt-luna", f"選過的要記住：{a}"
                 assert c.get("/office/models").json()["codex_effective"]["p05"] == "gpt-luna"
                 run({"text": "給了 Claude 型號", "model": "claude-opus-5[1m]"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[a.index("-m") + 1] == "gpt-luna", f"Claude 型號不該送給 Codex：{a}"
+                a = sent()["argv"]
+                assert sent_model() == "gpt-luna", f"Claude 型號不該送給 Codex：{a}"
                 # 清單上沒有的不收（稽核 #13）：隱藏的、亂打的都沿用上一次，卡上講一句
                 for bad in ("gpt-hidden", "gpt-luna; rm -rf ~", "不存在的型號"):
                     card_bad = run({"text": "選了清單外的", "engine": "codex", "model": bad})
-                    a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                    assert a[a.index("-m") + 1] == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", (bad, a)
+                    a = sent()["argv"]
+                    assert sent_model() == "gpt-luna" and main.codex_model_sent["p05"] == "gpt-luna", (bad, a)
                     assert any("型號清單沒有" in e["text"] for e in card_bad["events"]), [e["text"] for e in card_bad["events"]][-3:]
                 run({"text": "還原", "model": main.MODEL_RESET})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[a.index("-m") + 1] == "gpt-test-model" and "p05" not in main.codex_model_sent, f"還原後回到接續那條的模型：{a}"
+                a = sent()["argv"]
+                assert sent_model() == "gpt-test-model" and "p05" not in main.codex_model_sent, f"還原後回到接續那條的模型：{a}"
                 # 思考力度：看型號收不收（models_cache 的 supported_reasoning_levels）。收就帶 -c model_reasoning_effort=…
                 (Path(tmp) / "codexhome" / "models_cache.json").write_text(json.dumps({"models": [
                     {"slug": "gpt-luna", "display_name": "Luna", "visibility": "list", "priority": 8,
@@ -4417,25 +4520,116 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                 luna = c.get("/office/models").json()["codex_list"][0]
                 assert luna["efforts"] == ["low", "high"] and luna["default_effort"] == "low", luna
                 run({"text": "想深一點", "model": "gpt-luna", "effort": "high"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
-                assert a[a.index("-c", a.index("-m")) + 1] == "model_reasoning_effort=high" and main.codex_effort_pick["p05"] == "high", a
+                a = sent()["argv"]
+                assert sent_model() == "gpt-luna" and "model_reasoning_effort=high" in a and main.codex_effort_pick["p05"] == "high", a
                 run({"text": "這型號不收 max", "effort": "max"})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                a = sent()["argv"]
                 assert not any(x.startswith("model_reasoning_effort") for x in a), f"型號不收的力度不能送：{a}"
                 assert any("不收思考力度 max" in e["text"] for e in main.last_report["p05"]["events"]), "要講為什麼沒用"
                 run({"text": "還原", "model": main.MODEL_RESET, "effort": main.MODEL_RESET})
-                a = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+                a = sent()["argv"]
                 assert not any(x.startswith("model_reasoning_effort") for x in a) and "p05" not in main.codex_effort_pick, a
-                # 不支援的明講：插話、看板
+                # 插話送不進（沒有行程在跑）：明講，不假裝送了
                 main.busy.add("p05")
                 r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 補一句"}).json()
-                assert r["ok"] is False and "不支援插話" in r["error"], r
+                assert r["ok"] is False and "插話送不進 Codex" in r["error"], r
                 main.busy.discard("p05")
+
+                def start(body: dict) -> str | None:   # 派出去就回（不等收工）：插話、審批要在中途做
+                    main.busy.discard("p05")
+                    before = (main.last_report.get("p05") or {}).get("id")
+                    r = c.post("/office/dispatch", json={"agent": "p05", "engine": "codex", **body}).json()
+                    assert r["ok"] and r.get("engine") == "codex", r
+                    return before
+
+                def until(cond, what: str) -> None:
+                    for _ in range(200):
+                        if cond():
+                            return
+                        time.sleep(0.05)
+                    raise AssertionError(what)
+
+                def finished(before) -> dict:
+                    until(lambda: (cur := main.last_report.get("p05")) and cur.get("id") != before and cur["status"] != "working",
+                          f"Codex 任務沒收工：{main.last_report.get('p05')}")
+                    return main.last_report["p05"]
+
+                # 插話（app-server 的 turn/steer）：帶這一輪的 id、塞進同一輪，模型照做、照常收工
+                before = start({"text": "等插話再收工"})
+                until(lambda: (x := main.codex_rpc.get("p05")) is not None and bool(x.turn), "Codex 這一輪沒開始")
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 順便看 b.py"}).json()
+                assert r["ok"], r
+                card = finished(before)
+                assert sent()["steer"] == ["順便看 b.py"] and card["status"] == "ok", (sent()["steer"], card["status"])
+                evs = [e["text"] for e in card["events"]]
+                assert any("老闆插話：順便看 b.py" in x for x in evs) and any("收到插話：順便看 b.py" in x for x in evs), evs
+                assert any(e["kind"] == "steer" and e.get("engine") == "codex" for e in main.audit_recent("p05")), "稽核要記成 Codex 的插話"
+                assert "p05" not in main.codex_rpc and "p05" not in main.cli_procs, "收工就收掉 app-server（它不會自己結束）"
+                # 一派完就插話：這一輪還沒開（還在握手）也要送得進——等它開了再送，不回「送不進」
+                os.environ["FAKE_CODEX_SLOW"] = "1"
+                try:
+                    before = start({"text": "等插話再收工"})
+                    until(lambda: "p05" in main.codex_rpc, "app-server 沒起來")
+                    assert not main.codex_rpc["p05"].turn, "測試前提：插話時這一輪還沒開"
+                    r = c.post("/office/dispatch", json={"agent": "p05", "text": "/steer 早一點講"}).json()
+                    assert r["ok"], r
+                    card = finished(before)
+                    assert sent()["steer"] == ["早一點講"] and card["status"] == "ok", (sent()["steer"], card["status"])
+                finally:
+                    os.environ.pop("FAKE_CODEX_SLOW", None)
+                # 審批：沒放行的 MCP 工具 → 審批卡（名稱跟 Claude Code 員工同一種寫法），老闆核准才回 accept
+                before = start({"text": "要開 PR"})
+                until(lambda: "p05" in main.pending_approval, "沒放行的 MCP 工具沒有開審批卡")
+                meta = main.approval_meta["p05"]
+                assert meta["tool"] == "mcp__office_git__open_pull_request" and '"repo_dir": "/w"' in meta["params"], meta
+                assert main.running_engine("p05") == main.ENGINE_CODEX and main.approval_permit("p05") is None, \
+                    "Codex 不吃 --allowedTools：准了也記不住，不能給「以後都准」"
+                r = c.post("/office/dispatch", json={"agent": "p05", "text": "approve", "always": True}).json()
+                assert r["ok"] is False and "Codex 的審批不能設成以後都准" in r["error"], r
+                assert c.post("/office/dispatch", json={"agent": "p05", "text": "approve"}).json()["ok"]
+                card = finished(before)
+                assert sent()["replies"]["0"]["result"]["action"] == "accept" and card["status"] == "ok", sent()["replies"]
+                assert any("✓ mcp:office_git.open_pull_request" in e["text"] and "pull/1" in e["text"] and '"content"' not in e["text"]
+                           for e in card["events"]), [e["text"] for e in card["events"]]   # MCP 結果只留文字
+                kinds = [(e["kind"], e.get("engine")) for e in main.audit_recent("p05")]
+                assert ("approval.asked", "codex") in kinds and ("approval.approved", "codex") in kinds, kinds
+                # 駁回 → decline，工具呼叫失敗、模型自己改道
+                before = start({"text": "要開 PR"})
+                until(lambda: "p05" in main.pending_approval, "第二張審批卡沒開")
+                assert c.post("/office/dispatch", json={"agent": "p05", "text": "reject 先別開"}).json()["ok"]
+                card = finished(before)
+                assert sent()["replies"]["0"]["result"]["action"] == "decline", sent()["replies"]
+                assert any("✗ mcp:office_git.open_pull_request" in e["text"] for e in card["events"]), [e["text"] for e in card["events"]]
+                # 跳出沙箱：一律自動拒、不開卡（Claude Code 員工 allowUnsandboxedCommands=false；稽核 #2 shell 不連網）
+                card = run({"text": "要跳出沙箱"})
+                assert sent()["replies"]["1"]["result"]["decision"] == "decline" and "p05" not in main.pending_approval, sent()["replies"]
+                assert any("想跳出沙箱" in e["text"] and "curl https://evil.example" in e["text"] for e in card["events"]), \
+                    [e["text"] for e in card["events"]]
+                assert any(e["kind"] == "policy.denied" and e.get("reason") == "sandbox-escape" for e in main.audit_recent("p05"))
+
+                class Rpc:   # 直接驗 codex_server_request：班表無人值守、沒人能回答的提問
+                    mcp_item = {"server": "office_git", "tool": "open_pull_request"}
+
+                    def __init__(self):
+                        self.got = []
+
+                    async def reply(self, rid, result=None, error=""):
+                        self.got.append((rid, result, error))
+                rpc = Rpc()
+                main.sched_running["p05"] = {}
+                try:
+                    asyncio.run(main.codex_server_request("p05", rpc, {"id": 7, "method": "mcpServer/elicitation/request", "params": {
+                        "serverName": "office_git", "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {}}}}))
+                finally:
+                    main.sched_running.pop("p05", None)
+                assert rpc.got == [(7, {"action": "decline"}, "")] and "p05" not in main.pending_approval, rpc.got
+                asyncio.run(main.codex_server_request("p05", rpc, {"id": 8, "method": "item/tool/requestUserInput", "params": {}}))
+                assert rpc.got[-1][0] == 8 and "沒人能即時回答" in rpc.got[-1][2], rpc.got
                 main.busy.discard(main.KANBAN)
                 r = c.post("/office/dispatch", json={"agent": main.KANBAN, "text": "開會", "engine": "codex"}).json()
                 assert r["ok"] is False and "看板暫不支援 Codex" in r["error"], r
                 main.engine_sent.pop(main.KANBAN, None)
-                # 失敗：turn.failed → 中斷、帶原因
+                # 失敗：turn/completed 的 status=failed → 中斷、帶原因
                 os.environ["FAKE_CODEX_FAIL"] = "1"
                 card3 = run({"text": "會失敗的", "engine": "codex"})
                 assert card3["status"] == "error" and "模型不支援" in (card3.get("report") or ""), card3
@@ -4516,7 +4710,7 @@ sys.exit(1 if os.environ.get("FAKE_CODEX_FAIL") else 0)
                     os.environ[k] = v
             main.engine_sent.pop("p05", None); main.engine_sent.pop(main.KANBAN, None)
             main.codex_threads.clear(); main.codex_model.clear(); main.codex_model_sent.clear(); main.busy.discard("p05")
-    print("  ✓ Codex 引擎（含模型清單、選擇與畫面上登入）：exec --json、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、不支援的明講")
+    print("  ✓ Codex 引擎（含模型清單、選擇與畫面上登入）：app-server、訂閱不帶 API key、事件投影、用量與模型、接續同一條 thread、班表開新的、回溯、插話、MCP 審批卡、跳出沙箱一律拒")
 
 
 def audit_ledger() -> None:
@@ -5121,9 +5315,18 @@ def standup_meeting() -> None:
 
             # 真正的收件在 subagent_await 的結果裡，逐行對人設名收。
             # 一個 ✅ 一個 🟢＝只該收掉一張：🟢 是「這次沒等到」，卡片要繼續開著。
+            said: list[tuple[str, str]] = []
+            real_bubble = main.bubble
+
+            async def spy(a, t, collapsible=False):
+                said.append((a, t))
+            main.bubble = spy
             post(c, agent=main.KANBAN, kind="result", label="subagent_await",
                  detail="背景子 agent bg-1 []：✅ 已完成\n我的意見\n"
                         "背景子 agent bg-2 []：🟢 執行中，尚無結果。")
+            main.bubble = real_bubble
+            # 會議中交件＝這個人發言：頭上冒他意見的第一句，不是「✓ 回報完成」（2026-11-02：看不到 agent 在辦公室互動）
+            assert any(t == "我的意見" for _, t in said) and not any(t == "✓ 回報完成" for _, t in said), said
             left = [n for lst in main.sub_active.values() for n in lst]
             assert len(left) == 1, f"await 該只收掉 ✅ 那一張，實際剩 {left}"
 
@@ -5133,6 +5336,15 @@ def standup_meeting() -> None:
             closed = next(n for n in open_now if n not in left)
             rep = main.last_report[closed]["report"]
             assert rep == "我的意見", f"卡片該只放自己那段，實際是 {rep!r}"
+
+            # 第二輪再點【同一個人】：他交過件、還坐在會議室——就是他本人接，原位不換座，不找別人代打
+            # （2026-11-03 實跑：小樺頂著小美的意見發言，會議室坐了六個人）
+            seat = main.occupied[closed]
+            post(c, agent=main.KANBAN, kind="tool", label=f"spawn_subagent:{main.agents[closed].name}")
+            assert closed in main.sub_active.get((main.KANBAN, main.agents[closed].name), []), main.sub_active
+            assert main.occupied[closed] == seat, "第二輪被換了座位"
+            assert main.gist("**1. 被說服的**\n阿哲的第 3 點說服我：行號會漂。") == "阿哲的第 3 點說服我：行號會漂。"
+            post(c, agent=main.KANBAN, kind="result", label=f"spawn_subagent:{main.agents[closed].name}", detail="第二輪的意見")
 
             # 而且要【一邊一個】：長桌兩側各三個位子，照 a1,a2,a3 順序填的話兩個人會擠在
             # 同一側、對面空著，看起來像在罰站而不是在談事情。
@@ -5153,30 +5365,46 @@ def standup_meeting() -> None:
             assert len(done_yet) == len(still), \
                 f"會議中交過件的人被放出 busy，生活迴圈會把他帶走：{set(still) - main.busy}"
 
-            # 【板子一寫好就散會】——會議結束的時刻是「結論定案」，不是整個任務做完。
-            # 先前綁在收工，畫面上會變成「板子都出來了、人還圍在白板前」，兩個投影各說各話。
+            # 板子寫好【不散會】：那是停下來給老闆看的時刻，會議一直到老闆說「開工」。
+            # 以前「板子一寫好就散會」，主持人一開始就先寫板子，會議在畫面上只活十幾秒（2026-11-02 回報）。
             (wd / "board.json").write_text('{"task":"x","tasks":[]}', encoding="utf-8")
             post(c, agent=main.KANBAN, kind="think", label="")   # 隨便一則事件觸發檢查
+            assert main.in_meeting(main.KANBAN), "板子寫好就被判成散會了"
             still = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
-            assert not still, f"板子出來了還有人圍在會議室：{still}"
+            assert still, "板子寫好就把人從會議室請走了"
 
+            # 這一輪收工（停下來問要不要開工）＝散會：還坐在會議室的人請回位子
+            post(c, agent=main.KANBAN, kind="done", label="ok")
+            left = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
+            assert not left, f"散會後還有人杵在會議室：{left}"
             # 散會也要【解除 busy】。會議期間刻意把人留在 busy，解除的責任就落在散會這裡；
             # 漏掉的話他回到工位後再也不會被生活迴圈碰到、也不會被挑去支援——變成一尊雕像。
             assert not (main.busy - {main.KANBAN}), f"散會後還有人卡在 busy：{main.busy}"
 
-            # 上板之後＝實作階段：新派的人改成各自回工位
+            # 老闆說「開工」＝執行輪：新派的人各自回工位做事
+            post(c, agent=main.KANBAN, kind="start", label="開工。照板子推進，先做相依都滿足的票，最多 3 人並行。")
+            assert main.last_report[main.KANBAN]["phase"] == "exec" and not main.in_meeting(main.KANBAN)
             post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
             third = [n for lst in main.sub_active.values() for n in lst][-1]
             assert main.occupied[third] == main.WORK_DESK[third], \
-                f"上板後該回工位，實際去了 {main.occupied[third]}"
-            # 散會要有人喊：收工時把還站在白板前的人請回位子，否則他們會一直杵在那裡
-            # 直到生活迴圈下一輪隨機把人帶走——那段畫面同樣是錯的。
-            (wd / "board.json").unlink()          # 回到會議狀態，讓還有人站在白板前
-            post(c, agent=main.KANBAN, kind="tool", label="spawn_subagent")
-            assert any(s in main.MEET_SPOTS for s in main.occupied.values())
+                f"開工後該回工位，實際去了 {main.occupied[third]}"
             post(c, agent=main.KANBAN, kind="done", label="ok")
-            left = [n for n, s in main.occupied.items() if s in main.MEET_SPOTS]
-            assert not left, f"散會後還有人杵在白板前：{left}"
+
+            # 下一題開會時，上一輪全部完成的板子自動封存——留著的話主持人會直接覆寫它
+            (wd / "board.json").write_text('{"task":"x","tasks":[{"id":"a","status":"done"},{"id":"b","status":"done"}]}',
+                                           encoding="utf-8")
+            post(c, agent=main.KANBAN, kind="start", label="下一題")
+            assert not (wd / "board.json").exists() and list(wd.glob("board.*.json")), "完成的舊板沒被封存"
+            assert main.last_report[main.KANBAN]["phase"] == "plan" and main.in_meeting(main.KANBAN)
+            post(c, agent=main.KANBAN, kind="done", label="ok")
+
+            # 開會那一輪綁了 repo：repo 唯讀（停一次是程式擋，不是約定）；開工之後才放開；不是看板、或沒綁 repo 不管
+            (wd / "repo").mkdir()
+            g = main.cli_plan_guard(main.KANBAN, "補文件", wd / "repo")
+            assert g[0] == "--disallowedTools" and f"Edit(/{wd / 'repo'}/**)" in g and "Bash(git commit:*)" in g \
+                and "mcp__office_git__open_pull_request" in g, g
+            assert main.cli_plan_guard(main.KANBAN, "開工。照板子推進", wd / "repo") == []
+            assert main.cli_plan_guard(main.KANBAN, "補文件", wd) == [] and main.cli_plan_guard("p05", "補文件", wd / "repo") == []
     main.CHANNELS_DIR = None
 
 
@@ -5908,14 +6136,18 @@ def engine_caps_flow() -> None:
             got = cmds("p05", eng)
             assert ("/steer" in got) == cap["steer"] and ("approve" in got) == cap["approval"] and "/stop" in got, (eng, got)
             assert any("開工" in x for x in cmds(main.KANBAN, eng)) == cap["subagents"], eng
-        # ② 能力只改一處：Codex 補上插話 → 指令頁跟著列、說明不再寫「不支援插話」
-        main.ENGINE_CAPS[main.ENGINE_CODEX]["steer"] = True
+        # ② 能力只改一處：Codex 補上子 agent → 看板的指令頁跟著列「開工」、說明不再寫「不支援子 agent」
+        r = c.get(f"/office/commands?agent={main.KANBAN}&engine=codex").json()
+        assert any("不支援子 agent。" in n for n in r["notes"]) and not any("等它收工再派" in n for n in r["notes"]), \
+            "Codex 已經能插話：只缺子 agent 時不該叫人「等收工再派」"
+        main.ENGINE_CAPS[main.ENGINE_CODEX]["subagents"] = True
         try:
-            r = c.get("/office/commands?agent=p05&engine=codex").json()
-            assert "/steer" in {x["cmd"].strip() for x in r["items"]} and not any("插話" in n for n in r["notes"]), r
+            r = c.get(f"/office/commands?agent={main.KANBAN}&engine=codex").json()
+            assert any("開工" in x["cmd"] for x in r["items"]) and not any("子 agent" in n for n in r["notes"]), r
         finally:
-            main.ENGINE_CAPS[main.ENGINE_CODEX]["steer"] = False
-        assert c.get("/office/models").json()["engine_caps"]["codex"]["approval"] is False
+            main.ENGINE_CAPS[main.ENGINE_CODEX]["subagents"] = False
+        caps = c.get("/office/models").json()["engine_caps"]["codex"]
+        assert caps["approval"] is True and caps["steer"] is True and caps["subagents"] is False, caps   # app-server（2026-11-04）
         # ③ cogito 跑到一半，老闆把設定面板改選 Claude Code：中止要叫停的是 cogito（以前只收卡、沒叫停）
         aid = "p07"
         main.busy.discard(aid); main.stopped.discard(aid); main.clear_approval(aid)
@@ -5934,10 +6166,10 @@ def engine_caps_flow() -> None:
             r = c.post("/office/dispatch", json={"agent": aid, "text": "/stop", "engine": "cli"}).json()
             assert r["ok"] and called == [aid], (r, called)
             assert c.get("/agents").json()[aid]["running"] == "", "收工後就沒有正在跑的引擎"
-            # ④ Codex 在跑、面板選 cogito：插話要被擋（照 Codex 的能力），不是送去 cogito
+            # ④ Codex 在跑、面板選 cogito：插話要交給 Codex（這張卡是手打事件開的、沒有 app-server 行程，所以送不進），不是送去 cogito
             post(c, agent=aid, kind="start", label="Codex 在跑的事", engine=main.ENGINE_CODEX)
             r = c.post("/office/dispatch", json={"agent": aid, "text": "/steer 換個方向", "engine": "cogito"}).json()
-            assert r["ok"] is False and "Codex" in r["error"] and "不支援插話" in r["error"], r
+            assert r["ok"] is False and "插話送不進 Codex" in r["error"], r
             post(c, agent=aid, kind="done", label="ok", engine=main.ENGINE_CODEX)
         finally:
             main.tell_cogito_stop, main.COGITO_HTTP, main.cli_available, main.codex_available, main.codex_blocked = old
