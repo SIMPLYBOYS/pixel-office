@@ -531,6 +531,7 @@ def run() -> None:
     codex_engine()
     boss_full_text()
     kanban_host_wrote()
+    double_start()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1894,6 +1895,56 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def double_start() -> None:
+    """同一個人派兩件、第一件還沒開卡（2026-11-08：小安兩條班表一起補跑，同時跑兩個行程，事件全落到後開的那張，
+    先開的那張永遠「進行中」——任務板說在做、頭像說閒著）：第二件要被擋；任務結束一定放掉占位；班表守門也看占位；
+    孤兒卡由巡檢收成失聯。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_ = Path(tmp) / "fakeclaude"
+        bin_.write_text("#!/usr/bin/env python3\nimport json, sys\nsys.stdin.readline()\n"
+                        "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'num_turns': 1, 'result': 'ok'}), flush=True)\n",
+                        encoding="utf-8")
+        bin_.chmod(0o755)
+        old = (main.CLI_CMD, main.CHANNELS_DIR, main.CLI_SESSION_DIR)
+        main.CLI_CMD, main.CHANNELS_DIR = str(bin_), Path(tmp) / "channels"
+        main.CLI_SESSION_DIR = Path(tmp) / "sessions"; main.CLI_SESSION_DIR.mkdir()
+        aid = "p05"
+        try:
+            main.busy.discard(aid); main.starting.pop(aid, None)
+
+            async def twice():
+                r1 = await main.office_dispatch({"agent": aid, "text": "第一件", "engine": "cli"})
+                held = aid in main.starting   # 還沒開卡（start 事件還沒來）：busy 還沒標，靠這個守門
+                task = main.starting.get(aid)
+                r2 = await main.office_dispatch({"agent": aid, "text": "第二件", "engine": "cli"})
+                if task is not None:
+                    await asyncio.wait_for(task, 30)   # 讓第一件自然收工（假 CLI 一回就收）
+                return r1, held, r2
+            r1, held, r2 = asyncio.run(twice())
+            assert r1["ok"] and held, (r1, held)
+            assert r2["ok"] is False and "還在開工" in r2["error"], f"第二件穿過了守門——同一個人會同時跑兩個行程：{r2}"
+            assert aid not in main.starting, "開了卡、任務結束都要放掉占位，不然這個人永遠派不了工"
+            # 班表到點／補跑：占位中一樣跳過
+            main.starting[aid] = None
+            r = asyncio.run(main.fire_job({"name": "雙開測試", "agent": aid, "text": "x", "hour": 9}, "2026-11-08 12"))
+            assert r["ok"] is False and "人在忙" in r["error"], r
+            main.starting.pop(aid, None)
+            # 孤兒卡兜底：還標進行中、卻不是這個人最新的那張 → 巡檢收成失聯；最新那張不動
+            main.busy.discard(aid)
+            orphan = main.report_card(aid, "先開的那張")
+            newest = main.report_card(aid, "後開的那張")
+            assert orphan["status"] == newest["status"] == "working"
+            asyncio.run(main.sweep_work())
+            assert orphan["status"] == "lost" and "同一個人後來又開了別張" in orphan["events"][-1]["text"], orphan["status"]
+            assert newest["status"] == "working", "最新那張還可能在跑，巡檢不能動它"
+            main.close_card(aid, "ok")
+        finally:
+            main.CLI_CMD, main.CHANNELS_DIR, main.CLI_SESSION_DIR = old
+            main.busy.discard(aid); main.starting.pop(aid, None); main.engine_sent.pop(aid, None)
+    print("  ✓ 同一個人不會同時開兩件：開卡前的空檔也守門（含班表）、占位一定放掉；孤兒卡巡檢收成失聯")
 
 
 def kanban_host_wrote() -> None:

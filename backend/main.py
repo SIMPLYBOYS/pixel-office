@@ -192,6 +192,10 @@ loops: list[asyncio.Task] = []
 waypoint_list: list[str] = []
 occupied: dict[str, str] = {}   # agent_id -> 佔用的 waypoint（防兩人擠同一點）
 busy: set[str] = set()          # 對話/工作中的 agent（主迴圈掛起）
+# 派出去、還沒開卡的人（CLI／Codex 要等行程起來才送 start，那之前 busy 還沒標上）。守門要一起看：
+# 2026-11-08 小安的兩條班表一起補跑，第二件在這段空檔穿過「人在忙」的檢查，同一個人同時跑兩個行程，
+# 事件與收工全落到後開的那張，先開的那張永遠停在「進行中」——任務板說在做、頭像說閒著。
+starting: dict[str, asyncio.Task] = {}   # aid -> 占位的那一件（只放自己的，不誤放下一件）
 watchdog: asyncio.Task | None = None  # 工作失聯巡查（start_agents 時啟動）
 canvas_stale = False  # 送了指令卻沒人回報：WebGL 分頁被瀏覽器凍結（WS 還開著，畫面已死）
 projection_offline = False  # 走位送不出去（沒有畫面在線）——只在狀態轉換時印，不刷屏
@@ -1180,6 +1184,19 @@ async def sweep_work() -> None:
     for aid in list(agents):
         await sync_emote(aid)
 
+    # 孤兒卡：還標「進行中」，卻已經不是這個人最新的那張——之後的事件全落到新卡，它永遠等不到收工，
+    # 任務板一直說在做、頭像說閒著（2026-11-08 小安兩條班表同時開跑）。starting 守門擋住了那條來源；
+    # 這裡是兜底：不管怎麼來的，都收成失聯並講明原因。
+    for aid, cards in list(history.items()):
+        cur = last_report.get(aid)
+        for c in cards:
+            if c.get("status") == "working" and c is not cur:
+                c["status"], c["end"] = "lost", c.get("end") or time.strftime("%H:%M")
+                c["events"].append({"at": time.strftime("%H:%M:%S"),
+                                    "text": "⚠ 這張沒等到收工——同一個人後來又開了別張，之後的動靜都記到那張去了，自動標失聯"})
+                audit("task.orphan", aid, card=c.get("id"))
+                notify("agent", aid)
+
     # 子 agent 的釋放事件掉了：主 agent 可能還活得好好的（work_last 一直在刷新），
     # 所以上面那條失聯規則救不到。這裡按【最後一次動靜】強制放人，否則那個 NPC 永遠不回座位。
     # sub_since 有子 agent 自己的事件就刷新（#14：以前是徵用時間，跑超過 7 分鐘的子 agent 一定被收）；
@@ -1906,6 +1923,12 @@ def supersede_card(card: dict) -> None:
             c["end"] = c["end"] or time.strftime("%H:%M")
 
 
+def hold_start(aid: str, task: asyncio.Task) -> None:
+    """派出去到開卡之間占住這個人（見 starting）。開卡（start 事件）就放；行程根本沒開成卡也會在任務結束時放。"""
+    starting[aid] = task
+    task.add_done_callback(lambda t: starting.pop(aid, None) if starting.get(aid) is t else None)
+
+
 def close_card(aid: str, status: str) -> None:
     card = last_report.get(aid)
     if card and card["status"] == "working":
@@ -2242,6 +2265,7 @@ async def office_event(ev: dict):
     asking = False               # 這一輪是追問：照樣開卡（花費、產出、帳本都要記），但不演「接到任務／▶ 開工」
     if kind == "start":
         busy.add(aid)
+        starting.pop(aid, None)  # 卡開了：從這裡起由 busy 接手守門
         stopped.discard(aid)   # 新任務＝上一次中止翻篇，別讓它吃掉這張卡的收尾
         pending_test.discard(aid)   # 上一件沒等到的測試結果，別記到這件頭上
         notify("roster")
@@ -6218,8 +6242,8 @@ async def office_dispatch(d: dict):
     cur_task = (approval_meta.get(aid) or {}).get("task_id")
     if verb in ("approve", "reject") and (want := str(d.get("task") or "")) and cur_task and want != cur_task:
         return {"ok": False, "error": "你看的那張審批卡已經換成下一張了——請先看過新的這張再決定"}
-    if aid in busy and verb not in ("approve", "reject", "/stop", "/steer"):
-        return {"ok": False, "error": f"{agents[aid].name} 正在工作中，收工後再派新任務"}
+    if (aid in busy or aid in starting) and verb not in ("approve", "reject", "/stop", "/steer"):
+        return {"ok": False, "error": f"{agents[aid].name} 正在工作中（或剛派出去、還在開工），收工後再派新任務"}
     # 「接著做」：這件是某張中止／出錯／失聯的卡的下一次執行（Paperclip 比較筆記第一批）。開工那一刻接到那張後面，
     # 同一個任務底下看得到前後每一次；CLI 本來就接回同一段對話，這裡補的是【卡片層】的關聯。
     if (rid := d.get("resume")) is not None:
@@ -6364,7 +6388,7 @@ async def office_dispatch(d: dict):
                                   if codex_effort_pick.get(aid) and not eff else ())
             if not d.get("scheduled"):   # 老闆的原話（綁 repo 的說明接上去之前）：工作串的「接到任務」放全文，不只卡片標題那 80 字
                 pending_note[aid] = boss_note(said)
-            asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes))
+            hold_start(aid, asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes)))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want, "effort": eff}
         if pick == MODEL_RESET:
             cli_pick.pop(aid, None)
@@ -6387,8 +6411,8 @@ async def office_dispatch(d: dict):
         cli_eff = cli_effort_pick.get(aid, "")
         if not d.get("scheduled"):   # 同上
             pending_note[aid] = boss_note(said)
-        asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
-                                         notes=tuple(notes)))
+        hold_start(aid, asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
+                                                         notes=tuple(notes))))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want, "effort": cli_eff}
     if cli_mode or codex_mode:
         if verb in ("approve", "reject"):
@@ -6718,7 +6742,7 @@ async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是�
     if (p := report_today(aid, job, stamp[:10])) is not None:
         log_ev(aid, f"🗓 班表任務「{name}」今天那份已經在了（{p.name}），不重跑")
         return {"ok": False, "skipped": True, "error": f"今天已有 {p.name}，不重跑"}
-    if aid in busy:
+    if aid in busy or aid in starting:
         log_ev(aid, f"🗓 班表任務「{name}」到點，但人在忙——這輪跳過，下次照排")
         return {"ok": False, "error": "人在忙，這輪跳過"}
     # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
