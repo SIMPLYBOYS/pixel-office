@@ -38,6 +38,7 @@
   {
     "name": "pm-daily-小美",
     "hour": 9,
+    "timeout_min": 45,
     "engine": "cli",
     "agent": "p01",
     "deliver": {
@@ -48,6 +49,7 @@
   {
     "name": "jobs-daily-小安",
     "hour": 9,
+    "timeout_min": 45,
     "engine": "cli",
     "agent": "p10",
     "deliver": {

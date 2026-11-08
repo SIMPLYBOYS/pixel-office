@@ -532,6 +532,7 @@ def run() -> None:
     boss_full_text()
     kanban_host_wrote()
     double_start()
+    job_timeout()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1895,6 +1896,44 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def job_timeout() -> None:
+    """班表每條可設自己的時間上限 timeout_min（2026-11-08：小安、小美的每日班表兩週內一半被 30 分鐘砍掉，
+    成功的也跑到 24～29.8 分）：班表派工才吃、範圍外不收、開跑那行寫明上限；老闆自己派工照預設。"""
+    J = main.job_timeout_s
+    assert J(45) == 2700.0 and J(5) == 300.0 and J(180) == 10800.0
+    for bad in (None, 4, 181, "45", 45.0, True, -1):
+        assert J(bad) == 0.0, bad
+    got: list[float] = []
+
+    async def fake_run(aid, text, cwd=None, model="", fresh=False, effort="", notes=(), timeout=0):
+        got.append(timeout)
+
+    async def no_deliver(*a, **k):
+        return None
+    old = (main.run_cli_task, main.cli_available, main.deliver_job)
+    main.run_cli_task, main.cli_available, main.deliver_job = fake_run, (lambda: True), no_deliver
+    aid = "p05"
+    try:
+        async def go(body):
+            main.busy.discard(aid); main.starting.pop(aid, None)
+            r = await main.office_dispatch({"agent": aid, "text": "x", "engine": "cli", **body})
+            await asyncio.sleep(0)   # 讓建好的任務跑一下，記下它拿到的上限
+            return r
+        assert asyncio.run(go({"scheduled": True, "timeout_min": 45}))["ok"] and got[-1] == 2700.0
+        assert asyncio.run(go({"timeout_min": 45}))["ok"] and got[-1] == 0.0, "老闆自己派工不吃 timeout_min（照預設 30 分）"
+        assert asyncio.run(go({"scheduled": True, "timeout_min": 999}))["ok"] and got[-1] == 0.0, "範圍外的不收"
+        assert asyncio.run(go({"scheduled": True}))["ok"] and got[-1] == 0.0
+        # 班表：開跑那行寫明上限（沒設就不寫）
+        main.busy.discard(aid); main.starting.pop(aid, None)
+        r = asyncio.run(main.fire_job({"name": "上限測試", "agent": aid, "text": "x", "hour": 9, "engine": "cli", "timeout_min": 45}, "2026-11-08 09"))
+        assert r["ok"] and got[-1] == 2700.0 and main.pending_note.get(aid, "").endswith("，時間上限 45 分"), main.pending_note.get(aid)
+    finally:
+        main.run_cli_task, main.cli_available, main.deliver_job = old
+        main.pending_note.pop(aid, None); main.sched_running.pop(aid, None); main.sched_last.pop("上限測試", None)
+        main.busy.discard(aid); main.starting.pop(aid, None); main.engine_sent.pop(aid, None)
+    print("  ✓ 班表每條自己的時間上限：班表派工才吃、範圍外不收、開跑那行寫明；老闆派工照預設")
 
 
 def double_start() -> None:
@@ -3467,7 +3506,7 @@ def schedule_jobs() -> None:
         cli_sent: list[tuple[str, str, bool]] = []
         cli_cwd: list = []
 
-        def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=()):
+        def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=(), timeout=0):
             cli_sent.append((aid, text, fresh)); cli_cwd.append(cwd)
             async def _noop(): pass
             return _noop()
@@ -3763,6 +3802,8 @@ def schedule_file_valid() -> None:
             assert j.get("weekday") is None or (isinstance(j["weekday"], int) and 0 <= j["weekday"] <= 6), f"{tag}：weekday 要 0–6 或省略"
             assert j.get("minute") is None or (isinstance(j["minute"], int) and 0 <= j["minute"] <= 59), f"{tag}：minute 要 0–59 或省略"
             assert j.get("engine") in (None, main.ENGINE_CLI, main.ENGINE_COGITO), f"{tag}：engine 只能是 cli／cogito"
+            assert "timeout_min" not in j or main.job_timeout_s(j["timeout_min"]) > 0, \
+                f"{tag}：timeout_min 要是 {main.TIMEOUT_MIN_RANGE[0]}–{main.TIMEOUT_MIN_RANGE[1]} 的整數（分鐘），不然會被默默忽略"
             if d := j.get("deliver"):
                 assert isinstance(d, dict) and "{date}" in str(d.get("file", "")), f"{tag}：deliver.file 要帶 {{date}}，不然每天送同一個檔"
                 assert not d.get("to") or main.parse_targets(d["to"]), f"{tag}：deliver.to 沒有一個合法目標"
@@ -3916,7 +3957,7 @@ def schedule_manual_run() -> None:
     import tempfile
     cli_sent: list[str] = []
 
-    def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=()):
+    def fake_cli(aid, text, cwd=None, model="", fresh=False, effort="", notes=(), timeout=0):
         cli_sent.append(aid)
         async def _noop(): pass
         return _noop()

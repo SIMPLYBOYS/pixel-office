@@ -3880,7 +3880,7 @@ def cli_plan_guard(aid: str, text: str, base: Path) -> list[str]:
 
 
 async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
-                       effort: str = "", notes: tuple = ()) -> None:
+                       effort: str = "", notes: tuple = (), timeout: float = 0) -> None:
     """在員工的工作區跑 CLI，把它的事件流轉成 office 事件。
 
     刻意重用 office_event 而不是自己改狀態：投影只能有一條路徑，兩條遲早會漂。
@@ -4030,12 +4030,12 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                             and (rel := host_deliverable(ev))):
                         nudged = True
                         await kanban_host_wrote(aid, rel)
-        await asyncio.wait_for(pump(), timeout=CLI_TIMEOUT)
+        await asyncio.wait_for(pump(), timeout=timeout or CLI_TIMEOUT)
         await proc.wait()
     except asyncio.TimeoutError:
         kill_tree(proc.pid)
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
-                            "detail": f"CLI 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
+                            "detail": f"CLI 超過 {int(timeout or CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
         kill_tree(proc.pid)              # 老闆按了中止——或橋正在關閉、把還在跑的任務一起取消
@@ -4531,7 +4531,7 @@ async def codex_steer(aid: str, text: str) -> bool:
 
 
 async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: str = "", fresh: bool = False,
-                         effort: str = "", notes: tuple = ()) -> None:
+                         effort: str = "", notes: tuple = (), timeout: float = 0) -> None:
     """在員工工作區開一支 `codex app-server`、跑一輪，事件翻成 office 事件（投影同 run_cli_task）。"""
     base = cwd or agent_dir(aid) or (CHANNELS_DIR / f"office_{aid}" if CHANNELS_DIR else None)
     if base is None:
@@ -4650,7 +4650,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
     reader = asyncio.create_task(pump())
     try:
         try:
-            turn = await asyncio.wait_for(drive(), timeout=CLI_TIMEOUT)
+            turn = await asyncio.wait_for(drive(), timeout=timeout or CLI_TIMEOUT)
         except CodexRpcError as e:   # 握手、開 thread、開這一輪任何一步被拒——或行程先沒了（那就走下面「行程已結束」）
             turn = None if finished.done() and finished.result() is None else {"status": "failed", "error": {"message": str(e)}}
         done_sent = turn is not None
@@ -4670,7 +4670,7 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
                 await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error", "detail": msg[:300], "model": m})
     except asyncio.TimeoutError:
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
-                            "detail": f"Codex 超過 {int(CLI_TIMEOUT)} 秒未收工，已中止"})
+                            "detail": f"Codex 超過 {int(timeout or CLI_TIMEOUT)} 秒未收工，已中止"})
         done_sent = True
     except asyncio.CancelledError:
         await office_event({"v": 1, "agent": aid, "run": run, "kind": "done", "label": "error",
@@ -6358,6 +6358,7 @@ async def office_dispatch(d: dict):
                     + (f"\n{bound[2]}" if bound[2] else ""))   # 跟上主線的結果（快轉／重開／合併／有衝突）照實講給員工
         # 模型：各引擎各自一份（見 cli_model_for／cogito_model_for／codex_model_sent）。選了會記住，「還原」收回。
         pick = str(d.get("model") or "").strip()
+        limit = job_timeout_s(d.get("timeout_min")) if d.get("scheduled") else 0.0   # 班表那條自己的時間上限；老闆派工照預設
         if wt is None and d.get("scheduled") and CHANNELS_DIR is not None:
             wt = CHANNELS_DIR / f"office_{aid}"   # 班表任務沒綁 repo：在工作區根跑，不繼承上一張卡的 worktree
         if codex_mode:
@@ -6388,7 +6389,8 @@ async def office_dispatch(d: dict):
                                   if codex_effort_pick.get(aid) and not eff else ())
             if not d.get("scheduled"):   # 老闆的原話（綁 repo 的說明接上去之前）：工作串的「接到任務」放全文，不只卡片標題那 80 字
                 pending_note[aid] = boss_note(said)
-            hold_start(aid, asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes)))
+            hold_start(aid, asyncio.create_task(run_codex_task(aid, text, wt, codex_want, fresh=bool(d.get("scheduled")), effort=eff, notes=notes,
+                                                               timeout=limit)))
             return {"ok": True, "engine": ENGINE_CODEX, "repo": bool(wt), "model": codex_want, "effort": eff}
         if pick == MODEL_RESET:
             cli_pick.pop(aid, None)
@@ -6412,7 +6414,7 @@ async def office_dispatch(d: dict):
         if not d.get("scheduled"):   # 同上
             pending_note[aid] = boss_note(said)
         hold_start(aid, asyncio.create_task(run_cli_task(aid, text, wt, cli_want, fresh=bool(d.get("scheduled")), effort=cli_eff,
-                                                         notes=tuple(notes))))
+                                                         notes=tuple(notes), timeout=limit)))
         return {"ok": True, "engine": ENGINE_CLI, "repo": bool(wt), "model": cli_want, "effort": cli_eff}
     if cli_mode or codex_mode:
         if verb in ("approve", "reject"):
@@ -6728,6 +6730,17 @@ def job_dates(day: str) -> str:
             "（橋填的，照用；不要自己推算，也不要用 Bash 跑 date。）\n\n")
 
 
+TIMEOUT_MIN_RANGE = (5, 180)   # 班表 timeout_min 能設的範圍（分鐘）
+
+
+def job_timeout_s(timeout_min) -> float:
+    """班表這條的時間上限（秒）。沒設、不是整數、超出範圍＝0（用 OFFICE_CLI_TIMEOUT，預設 30 分）。
+    2026-11-08：小安、小美的每日班表兩週內一半被 30 分鐘砍掉——成功的那幾次也跑到 24～29.8 分。"""
+    lo, hi = TIMEOUT_MIN_RANGE
+    ok = isinstance(timeout_min, int) and not isinstance(timeout_min, bool) and lo <= timeout_min <= hi
+    return float(timeout_min) * 60 if ok else 0.0
+
+
 async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是老闆派的") -> dict:
     """派一張班表任務——到點與老闆手動補跑都走這裡，守門只寫一次：
     今天那份報表已經在了就不重跑（橋在 9:00 不在、10:00 補跑、隔天 9:00 又到點，都靠這條）。
@@ -6748,11 +6761,12 @@ async def fire_job(job: dict, stamp: str, how: str = "由班表觸發，不是�
     # engine 是【這件例行事】的屬性（省錢的走 CLI、要審批的走 cogito），不是這位員工的；
     # 所以帶 scheduled 標記，dispatch 才不會把它記成「外殼最後選的引擎」。
     r = await office_dispatch({"agent": aid, "text": job_dates(stamp[:10]) + job["text"], "repo": job.get("repo"),
-                               "engine": job.get("engine"), "scheduled": True})
+                               "engine": job.get("engine"), "scheduled": True, "timeout_min": job.get("timeout_min")})
     if r.get("ok"):
         # 這一刻新卡還沒開，直接 log_ev 會掛在上一張卡的尾巴（實測：卡 237 尾巴多了一行 239 的開跑）。
         # 寄放著，等 start 開出任務卡再掛——跟老闆派工那行同一個機制。
-        pending_note[aid] = f"🗓 班表任務「{name}」開跑（{how}）"
+        limit = job_timeout_s(job.get("timeout_min"))
+        pending_note[aid] = f"🗓 班表任務「{name}」開跑（{how}）" + (f"，時間上限 {int(limit // 60)} 分" if limit else "")
         sched_running[aid] = {"job": job, "started": time.time()}   # 收工時據此交付（見 deliver_job）
     else:
         log_ev(aid, f"🗓 班表任務「{name}」派不出去：{r.get('error')}")   # 沒有卡會開，只能掛現在這張
@@ -6766,7 +6780,8 @@ def _job_ok(job: dict) -> bool:
 
 async def run_due_jobs(now: time.struct_time) -> None:
     """weekday（0=週一；省略＝每天）＋hour 命中（minute 省略＝整點；有就等到那一分之後）、這一小時還沒跑過 → 派工。
-    job 可帶 engine（cli／cogito）。同一個人兩張班表要錯開：人在忙的那一輪會被跳過，不排隊。"""
+    job 可帶 engine（cli／cogito）、timeout_min（這條的時間上限，5–180 分；省略＝OFFICE_CLI_TIMEOUT，預設 30 分；
+    只管 cli／Codex，cogito 有自己的上限）。同一個人兩張班表要錯開：人在忙的那一輪會被跳過，不排隊。"""
     stamp = time.strftime("%Y-%m-%d %H", now)
     for job in load_schedule():
         if not _job_ok(job) or job.get("weekday") not in (None, now.tm_wday) or job["hour"] != now.tm_hour:
