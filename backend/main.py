@@ -2320,7 +2320,8 @@ async def office_event(ev: dict):
             card["session"] = str(ev.get("session") or f"office_{aid}")   # cogito：一個頻道一條 session
             card["ts"] = time.time()
             audit("task.start", aid, card=card["id"], engine=card["engine"], session=card["session"],
-                  task=task[:200], scheduled=aid in sched_running)
+                  task=task[:200], scheduled=aid in sched_running,
+                  job=str(((sched_running.get(aid) or {}).get("job") or {}).get("name") or ""))   # 班表效率量表按這個分組
             note = pending_note.pop(aid, None)
             # 追問不是一件新工作：記成老闆說的那句話，員工接著回就好（2026-10-21 回報：每句都「接到任務」很死板）
             shown = full_said(task, note)
@@ -6099,8 +6100,226 @@ async def office_verdict(d: dict):
                               else f"老闆要我修改「{card['task']}」" + (f"：{note}" if note else "")), imp=7, kind="work")
     if note and aid in agents:   # 工作的記憶：接在人設後面，下次同類的活照做（生活那條只是聊天素材，工作時讀不到）
         add_feedback(aid, str(card.get("task") or ""), note)
+    if v == "accepted" and card.get("status") == "ok" and aid in agents:
+        asyncio.create_task(propose_skill(aid, card))   # 通過的做法值不值得變成技能：背景反思，不擋這個請求
     notify("agent", aid)
     await sync_emote(aid)
+    return {"ok": True}
+
+
+# ── 收工後的技能提案（Claude Code／Codex 員工）──────────────────────────────
+# 回饋迴圈「學」的那一半（「量」的那一半是班表效率）：老闆驗收通過一張卡，就讓模型讀那次的完整紀錄，
+# 判斷有沒有「下次同類任務可以照做」的流程，有就寫成技能【提案】。提案放在橋自己的目錄——員工碰不到，
+# 不能自己批自己——老闆在檔案卡按「採用」才搬進員工工作區的 .claude/skills/，下次派工就用得上。
+# 反思提示與安全把關移植自 cogito-agent 的 internal/evolve（skill_synth.go、skill_gate.go）：那套在 cogito 上
+# 跑過、踩過「同一流程換名字寫十份」的坑；9 月起工作改走 Claude Code 之後，它就沒再被觸發過（2026-11-10 盤點）。
+SKILL_MODEL = os.environ.get("OFFICE_SKILL_MODEL", "sonnet")   # 反思要讀懂一整段工作紀錄：Haiku 太勉強
+SKILL_PROPOSALS = TEAM_DIR / "skill-proposals"                  # <aid>/<name>/SKILL.md：等老闆審
+SKILL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,48}")
+SKILL_TRACE_MAX = 24000   # 送去反思的紀錄上限（字）：頭尾都留，中間省略
+SKILL_BODY_MAX = 12000
+skill_sem = asyncio.Semaphore(1)   # 一次反思一張：每次都是一個 Claude Code 行程
+
+SKILL_REFLECT_RULES = """你是一個負責「技能萃取」的反思者。看完一段【老闆已驗收通過】的工作紀錄後，
+判斷其中是否存在一個「可複用、可泛化」的操作流程，值得寫成技能（SKILL.md），讓這位員工下次遇到同類任務直接照做。
+
+判準（從嚴）：
+- 只有當流程【具體、可重複、跨任務有價值】時才保存；一次性瑣事、與本任務資料強綁定的步驟不要保存。
+- 技能正文寫「怎麼做」的步驟指南，不要把這次的具體檔名、數值、日期寫死。
+- 問「分辨得開嗎」，不是「已經夠多了」。訊息會附上這位員工現有的技能（含等審的提案）。技能是按需載入的：
+  平常只看得到 name 與 description，用到才讀正文，所以多一個【真的不同】的技能幾乎不花錢。
+  但挑技能時只看得到 description——若你的 description 跟清單裡某條擺在一起分不開，回 worth_saving:false。
+  同一個流程換個名字寫第二次，就是這種情況。
+- 記錄「這次決定了什麼」不是技能。技能是「下次遇到同類任務要怎麼做」；若 Examples 其實就是這次的答案本身，
+  那它屬於記憶，不是技能——回 false。
+- 刪掉不改變行為的句子。拿掉它，執行者的行為會不一樣嗎？「請仔細思考」「務必確保品質」這類話跟預設行為沒有差別。
+- 紀錄裡繞了遠路、撞過牆、被拒絕過的地方，正是技能最該寫的：下次直接走對的路。
+  特別留意能讓下次【更快、更省】的做法——少一輪搜尋、少讀一個大檔、先寫產出再補細節。
+
+body 用 markdown 分三段：
+## When to use
+- 觸發情境（什麼任務該用這技能）
+## Steps
+1. 具體、命令層級的步驟（不要寫死本次的檔名或數值）。每一步都要寫「怎麼算做完」——一個看得見的結果
+   （某個檔案存在、某個指令成功、輸出裡含某個字串）。
+## Examples
+- 真實範例：做法與預期結果
+
+另有兩段選填（有真實內容才寫）：
+## Required from user
+- 開工前需要老闆先提供、員工自己拿不到的東西
+## Forbidden actions
+- 這個流程裡不可做的事，一行一條，寫踩過的雷。寫行為描述，不要貼危險指令原文（安全掃描看全文、不看語境）。
+
+name 用 kebab-case 小寫英數（a-z0-9 . _ -），description 一句話：做什麼＋何時用。不值得保存就只回 worth_saving:false。"""
+
+SKILL_TOOL = {"name": "skill", "input_schema": {"type": "object", "required": ["reason", "worth_saving"], "properties": {
+    "reason": {"type": "string", "description": "先寫判斷：這段紀錄裡可複用的流程是什麼、為什麼值得或不值得存（一兩句）"},
+    "worth_saving": {"type": "boolean"}, "name": {"type": "string"},
+    "description": {"type": "string"}, "body": {"type": "string"}}}}
+
+# 正文的安全黑名單（照 cogito skill_gate.go）：技能是員工未來行為的來源，指示危險操作或觸及憑證的一律不收
+SKILL_DANGER = [(re.compile(p, re.I), why) for p, why in (
+    (r"rm\s+-[rf]", "遞迴／強制刪除"), (r"\bsudo\b", "提權 sudo"),
+    (r"(curl|wget)[^\n|]*\|\s*(sudo\s+)?(ba)?sh", "管道執行遠端腳本"), (r"chmod\s+-?R?\s*777", "過度開放權限"),
+    (r":\(\)\s*\{", "fork bomb"), (r"\b(mkfs|dd\s+if=)", "磁碟覆寫"), (r">\s*/dev/sd", "寫入裸磁碟"),
+    (r"(id_rsa|\.ssh/|\.aws/credentials|\.env\b|private key)", "觸及憑證／機密"),
+    (r"git\s+push\s+.*--force|push\s+-f\b", "強制 push"),
+    (r"(allowUnsandboxedCommands|dangerouslyDisableSandbox|--dangerously-skip-permissions|bypassPermissions)", "關沙箱／跳過權限"))]
+
+
+def skill_dirs(aid: str) -> tuple[Path, Path | None]:
+    """（等審的提案、生效中的技能）。生效的放員工工作區的 .claude/skills/——Claude Code 從工作目錄載入技能。"""
+    return SKILL_PROPOSALS / aid, (CHANNELS_DIR / f"office_{aid}" / ".claude" / "skills" if CHANNELS_DIR else None)
+
+
+def read_skills(root: Path | None) -> list[dict]:
+    if root is None or not root.is_dir():
+        return []
+    out = []
+    for f in sorted(root.glob("*/SKILL.md")):
+        fm = skill_frontmatter(f)
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out.append({"name": f.parent.name, "description": fm.get("description", ""), "body": text[:SKILL_BODY_MAX + 2000],
+                    "at": time.strftime("%m-%d %H:%M", time.localtime(f.stat().st_mtime))})
+    return out
+
+
+def skill_gate(name: str, description: str, body: str) -> list[str]:
+    """不通過的原因（空＝通過）。提案寫進去之前、老闆按採用之前各檢查一次（檔案可能在中間被改過）。"""
+    issues = []
+    if not SKILL_NAME_RE.fullmatch(name or ""):
+        issues.append("名稱只能是 2–49 字的小寫英數與 . _ -")
+    if not (description or "").strip() or len(description) > 300:
+        issues.append("說明要有、而且 300 字內")
+    if len(body or "") > SKILL_BODY_MAX:
+        issues.append(f"正文超過 {SKILL_BODY_MAX} 字")
+    for sec in ("## When to use", "## Steps"):
+        if sec not in (body or ""):
+            issues.append(f"少了「{sec}」段")
+    for rx, why in SKILL_DANGER:
+        if rx.search(f"{description}\n{body}"):
+            issues.append(f"含危險操作：{why}")
+    return issues
+
+
+def render_steps(steps: list[dict]) -> str:
+    txt = "\n".join(f"[{s.get('kind')}{(' ' + s['name']) if s.get('name') else ''}] {s.get('text', '')}" for s in steps)
+    if len(txt) > SKILL_TRACE_MAX:
+        half = SKILL_TRACE_MAX // 2
+        txt = txt[:half] + "\n…（中間省略）…\n" + txt[-half:]
+    return txt
+
+
+def card_note(aid: str, card: dict, text: str) -> None:
+    """記在【這張】卡上（反思是驗收之後才跑完的，那時這個人最新的卡可能已經是別張）。"""
+    card["events"].append({"at": time.strftime("%H:%M:%S"), "text": text})
+    notify("agent", aid)
+
+
+async def propose_skill(aid: str, card: dict) -> None:
+    """驗收通過的那張卡 → 反思 → 值得就寫成技能提案（等老闆在檔案卡採用）。一張卡只反思一次。"""
+    # ponytail: 只做 Claude Code 的卡——採用的技能放 .claude/skills/，Codex 讀的是 CODEX_HOME 底下的技能，提案了也用不到。
+    # 實測（2026-11-10，Claude Code 2.1.319）：工作區根跑載得到；worktree（自己的 git 根）要靠 --add-dir 工作區根才載得到，
+    # 橋綁 repo 時本來就會加（cli_extra_dirs）。
+    if card.get("skill_reflected") or not card.get("ts") or card.get("engine") != ENGINE_CLI \
+            or not cli_available() or CHANNELS_DIR is None:
+        return
+    card["skill_reflected"] = True
+    t0, t1 = card_window(aid, card)
+    steps, _src = trace_cli(str(card.get("session") or ""), t0, t1)
+    if not steps:
+        return
+    task = next((str(e["text"]).split("：", 1)[1] for e in card["events"]
+                 if str(e.get("text", "")).startswith(("📋 接到任務：", "💬 老闆："))), str(card.get("task") or ""))
+    proposed, active = skill_dirs(aid)
+    have = [f"- {x['name']}：{x['description']}" for x in read_skills(active) + read_skills(proposed)]
+    prompt = f"任務：\n{task}\n\n工作紀錄：\n{render_steps(steps)}"
+    # 守則一起給：紀錄是「當時實際怎麼做」，可能正是後來被禁止的舊習慣。實測（2026-11-10）：看板 11/07 那張的反思
+    # 寫出「commit 後自己 git merge origin/main」，而守則 11/07 起已改成主線由橋跟上——不給守則，技能會把舊習慣固化下來。
+    if rules := persona_text(aid, persona_body(aid)).strip():
+        prompt += ("\n\n這位員工現行的守則（技能【不得違背】：守則說不要做的事，技能不能教它做；紀錄裡跟守則衝突的做法要照守則改寫）：\n"
+                   + (rules if len(rules) <= 12000 else rules[:12000] + "\n…（後略）"))
+    if have:
+        prompt += "\n\n這位員工已經有的技能（含等審的提案）——被涵蓋就回 worth_saving:false：\n" + "\n".join(have)
+    LIFE_CWD.mkdir(exist_ok=True)   # 空目錄：免得它往上撿到 CLAUDE.md
+    brain = CliBrain(CLI_CMD, agent_env(), str(LIFE_CWD), system=SKILL_REFLECT_RULES, model=SKILL_MODEL, timeout=300)
+    async with skill_sem:
+        try:
+            r, cost = await brain.ask(prompt, SKILL_TOOL)
+        except CliLifeError as e:
+            audit("skill.failed", aid, card=card["id"], error=str(e)[:200])
+            card_note(aid, card, f"💡 想把這次的做法整理成技能，但反思沒跑成（{str(e)[:80]}）")
+            return
+    why = str((r or {}).get("reason") or "").strip()[:200]
+    if not r or not r.get("worth_saving"):
+        audit("skill.none", aid, card=card["id"], reason=why, api_equiv=round(cost, 4))
+        card_note(aid, card, "💡 讀過這次的紀錄：沒有值得存成技能的新做法" + (f"（{why}）" if why else ""))
+        return
+    name = str(r.get("name") or "").strip().lower()
+    desc = re.sub(r"[\r\n\"\\]+", " ", str(r.get("description") or "")).strip()
+    body = str(r.get("body") or "").strip()
+    if issues := skill_gate(name, desc, body):
+        audit("skill.gated", aid, card=card["id"], name=name[:60], issues=issues[:5])
+        card_note(aid, card, f"💡 整理出的技能「{name[:40]}」沒過把關，沒存：{'；'.join(issues[:3])}")
+        return
+    d = proposed / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f'---\nname: {name}\ndescription: "{desc}"\n---\n'
+                                f"<!-- pixel-office 從卡 #{card['id']}（{agents[aid].name}，{time.strftime('%Y-%m-%d')}）的工作紀錄整理出的提案 -->\n\n"
+                                f"{body}\n", encoding="utf-8")
+    audit("skill.proposed", aid, card=card["id"], name=name, api_equiv=round(cost, 4))
+    card_note(aid, card, f"💡 這次的做法整理成技能提案「{name}」：{desc}——到{agents[aid].name}的檔案卡看內容，按採用下次派工就用得上")
+
+
+@app.get("/office/skills/{aid}")
+def office_skills(aid: str):
+    if aid not in agents:
+        return {"ok": False, "error": "查無此員工"}
+    proposed, active = skill_dirs(aid)
+    return {"ok": True, "proposed": read_skills(proposed), "active": read_skills(active)}
+
+
+@app.post("/office/skills")
+async def office_skill_action(d: dict):
+    """老闆處理技能：adopt＝採用提案（搬進員工的 .claude/skills/，同名就換新）、discard＝丟掉提案、remove＝撤掉已採用的。"""
+    aid, name, act = str(d.get("agent") or ""), str(d.get("name") or ""), d.get("action")
+    if aid not in agents:
+        return {"ok": False, "error": "查無此員工"}
+    if not SKILL_NAME_RE.fullmatch(name):   # 名稱沒有斜線、點點：底下的路徑一定落在這兩個目錄裡
+        return {"ok": False, "error": "技能名稱不合法"}
+    proposed, active = skill_dirs(aid)
+    if active is None:
+        return {"ok": False, "error": "沒有員工工作區（未設 COGITO_CHANNELS）"}
+    src, dst = proposed / name, active / name
+    if act == "adopt":
+        f = src / "SKILL.md"
+        if not f.is_file():
+            return {"ok": False, "error": "沒有這份提案（可能已經處理過）"}
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if issues := skill_gate(name, skill_frontmatter(f).get("description", ""), text):
+            return {"ok": False, "error": "這份提案沒過把關：" + "；".join(issues[:3])}
+        replaced = dst.exists()
+        dst.mkdir(parents=True, exist_ok=True)
+        (dst / "SKILL.md").write_text(text, encoding="utf-8")
+        shutil.rmtree(src)
+        audit("skill.adopted", aid, name=name, replaced=replaced, by="office-web")
+    elif act == "discard":
+        if not src.is_dir():
+            return {"ok": False, "error": "沒有這份提案（可能已經處理過）"}
+        shutil.rmtree(src)
+        audit("skill.discarded", aid, name=name, by="office-web")
+    elif act == "remove":
+        if not dst.is_dir():
+            return {"ok": False, "error": "沒有這個技能"}
+        shutil.rmtree(dst)
+        audit("skill.removed", aid, name=name, by="office-web")
+    else:
+        return {"ok": False, "error": "action 只能是 adopt、discard 或 remove"}
+    notify("agent", aid)
     return {"ok": True}
 
 
@@ -6849,6 +7068,98 @@ def missed_jobs(now: time.struct_time) -> list[dict]:
         else:
             out.append({**job, "day": day})
     return out
+
+
+# ── 班表效率量表：同一條班表每次花多久、花多少、被砍幾次 ─────────────────────────────
+# 學到的東西（記憶、技能）有沒有讓事情變好，要先量得到（2026-11-10：小安的日報兩週從 26 分漲到 30 分，
+# 一半被 30 分鐘砍掉——沒有量表時沒人看得到這條線）。資料全在稽核帳本，不另存一份。
+_stats_cache: dict = {"key": None, "runs": []}
+
+
+def schedule_runs() -> list[dict]:
+    """帳本裡每一次班表執行：{job, agent, day, at, min, result（ok／timeout／error）, usd}。
+    班表名：開工那筆有記 job 就用它（2026-11-10 起）；更早的從收工後那筆交付紀錄的 job 補（所有班表都有 deliver）。"""
+    path = audit_path()
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _stats_cache["key"] == key:
+        return _stats_cache["runs"]
+    starts: dict[tuple, dict] = {}
+    runs: list[dict] = []
+    open_runs: dict[str, dict] = {}   # agent -> 剛收工、還在等交付紀錄補班表名的那一筆
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        k, aid = d.get("kind"), str(d.get("agent") or "")
+        if k == "task.start" and str(d.get("scheduled")) == "True":
+            starts[(aid, str(d.get("card")))] = d
+        elif k == "task.done" and (s0 := starts.pop((aid, str(d.get("card"))), None)):
+            try:
+                t0 = time.mktime(time.strptime(s0["at"][:19], "%Y-%m-%dT%H:%M:%S"))
+                t1 = time.mktime(time.strptime(d["at"][:19], "%Y-%m-%dT%H:%M:%S"))
+            except (KeyError, ValueError):
+                continue
+            detail = str(d.get("detail") or "")
+            result = "ok" if d.get("label") == "ok" else "timeout" if "秒未收工" in detail else "error"
+            try:
+                usd = float(d.get("api_equiv") or 0)
+            except ValueError:
+                usd = 0.0
+            r = {"job": str(s0.get("job") or ""), "agent": aid, "day": s0["at"][:10], "at": s0["at"][11:16],
+                 "min": round((t1 - t0) / 60, 1), "result": result, "usd": round(usd, 2), "_t1": t1}
+            runs.append(r)
+            if not r["job"]:
+                open_runs[aid] = r
+        elif k == "delivery.sent" and (r := open_runs.get(aid)) and d.get("job"):
+            try:
+                t = time.mktime(time.strptime(d["at"][:19], "%Y-%m-%dT%H:%M:%S"))
+            except (KeyError, ValueError):
+                continue
+            if 0 <= t - r["_t1"] <= 120:   # 收工後兩分鐘內的交付才算同一次
+                r["job"] = str(d["job"])
+                open_runs.pop(aid, None)
+    for r in runs:
+        r.pop("_t1", None)
+    _stats_cache.update(key=key, runs=runs)
+    return runs
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    return None if not xs else (xs[len(xs) // 2] if len(xs) % 2 else round((xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2, 1))
+
+
+@app.get("/office/schedule/stats")
+def office_schedule_stats(days: int = 14):
+    """每條班表最近 days 天：每次的耗時／結果／花費，加中位數與趨勢（後半段中位耗時 − 前半段）。"""
+    days = max(1, min(int(days), 90))
+    since = (date.today() - timedelta(days=days - 1)).isoformat()
+    jobs = {str(j.get("name")): j for j in load_schedule() if isinstance(j, dict)}
+    by: dict[str, list[dict]] = {}
+    for r in schedule_runs():
+        if r["day"] >= since:
+            by.setdefault(r["job"] or "（認不出是哪條班表）", []).append(r)
+    out = []
+    for name, rs in by.items():
+        ok = [r for r in rs if r["result"] == "ok"]
+        half = len(ok) // 2
+        trend = (round(_median([r["min"] for r in ok[half:]]) - _median([r["min"] for r in ok[:half]]), 1)
+                 if half >= 2 else None)   # 成功的至少四次才算得出趨勢
+        j = jobs.get(name) or {}
+        aid = str(j.get("agent") or rs[-1]["agent"])
+        out.append({"name": name, "agent": aid, "who": agents[aid].name if aid in agents else aid,
+                    "limit_min": int(job_timeout_s(j.get("timeout_min")) // 60) or int(CLI_TIMEOUT // 60),
+                    "runs": rs, "n": len(rs), "ok": len(ok), "timeout": sum(r["result"] == "timeout" for r in rs),
+                    "error": sum(r["result"] == "error" for r in rs),
+                    "median_min": _median([r["min"] for r in ok]), "median_usd": _median([r["usd"] for r in ok]),
+                    "trend_min": trend})
+    out.sort(key=lambda x: (-(x["timeout"] + x["error"]), x["name"]))   # 常出事的排前面
+    return {"ok": True, "days": days, "jobs": out}
 
 
 @app.post("/office/schedule/run")

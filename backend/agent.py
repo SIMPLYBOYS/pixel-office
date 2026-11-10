@@ -59,20 +59,22 @@ class CliBrain:
     ponytail: 每次都起一個 Claude Code 行程（約 5–7 秒、每次約 4k token 的固定開銷，Haiku 的快取門檻 4096 構不到）；
     要更省就換 API（OFFICE_LIFE_ENGINE=api）。"""
 
-    def __init__(self, cmd: str, env: dict, cwd: str):
+    def __init__(self, cmd: str, env: dict, cwd: str, system: str = "", model: str = "", timeout: float = 0):
+        # system／model／timeout：別的用途（收工後的技能反思）借同一條路，換掉生活模擬的規則與模型
         self.cmd, self.env, self.cwd = cmd, env, cwd
+        self.system, self.model, self.timeout = system or LIFE_RULES, model or LIFE_MODEL, timeout or CLI_TIMEOUT
 
     async def ask(self, prompt: str, tool: dict) -> tuple[dict | None, float]:
-        argv = [self.cmd, "-p", "--model", LIFE_MODEL, "--output-format", "json", "--tools", "", "--strict-mcp-config",
-                "--system-prompt", LIFE_RULES, "--json-schema", json.dumps(tool["input_schema"], ensure_ascii=False),
+        argv = [self.cmd, "-p", "--model", self.model, "--output-format", "json", "--tools", "", "--strict-mcp-config",
+                "--system-prompt", self.system, "--json-schema", json.dumps(tool["input_schema"], ensure_ascii=False),
                 "--no-session-persistence", "--disable-slash-commands", "--settings", '{"alwaysThinkingEnabled": false}']
         proc = await asyncio.create_subprocess_exec(*argv, cwd=self.cwd, env=self.env, stdin=asyncio.subprocess.PIPE,
                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
-            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=CLI_TIMEOUT)
+            out, err = await asyncio.wait_for(proc.communicate(prompt.encode()), timeout=self.timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            raise CliLifeError(f"CLI 超過 {CLI_TIMEOUT:.0f} 秒沒回")
+            raise CliLifeError(f"CLI 超過 {self.timeout:.0f} 秒沒回")
         try:
             d = json.loads(out)
         except ValueError:

@@ -144,6 +144,14 @@
   .costs th { color: var(--dim); font-weight: normal; }
   .costs th:first-child, .costs td:first-child, .costs th:nth-child(2), .costs td:nth-child(2) { text-align: left; }
   .costs td small { color: var(--dim); }
+  /* 班表效率：每條班表一列，條狀圖一根＝一次執行（高＝耗時，紅＝被逾時砍掉，橘＝出錯），虛線＝時間上限 */
+  .eff .spark { vertical-align: middle; }
+  .eff .spark .ok { fill: #3fa66b; } .eff .spark .timeout { fill: #c0392b; } .eff .spark .error { fill: #d68a1f; }
+  .eff .spark line { stroke: var(--dim); stroke-dasharray: 2 2; }
+  .eff .up { color: #c0392b; } .eff .down { color: #3fa66b; }
+  .eff td.bad { color: #c0392b; }
+  .prof pre.skillbody { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; margin: 4px 0 6px;
+    padding: 6px 8px; background: #0f1115; border: 1px solid var(--line); border-radius: 6px; }
   .trace { margin: 6px 0 2px; border-top: 1px dashed var(--line, #ccc); padding-top: 6px; font-size: 11.5px; }
   .trace .thead { color: var(--dim); margin-bottom: 4px; }
   .trace .st { display: grid; grid-template-columns: 11em 1fr; gap: 6px; margin: 2px 0; }
@@ -690,6 +698,7 @@
 <details class="prof life" id="life" hidden></details>
     <details class="prof audit" id="audit" hidden></details>
     <details class="prof costs" id="costs" hidden></details>
+<details class="prof costs eff" id="eff" hidden></details>
     <details class="prof cmds" id="cmds" hidden></details>
     <details class="prof tasks" id="tasks" hidden></details>
     <div class="feed" id="feed"></div>
@@ -2202,6 +2211,10 @@ async function profile(id) {
   };
   owned('🔑 常駐許可：', r.permits, x => x, x => permit(id, x, 'revoke'), '撤銷這條許可');
   owned('📝 驗收意見（會帶進工作）：', r.feedback, x => `${x.at}「${x.task}」：${x.note}`, (x, i) => dropFeedback(id, i), '刪掉這則，之後不再帶進工作');
+  // 技能：驗收通過的卡會被讀一遍，值得的做法整理成提案；你按採用才進員工的 .claude/skills/、下次派工用得上
+  const sk = el('div');
+  t.appendChild(sk);
+  skillsBox(id, sk);
   if (r.soul) {
     const soul = el('div');
     box.querySelector('.body').appendChild(soul);
@@ -2209,6 +2222,43 @@ async function profile(id) {
   }
   box.addEventListener('toggle', () => { localStorage.profOpen = box.open ? '1' : '0'; });
   auditcard(id);
+}
+
+async function skillsBox(id, sk) {
+  let r;
+  try { r = await (await fetch(`/office/skills/${id}`)).json(); } catch { return; }
+  if (id !== selected || !r.ok) return;
+  const row = (x, buttons) => {
+    sk.appendChild(el('span', `${x.name}：${x.description || '（沒有說明）'}`));
+    const body = el('pre', x.body);
+    body.className = 'skillbody';
+    body.hidden = true;
+    const look = el('span', ' 看內容', 'wdbtn');
+    look.onclick = e => { e.stopPropagation(); body.hidden = !body.hidden; look.textContent = body.hidden ? ' 看內容' : ' 收起'; };
+    sk.appendChild(look);
+    for (const [label, act, tip] of buttons) {
+      const b = el('span', ' ' + label, 'wdbtn'); b.title = tip;
+      b.onclick = e => { e.stopPropagation(); skillAct(id, x.name, act); };
+      sk.appendChild(b);
+    }
+    sk.appendChild(body);
+    sk.appendChild(document.createElement('br'));
+  };
+  if (r.proposed.length) {
+    sk.appendChild(el('b', '💡 技能提案（等你審）：'));
+    r.proposed.forEach(x => row(x, [['採用', 'adopt', '搬進這位員工的技能，下次派工就會用上'], ['丟棄', 'discard', '不要這份提案']]));
+  }
+  if (r.active.length) {
+    sk.appendChild(el('b', '🧰 已採用的技能：'));
+    r.active.forEach(x => row(x, [['✕', 'remove', '撤掉這個技能，之後不再用']]));
+  }
+}
+async function skillAct(id, name, action) {
+  const r = await (await fetch('/office/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent: id, name, action }) })).json();
+  $('hint').textContent = !r.ok ? `⛔ ${r.error}` : { adopt: `已採用技能 ${name}，下次派工就會用上`, discard: `已丟掉提案 ${name}`, remove: `已撤掉技能 ${name}` }[action];
+  $('hint').classList.toggle('err', !r.ok);
+  if (id === selected) profile(id);
 }
 
 // 收件匣：老闆該處理的事，一個面板。右欄一次只給一個人的串，三個人同時做事就是在三條串之間切——
@@ -2494,6 +2544,43 @@ async function costcard() {
     <table><tr><th>員工</th><th>引擎</th><th>件</th><th title="cogito 算好的真實美元；~ 表示該模型沒登記單價、是估的">實花</th><th title="CLI 走訂閱：token 進／出，另列快取">token</th><th title="Claude Code 自報的 total_cost_usd：換算成 API 會是多少，訂閱並不會這樣扣">換算</th></tr>${rows}</table>`;
   box.open = localStorage.costOpen === '1';
   box.addEventListener('toggle', () => { localStorage.costOpen = box.open ? '1' : '0'; });
+}
+// 班表效率：同一條班表每次花多久、花多少、被砍幾次。學到的東西（記憶、技能）有沒有讓事情變好，看這張。
+let effAt = 0;
+async function effcard(force) {
+  const box = $('eff');
+  if (!box || (!force && Date.now() - effAt < 60000)) return;
+  effAt = Date.now();
+  const days = parseInt(localStorage.effDays || '14', 10);
+  let r;
+  try { r = await (await fetch(`/office/schedule/stats?days=${days}`)).json(); } catch { return; }
+  if (!r.ok) return;
+  const sig = JSON.stringify([days, r.jobs.map(j => [j.name, j.n, j.ok, j.median_min])]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = !r.jobs.length;
+  if (box.hidden) return;
+  const RESULT = { ok: '成功', timeout: '逾時被砍', error: '出錯' };
+  const spark = j => {
+    const top = Math.max(j.limit_min, ...j.runs.map(x => x.min)) || 1, W = 4, G = 1, H = 22;
+    const bars = j.runs.map((x, i) => {
+      const h = Math.max(1, Math.round(x.min / top * H));
+      return `<rect class="${x.result}" x="${i * (W + G)}" y="${H - h}" width="${W}" height="${h}"><title>${esc(x.day.slice(5))} ${esc(x.at)}・${x.min} 分・${RESULT[x.result]}${x.usd ? `・~$${x.usd}` : ''}</title></rect>`;
+    }).join('');
+    const ly = H - Math.round(j.limit_min / top * H), w = j.runs.length * (W + G);
+    return `<svg class="spark" width="${w}" height="${H}" viewBox="0 0 ${w} ${H}">${bars}<line x1="0" x2="${w}" y1="${ly}" y2="${ly}"><title>時間上限 ${j.limit_min} 分</title></line></svg>`;
+  };
+  const trend = t => t == null ? '' : t > 0.5 ? ` <span class="up" title="後半段比前半段慢 ${t} 分">↑${t}</span>`
+    : t < -0.5 ? ` <span class="down" title="後半段比前半段快 ${-t} 分">↓${-t}</span>` : ' <small>持平</small>';
+  const rows = r.jobs.map(j => `<tr><td>${esc(j.name)}</td><td>${esc(j.who)}</td><td>${j.n}</td>` +
+    `<td class="${j.timeout + j.error ? 'bad' : ''}">${j.ok}／${j.timeout}／${j.error}</td>` +
+    `<td>${j.median_min != null ? j.median_min + ' 分' : '—'}${trend(j.trend_min)}</td>` +
+    `<td>${j.median_usd ? '~$' + j.median_usd : ''}</td><td>${spark(j)}</td></tr>`).join('');
+  box.innerHTML = `<summary>📈 班表效率<small>最近 ${days} 天・一根＝一次執行</small>
+    <span class="wdbtn" onclick="event.preventDefault(); event.stopPropagation(); localStorage.effDays = String(${days === 14 ? 30 : 14}); $('eff').dataset.sig = ''; effcard(true);">${days === 14 ? '看 30 天' : '看 14 天'}</span></summary>
+    <table><tr><th>班表</th><th>誰</th><th>次</th><th title="成功／被逾時砍掉／出錯">成／逾時／錯</th><th title="成功那幾次的中位耗時；箭頭＝後半段比前半段快或慢">中位耗時</th><th title="成功那幾次的中位 API 等值（訂閱不這樣扣）">中位換算</th><th title="綠＝成功、紅＝逾時被砍、橘＝出錯；虛線＝時間上限">每次</th></tr>${rows}</table>`;
+  box.open = localStorage.effOpen === '1';
+  box.ontoggle = () => { localStorage.effOpen = box.open ? '1' : '0'; };
 }
 async function archiveLedger(id) {
   if (!confirm('把整本稽核帳本封存？舊本改名保留在 backend/audit/，畫面與收件匣的「最近」會清空。')) return;
@@ -3645,6 +3732,7 @@ function openStream() {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.alert) cue(ev.alert);          // 不管在看哪一位，該響的都要響
   costcard();                           // 花費也是全員視角
+  effcard();                            // 班表效率（一分鐘最多抓一次：要讀整本帳本）
   inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
     if (ev.type === 'roster') roster();
     else if (ev.type === 'life') lifecard(selected);   // 誰排了行程、誰跟誰聊了：簽章沒變就不重畫
