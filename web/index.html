@@ -150,6 +150,7 @@
   .eff .spark line { stroke: var(--dim); stroke-dasharray: 2 2; }
   .eff .up { color: #c0392b; } .eff .down { color: #3fa66b; }
   .eff td.bad { color: #c0392b; }
+  .prof .traits span.err { color: #c0392b; }
   .prof pre.skillbody { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; margin: 4px 0 6px;
     padding: 6px 8px; background: #0f1115; border: 1px solid var(--line); border-radius: 6px; }
   .trace { margin: 6px 0 2px; border-top: 1px dashed var(--line, #ccc); padding-top: 6px; font-size: 11.5px; }
@@ -2211,6 +2212,16 @@ async function profile(id) {
   };
   owned('🔑 常駐許可：', r.permits, x => x, x => permit(id, x, 'revoke'), '撤銷這條許可');
   owned('📝 驗收意見（會帶進工作）：', r.feedback, x => `${x.at}「${x.task}」：${x.note}`, (x, i) => dropFeedback(id, i), '刪掉這則，之後不再帶進工作');
+  // 自己那份自動記憶：開工時只載入索引的前 200 行或 25KB，超過的部分會被默默丟掉——快滿了要看得到
+  if (r.memory) {
+    const m = r.memory, pct = Math.max(m.index_lines / m.limit_lines, m.index_bytes / m.limit_bytes);
+    t.appendChild(el('b', '🧠 記憶：'));
+    const s = el('span', `${m.notes} 則・索引 ${m.index_lines}／${m.limit_lines} 行、${(m.index_bytes / 1024).toFixed(1)}／${(m.limit_bytes / 1000).toFixed(0)}KB` +
+      (pct >= 1 ? '（⚠ 超過上限：超出的部分開工時讀不到）' : pct >= 0.8 ? '（快滿了）' : ''));
+    if (pct >= 0.8) s.className = 'err';
+    t.appendChild(s);
+    t.appendChild(document.createElement('br'));
+  }
   // 技能：驗收通過的卡會被讀一遍，值得的做法整理成提案；你按採用才進員工的 .claude/skills/、下次派工用得上
   const sk = el('div');
   t.appendChild(sk);

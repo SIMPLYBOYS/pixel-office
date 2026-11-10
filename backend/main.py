@@ -2788,7 +2788,8 @@ def office_profile(aid: str):
             ("name", "role", "team", "personality", "style", "habits")},
             "soul": soul.read_text(encoding="utf-8") if soul.exists() else "",
             "schedule": schedule_of(aid),   # 班表是這個人的一部分：誰有例行工作、什麼時候、送去哪
-            "permits": (p := load_prefs())["permits"].get(aid, []), "feedback": p["feedback"].get(aid, [])}
+            "permits": (p := load_prefs())["permits"].get(aid, []), "feedback": p["feedback"].get(aid, []),
+            "memory": memory_usage(aid)}   # 自己那份自動記憶：幾則、索引離載入上限多遠
 
 
 # ── 團隊設定 API（docs/team-setup.md）─────────────────────────────────────────
@@ -3913,7 +3914,7 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
     # 不加進來的話每讀寫一次都要老闆審批（2026-10-31 實跑：一場十幾張）。只加他自己的頻道目錄，不擴大到工作區以外。
     extra = cli_extra_dirs(aid, base) + cli_plan_guard(aid, text, base)
     argv = [CLI_CMD, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *extra,
+            "--permission-mode", CLI_PERMISSION, "--permission-prompts", "none", *extra, *cli_memory_args(aid),
             # 子 agent：人設隨派工帶上（session-only，永遠跟人設同步）；子 agent 的文字要轉發，橋才投影得出誰在說什麼
             "--agents", cli_agents_json(), "--forward-subagent-text", *sess_args]
     # --model 吃完整 id（claude-opus-5）或別名（opus）。沒指定就用 CLI 自己的設定——
@@ -4856,12 +4857,45 @@ def sync_office_hook() -> str:
 memory_seen: dict[str, float] = {}   # 記憶檔路徑 -> 已經記過的 mtime（隨 state 持久化，重啟不重複記）
 
 
+def employee_memory_dir(aid: str) -> Path | None:
+    """這位員工自己的 Claude Code 自動記憶目錄（CLAUDE_CONFIG_DIR/memory/<代號>）。
+    以前全員共用一份：記憶是按 git 根存的，所有工作區都在同一個 repo 底下（2026-11-10 盤點：49 則混在一起，
+    索引 21.8K、離 25KB 的載入上限不遠）。路徑裡要有 /memory/：記憶落帳的 hook 靠它認檔。"""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(cfg).expanduser() / "memory" / aid if cfg and aid in agents else None
+
+
+def cli_memory_args(aid: str) -> list[str]:
+    """派工時把自動記憶指到這個人自己的目錄。實測（2026-11-10，Claude Code 2.1.319）：--settings 的 autoMemoryDirectory
+    逐行程生效、目錄不存在會自己建（先建好，免得它先試 Bash mkdir 被拒）、寫入不用審批、下一輪讀得回來、共用那份完全不動。"""
+    d = employee_memory_dir(aid)
+    if d is None:
+        return []
+    d.mkdir(parents=True, exist_ok=True)
+    return ["--settings", json.dumps({"autoMemoryDirectory": str(d)}, ensure_ascii=False)]
+
+
+MEMORY_INDEX_LINES, MEMORY_INDEX_BYTES = 200, 25000   # Claude Code 開工時只載入索引的前 200 行或 25KB（取先到者）
+
+
+def memory_usage(aid: str) -> dict | None:
+    """這位員工的記憶：幾則、索引多長（離載入上限多遠）。超過上限的部分開工時不會被載入。"""
+    d = employee_memory_dir(aid)
+    if d is None or not d.is_dir():
+        return None
+    idx = d / "MEMORY.md"
+    text = idx.read_text(encoding="utf-8", errors="replace") if idx.is_file() else ""
+    return {"notes": sum(1 for f in d.glob("*.md") if f.name != "MEMORY.md"), "index_lines": len(text.splitlines()),
+            "index_bytes": len(text.encode("utf-8")), "limit_lines": MEMORY_INDEX_LINES, "limit_bytes": MEMORY_INDEX_BYTES}
+
+
 def memory_roots() -> list[tuple[str, Path]]:
-    """(員工代號, 記憶目錄)。CLI 的記憶是按【專案根】存的，員工的工作區都在 cogito workspace 底下＝
-    同一個根，所以那一份是全員共用的池子，認不出是誰寫的——代號留空，照實記。"""
+    """(員工代號, 記憶目錄)。每人一份的（employee_memory_dir）認得是誰；舊的共用池子（按專案根存，
+    員工的工作區都在 cogito workspace 底下＝同一個根）認不出是誰寫的——代號留空，照實記。"""
     out: list[tuple[str, Path]] = []
     if CHANNELS_DIR is not None:
         out += [(aid, CHANNELS_DIR / f"office_{aid}" / ".claw" / "memory") for aid in agents]
+    out += [(aid, d) for aid in agents if (d := employee_memory_dir(aid)) is not None]
     if cfg := os.environ.get("CLAUDE_CONFIG_DIR"):
         for d in sorted((Path(cfg).expanduser() / "projects").glob("*/memory")):
             m = re.search(r"office-(kanban|p\d+)(?:-|$)", d.parent.name)

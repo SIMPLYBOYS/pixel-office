@@ -536,6 +536,7 @@ def run() -> None:
     job_timeout()
     schedule_stats()
     skill_proposals()
+    employee_memory()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1749,6 +1750,9 @@ for o in out:
                 assert main.cli_extra_dirs("p05", home) == [] and main.cli_extra_dirs("p05", Path(tmp)) == [], "工作區以外不加"
                 # 員工 CLI 走訂閱：橋的 ANTHROPIC_API_KEY 不能傳下去（Claude Code 會優先用 API key 計費；踩過「Credit balance is too low」）
                 assert "ENV_NO_API_KEY" in sent, "子行程拿到了 ANTHROPIC_API_KEY——員工會用 API 計費而不是訂閱"
+                # 自動記憶每人一份（以前全員共用：記憶按 git 根存，所有工作區在同一個 repo 底下）
+                mem = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "memory" / "p05"
+                assert f'--settings {{"autoMemoryDirectory": "{mem}"}}' in sent and mem.is_dir(), f"argv 沒把記憶指到這個人自己的目錄：{sent[:300]}"
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
@@ -1899,6 +1903,33 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def employee_memory() -> None:
+    """自動記憶每人一份：目錄在 CLAUDE_CONFIG_DIR/memory/<代號>；記憶落帳認得、記到對的人；
+    檔案卡講索引離載入上限（200 行／25KB）多遠。"""
+    aid = "p05"
+    d = main.employee_memory_dir(aid)
+    assert d == Path(os.environ["CLAUDE_CONFIG_DIR"]) / "memory" / aid and main.employee_memory_dir("沒這個人") is None
+    assert (aid, d) in main.memory_roots(), "落帳與盤點要認得每人一份的目錄"
+    d.mkdir(parents=True, exist_ok=True)
+    note = d / "test-note.md"
+    note.write_text("---\nname: x\n---\n測試\n", encoding="utf-8")
+    (d / "MEMORY.md").write_text("".join(f"- [n{i}](n{i}.md) — 一行\n" for i in range(210)), encoding="utf-8")
+    old_ch = main.CHANNELS_DIR
+    main.CHANNELS_DIR = _iso / "workspace" / "channels"   # 前面的測試可能把它設成 None
+    try:
+        with TestClient(main.app) as c:
+            cwd = str(main.CHANNELS_DIR / f"office_{aid}")
+            r = c.post("/office/memory", json={"cwd": cwd, "session_id": "s", "file": str(note)}).json()
+            assert r["ok"] and r["agent"] == aid, r
+            m = c.get(f"/office/profile/{aid}").json()["memory"]
+            assert m["notes"] == 1 and m["index_lines"] == 210 and m["limit_lines"] == 200 and m["limit_bytes"] == 25000, m
+    finally:
+        main.CHANNELS_DIR = old_ch
+        note.unlink(missing_ok=True)
+        (d / "MEMORY.md").unlink(missing_ok=True)
+    print("  ✓ 自動記憶每人一份：派工帶 autoMemoryDirectory、落帳認得且記到對的人、檔案卡講索引離載入上限多遠")
 
 
 def schedule_stats() -> None:
