@@ -149,8 +149,18 @@
   .eff .spark .ok { fill: #3fa66b; } .eff .spark .timeout { fill: #c0392b; } .eff .spark .error { fill: #d68a1f; }
   .eff .spark line { stroke: var(--dim); stroke-dasharray: 2 2; }
   .eff .up { color: #c0392b; } .eff .down { color: #3fa66b; }
-  .eff td.bad { color: #c0392b; }
+  .eff td.bad, .waits td.bad { color: #c0392b; }
   .prof .traits span.err { color: #c0392b; }
+  /* 訂閱用量（左欄常駐）：一條＝一個窗，滿了變色；資料是員工最近一次呼叫回報的，舊了就標多久以前 */
+  .usage { font-size: 11px; color: var(--dim); margin: 2px 0 8px; }
+  .usage .ur { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  .usage .ul { width: 92px; white-space: nowrap; }
+  .usage .ub { flex: 1; height: 6px; background: #20242c; border-radius: 3px; overflow: hidden; }
+  .usage .ub i { display: block; height: 100%; background: #3fa66b; }
+  .usage .ub i.warn { background: #d68a1f; } .usage .ub i.full { background: #c0392b; }
+  .usage .uv { width: 104px; text-align: right; white-space: nowrap; }
+  .usage .stale { opacity: .6; }
+  .waits .wlong { font-size: 11px; color: var(--dim); margin: 4px 0; }
   .prof pre.skillbody { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; margin: 4px 0 6px;
     padding: 6px 8px; background: #0f1115; border: 1px solid var(--line); border-radius: 6px; }
   .trace { margin: 6px 0 2px; border-top: 1px dashed var(--line, #ccc); padding-top: 6px; font-size: 11.5px; }
@@ -675,6 +685,7 @@
   <aside id="rail">
     <h1>員工<small id="count"></small><button class="teambtn" onclick="openTeamWizard(false)" title="團隊設定：哪幾個工位啟用、坐的是誰">👥 團隊設定</button></h1>
     <div id="status" class="status"></div>
+    <div id="usage" class="usage" hidden></div>
     <div id="roster"></div>
     <!-- 先放一個佔位 summary：capcard() 取完資料才會覆蓋，在那之前空的 <details>
          會被畫成預設字樣「詳細資料」。它不像右欄那三塊可以先 hidden——這張卡是常駐的。 -->
@@ -700,6 +711,7 @@
     <details class="prof audit" id="audit" hidden></details>
     <details class="prof costs" id="costs" hidden></details>
 <details class="prof costs eff" id="eff" hidden></details>
+<details class="prof costs waits" id="waits" hidden></details>
     <details class="prof cmds" id="cmds" hidden></details>
     <details class="prof tasks" id="tasks" hidden></details>
     <div class="feed" id="feed"></div>
@@ -2593,6 +2605,62 @@ async function effcard(force) {
   box.open = localStorage.effOpen === '1';
   box.ontoggle = () => { localStorage.effOpen = box.open ? '1' : '0'; };
 }
+// 訂閱用量：員工每次呼叫模型都會順帶回報。左欄常駐，一眼看到這個帳號還剩多少、什麼時候重置
+const WINDOW_NAME = { five_hour: '5 小時', seven_day: '本週' };
+async function usagecard() {
+  const box = $('usage');
+  if (!box) return;
+  let r;
+  try { r = await (await fetch('/office/usage')).json(); } catch { return; }
+  const rows = [];
+  const when = ts => {
+    if (!ts) return '';
+    const d = new Date(ts * 1000), today = new Date().toDateString() === d.toDateString();
+    return today ? d.toTimeString().slice(0, 5) : `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  for (const [kind, label] of [['claude', 'Claude'], ['codex', 'Codex']]) {
+    const u = r && r[kind];
+    if (!u) continue;
+    const stale = u.age_s > 1800;
+    for (const [name, w] of Object.entries(u.windows)) {
+      const pct = Math.round(w.util * 100), cls = w.status !== 'allowed' || pct >= 95 ? 'full' : pct >= 80 ? 'warn' : '';
+      rows.push(`<div class="ur${stale ? ' stale' : ''}" title="${esc(label)}${u.plan ? '（' + esc(u.plan) + '）' : ''}・${stale ? Math.round(u.age_s / 60) + ' 分鐘前回報' : '剛回報'}">` +
+        `<span class="ul">${esc(label)} ${esc(WINDOW_NAME[name] || name)}</span><span class="ub"><i class="${cls}" style="width:${Math.min(pct, 100)}%"></i></span>` +
+        `<span class="uv">${pct}%${w.resets_at ? `・${when(w.resets_at)} 重置` : ''}</span></div>`);
+    }
+  }
+  box.hidden = !rows.length;
+  box.innerHTML = rows.join('');
+}
+usagecard();
+
+// 等你多久：員工停下來等你審批的時間。「以後都准」與守則調整有沒有讓等待變少，看這張
+let waitAt = 0;
+async function waitcard(force) {
+  const box = $('waits');
+  if (!box || (!force && Date.now() - waitAt < 60000)) return;
+  waitAt = Date.now();
+  const days = parseInt(localStorage.waitDays || '7', 10);
+  let r;
+  try { r = await (await fetch(`/office/approvals/stats?days=${days}`)).json(); } catch { return; }
+  if (!r.ok) return;
+  const sig = JSON.stringify([days, r.n, r.wait_s]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = false;
+  const dur = s => s >= 3600 ? (s / 3600).toFixed(1) + ' 小時' : s >= 60 ? Math.round(s / 60) + ' 分' : s + ' 秒';
+  const L = r.longest;
+  const agentRows = r.by_agent.map(x => `<tr><td>${esc(x.who)}</td><td>${x.n}</td><td>${dur(x.wait_s)}</td><td class="${x.timeout ? 'bad' : ''}">${x.timeout || ''}</td></tr>`).join('');
+  const keyRows = r.by_key.map(x => `<tr><td>${esc(x.key)}</td><td>${x.n}</td><td>${dur(x.wait_s)}</td>` +
+    `<td>${x.permit ? `<small title="在審批卡上按「以後都准」就會加這條，之後不再問">可設以後都准：${esc(x.permit)}</small>` : ''}</td></tr>`).join('');
+  box.innerHTML = `<summary>⏳ 等你<small>最近 ${days} 天・${r.n} 次審批・員工共等你 ${dur(r.wait_s)}${r.median_s != null ? `・中位 ${dur(Math.round(r.median_s))}` : ''}${r.outcomes.timeout ? `・${r.outcomes.timeout} 次等到逾時被拒` : ''}</small>
+    <span class="wdbtn" onclick="event.preventDefault(); event.stopPropagation(); localStorage.waitDays = String(${days === 7 ? 30 : 7}); $('waits').dataset.sig = ''; waitcard(true);">${days === 7 ? '看 30 天' : '看 7 天'}</span></summary>` +
+    (r.n ? `${L ? `<div class="wlong">最久一次：${esc(L.who)} ${esc(L.day.slice(5))} ${esc(L.at)}「${esc(L.key)}」等了 ${dur(L.wait_s)}${L.outcome === 'timeout' ? '，等到逾時被拒' : ''}</div>` : ''}
+    <table><tr><th>員工</th><th>次</th><th>等了</th><th title="等到逾時、被自動拒絕">逾時</th></tr>${agentRows}</table>
+    <table><tr><th>最常卡住的審批</th><th>次</th><th>等了</th><th></th></tr>${keyRows}</table>` : '<div class="wlong">這段時間沒有任何審批在等你</div>');
+  box.open = localStorage.waitOpen === '1';
+  box.ontoggle = () => { localStorage.waitOpen = box.open ? '1' : '0'; };
+}
 async function archiveLedger(id) {
   if (!confirm('把整本稽核帳本封存？舊本改名保留在 backend/audit/，畫面與收件匣的「最近」會清空。')) return;
   const r = await (await fetch('/office/audit/archive', { method: 'POST' })).json();
@@ -3744,6 +3812,8 @@ function openStream() {
     if (ev.alert) cue(ev.alert);          // 不管在看哪一位，該響的都要響
   costcard();                           // 花費也是全員視角
   effcard();                            // 班表效率（一分鐘最多抓一次：要讀整本帳本）
+  waitcard();                           // 等你多久（同上）
+  if (ev.type === 'usage') usagecard(); // 員工剛回報了訂閱用量
   inboxcard();                          // 收件匣是全員視角：任何人的事都可能進來
     if (ev.type === 'roster') roster();
     else if (ev.type === 'life') lifecard(selected);   // 誰排了行程、誰跟誰聊了：簽章沒變就不重畫

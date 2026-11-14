@@ -537,6 +537,7 @@ def run() -> None:
     schedule_stats()
     skill_proposals()
     employee_memory()
+    waits_and_usage()
     isolation_at_import()
     stay_put()
     state_save_retry()
@@ -1688,8 +1689,8 @@ out = [
  {"type":"user","message":{"content":[
    {"type":"tool_result","tool_use_id":"t2","content":"exit 1: 編譯失敗","is_error":True}]}},
  {"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1788384000,
-   "rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.05},
-   "seven_day":{"utilization":0.04}}}},
+   "rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.05,"resetsAt":1788384000,"status":"allowed"},
+   "seven_day":{"utilization":0.04,"resetsAt":1788900000,"status":"allowed"}}}},
  {"type":"assistant","message":{"content":[{"type":"text","text":"它印出 hi。"}]}},
  {"type":"result","subtype":"success","is_error":False,"num_turns":2,
   "total_cost_usd":0.2677,"result":"它印出 hi。"},
@@ -1717,6 +1718,7 @@ for o in out:
                 # 引擎選擇：外殼覆蓋 > 人設 > 預設
                 assert main.engine_of("p05") == main.ENGINE_COGITO
                 assert main.engine_of("p05", "cli") == main.ENGINE_CLI
+                main.sub_usage.clear()   # 測試的 state 檔跨次保留：上一輪存的用量會讓「有沒有抓到」驗不出來
 
                 main.busy.discard("p05")
                 # 記下「現在最新的卡是哪張」：state 檔裡本來就有舊卡，不比對的話
@@ -1757,6 +1759,11 @@ for o in out:
                 assert any("▸ Read" in t for t in evs), evs          # 工具 → 事件
                 assert any("✓ Read" in t for t in evs), evs          # 成功的結果
                 assert any("✗ Bash" in t for t in evs), evs          # 失敗的要標成失敗，不能混為一談
+                # 額度事件順手記下最新用量：左欄的訂閱用量條（實測形狀：每個窗各自帶 utilization／resetsAt／status）
+                cw = main.sub_usage["claude"]["windows"]
+                assert cw["five_hour"] == {"util": 0.05, "resets_at": 1788384000.0, "status": "allowed"} and cw["seven_day"]["util"] == 0.04, cw
+                u = c.get("/office/usage").json()
+                assert u["ok"] and u["claude"]["agent"] == "p05" and u["claude"]["age_s"] >= 0, u
                 # 【額度事件是例行回報】status=allowed、用量 5% 時什麼都不該講。
                 # 先前把每一筆都翻譯成「觸到上限」——看起來很像真的的謊（實際回報）。
                 assert not any("額度" in t for t in evs), f"例行的額度回報不該變成警告：{evs}"
@@ -1903,6 +1910,58 @@ for o in out:
             main.cli_caps.clear()      # 假 CLI 的能力別留在真實 state 裡
             main.cli_model.pop("p05", None)
             main.save_state()
+
+
+def waits_and_usage() -> None:
+    """等你多久（對照 Habblaud 的 My day）＋訂閱用量條。
+    等你：同一個人的審批照先後配對；收工時沒處理掉的不算；種類看指令／網域、略過環境變數前綴、參數被截斷也讀得出網址；
+    附「以後都准」的規則。用量：重啟後還在（隨 state 存）。"""
+    import tempfile
+    from datetime import date, datetime, timedelta as td
+    with tempfile.TemporaryDirectory() as tmp:
+        old = main.AUDIT_DIR
+        main.AUDIT_DIR = Path(tmp) / "audit"; main.AUDIT_DIR.mkdir()
+        main._wait_cache.update(key=None, rows=[])
+        base = datetime.combine(date.today(), datetime.min.time()) + td(hours=10)
+        rows = []
+        ev = lambda secs, kind, aid, **k: rows.append({"at": (base + td(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%S+0800"), "agent": aid, "kind": kind, **k})
+        bash = lambda cmd: json.dumps({"command": cmd})
+        ev(0, "approval.asked", "p10", tool="Bash", params=bash("ls -la /x"))
+        ev(30, "approval.approved", "p10")                                           # 30 秒
+        ev(100, "approval.asked", "p10", tool="WebFetch", params='{"url": "https://www.example.com/a?b=' + "x" * 300)   # 截斷的 JSON
+        ev(400, "approval.timeout", "p10")                                          # 300 秒，逾時
+        ev(500, "approval.asked", "kanban", tool="Bash", params=bash("cd /w && git commit -m y"))
+        ev(510, "approval.asked", "kanban", tool="Bash", params=bash("FOO=1 python3 a.py"))   # 排隊中的第二張
+        ev(560, "approval.approved", "kanban")                                       # 第一張：60 秒
+        ev(600, "approval.rejected", "kanban")                                       # 第二張：90 秒
+        ev(700, "approval.asked", "p10", tool="Bash", params=bash("grep x y"))
+        ev(800, "task.done", "p10")                                                  # 行程沒了：不算在等老闆
+        ev(900, "approval.approved", "p10")                                          # 沒有對應的請求：不配
+        main.audit_path().write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows) + "\n", encoding="utf-8")
+        try:
+            with TestClient(main.app) as c:
+                main.AUDIT_DIR = Path(tmp) / "audit"
+                r = c.get("/office/approvals/stats?days=7").json()
+            assert r["n"] == 4 and r["wait_s"] == 30 + 300 + 60 + 90 and r["median_s"] == 75.0, r
+            assert r["outcomes"] == {"approved": 2, "rejected": 1, "timeout": 1}, r["outcomes"]
+            assert r["longest"]["agent"] == "p10" and r["longest"]["key"] == "WebFetch: www.example.com" and r["longest"]["wait_s"] == 300, r["longest"]
+            keys = {x["key"]: x for x in r["by_key"]}
+            assert set(keys) == {"Bash: ls", "WebFetch: www.example.com", "Bash: git commit", "Bash: python3"}, set(keys)
+            assert keys["Bash: ls"]["permit"] == "Bash(ls:*)" and keys["Bash: git commit"]["permit"] is None, keys
+            ag = {x["agent"]: x for x in r["by_agent"]}
+            assert (ag["p10"]["n"], ag["p10"]["wait_s"], ag["p10"]["timeout"]) == (2, 330, 1) and ag["kanban"]["wait_s"] == 150, ag
+            assert ag["p10"]["who"] == main.agents["p10"].name
+        finally:
+            main.AUDIT_DIR = old
+            main._wait_cache.update(key=None, rows=[])
+    # 用量：隨 state 存，重啟後還在
+    main.note_usage("claude", "p05", main.claude_usage_windows({"unifiedWindows": {"five_hour": {"utilization": 0.35, "resetsAt": 1794652800, "status": "allowed"}}}))
+    saved = dict(main.sub_usage)
+    main.save_state()
+    main.sub_usage.clear()
+    main.load_state()
+    assert main.sub_usage.get("claude", {}).get("windows") == saved["claude"]["windows"], main.sub_usage
+    print("  ✓ 等你多久：照先後配對、收工沒處理的不算、種類與以後都准規則；訂閱用量重啟後還在")
 
 
 def employee_memory() -> None:
@@ -4714,6 +4773,8 @@ for line in sys.stdin:
         assert p["threadId"] == thread, p
         out({"id": d["id"], "result": {"turn": {"id": turn, "items": [], "status": "inProgress"}}})
         out({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "inProgress"}}})
+        out({"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": "codex", "planType": "free",
+             "primary": {"usedPercent": 3, "windowDurationMins": 43200, "resetsAt": 1796356338}, "secondary": None}}})
         it = lambda m2, item: out({"method": m2, "params": {"threadId": thread, "turnId": turn, "item": item}})
         if os.environ.get("FAKE_CODEX_FAIL"):
             open(LOG, "a", encoding="utf-8").write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -4803,7 +4864,7 @@ for line in sys.stdin:
         try:
             with TestClient(main.app) as c:
                 main.AUDIT_DIR = Path(tmp) / "audit"; main._audit_last.update({"seq": 0, "hash": "", "path": None})
-                main.engine_sent.pop("p05", None); main.codex_threads.clear()
+                main.engine_sent.pop("p05", None); main.codex_threads.clear(); main.sub_usage.clear()
                 assert main.engine_of("p05", "codex") == main.ENGINE_CODEX
                 card = run({"text": "看一下 a.py", "engine": "codex"})
                 rec = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
@@ -4842,6 +4903,9 @@ for line in sys.stdin:
                 assert rec["has_openai_key"] is False, "子行程拿到 OPENAI_API_KEY——Codex 會改走 API 計費而不是訂閱"
                 assert rec["home"] == str(Path(tmp) / "codexhome"), "OFFICE_CODEX_HOME 要傳成 CODEX_HOME"
                 assert card["status"] == "ok" and card["engine"] == "codex" and card["session"].startswith("01a0-new-"), card
+                # Codex 的訂閱用量也記下（app-server 的 account/rateLimits/updated；免費方案是 30 天一個窗）
+                xu = main.sub_usage["codex"]
+                assert xu["plan"] == "free" and xu["windows"] == {"30d": {"util": 0.03, "resets_at": 1796356338.0, "status": "allowed"}}, xu
                 assert card["model"] == "gpt-test-model" and card["usage"]["in"] == 100 and card["usage"]["cache_read"] == 60, card
                 evs = [e["text"] for e in card["events"]]
                 assert any("▸ shell" in x for x in evs) and any("✓ shell" in x for x in evs) and any("✗ shell" in x for x in evs), evs

@@ -3751,6 +3751,55 @@ def cli_events(d: dict, tool_names: dict[str, str], subs: dict | None = None) ->
 # 額度警戒線：低於這個用量不吵。90% 是「還能做完手上這件、但該知道了」的位置。
 RATE_WARN = 0.9
 
+# 訂閱用量（2026-11-14，對照 Habblaud 的帳號用量條）：員工每次呼叫模型，事件串流都會順帶回報這個帳號的用量——
+# 以前只在超過 90% 時講一句，平常看不到還剩多少。現在記下最新那筆，左欄常駐一條。
+# 實測形狀（Claude Code 2.1.319）：rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization, resetsAt, status}；
+# Codex app-server：account/rateLimits/updated 的 rateLimits.{primary,secondary}.{usedPercent, windowDurationMins, resetsAt}＋planType。
+sub_usage: dict[str, dict] = {}   # "claude"／"codex" -> {at, agent, plan, windows: {名稱: {util, resets_at, status}}}（隨 state 持久化）
+CODEX_WINDOW = {300: "five_hour", 10080: "seven_day"}
+
+
+def note_usage(kind: str, aid: str, windows: dict, plan: str = "") -> None:
+    global _dirty
+    if not windows:
+        return
+    sub_usage[kind] = {"at": time.time(), "agent": aid, "plan": plan, "windows": windows}
+    _dirty = True
+    notify("usage")
+
+
+def claude_usage_windows(info: dict) -> dict:
+    out = {}
+    for name, w in ((info or {}).get("unifiedWindows") or {}).items():
+        try:
+            out[str(name)] = {"util": float((w or {}).get("utilization") or 0), "resets_at": float((w or {}).get("resetsAt") or 0),
+                              "status": str((w or {}).get("status") or "allowed")}
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def codex_usage_windows(rl: dict) -> dict:
+    out = {}
+    for key in ("primary", "secondary"):
+        w = (rl or {}).get(key)
+        if not isinstance(w, dict):
+            continue
+        try:
+            mins = int(w.get("windowDurationMins") or 0)
+            out[CODEX_WINDOW.get(mins, f"{mins // 1440}d" if mins >= 1440 else f"{mins}m")] = {
+                "util": float(w.get("usedPercent") or 0) / 100, "resets_at": float(w.get("resetsAt") or 0), "status": "allowed"}
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+@app.get("/office/usage")
+def office_usage():
+    """員工用的訂閱各用了多少（最新一筆、多久以前回報的）。沒有員工跑過就是空的。"""
+    now = time.time()
+    return {"ok": True, **{k: {**v, "age_s": round(now - v["at"])} for k, v in sub_usage.items()}}
+
 
 def rate_limit_line(info: dict) -> str:
     """額度事件 → 要不要講、講什麼。不該講就回空字串。
@@ -4014,6 +4063,8 @@ async def run_cli_task(aid: str, text: str, cwd: Path | None = None, model: str 
                     if proc.stdin is not None and not proc.stdin.is_closing():
                         proc.stdin.close()       # 關 stdin，行程才會結束
                     continue
+                if d.get("type") == "rate_limit_event":   # 每次呼叫都回報一次：記下最新的用量（左欄的訂閱用量條）
+                    note_usage("claude", aid, claude_usage_windows(d.get("rate_limit_info") or {}))
                 for ev in cli_events(d, tool_names, subs):
                     if ev.get("sub_model"):   # 子 agent 用了哪個模型：主 agent 依難度選的，要留得下證據
                         audit("subagent.model", aid, sub=ev.get("sub_name"), model=ev["sub_model"], engine=ENGINE_CLI)
@@ -4597,6 +4648,9 @@ async def run_codex_task(aid: str, text: str, cwd: Path | None = None, model: st
             p = d.get("params") or {}
             if m == "turn/started":
                 rpc.turn = str((p.get("turn") or {}).get("id") or rpc.turn)
+            elif m == "account/rateLimits/updated":   # Codex 訂閱的用量（左欄的訂閱用量條）
+                rl = p.get("rateLimits") or {}
+                note_usage("codex", aid, codex_usage_windows(rl), str(rl.get("planType") or ""))
             elif m == "thread/tokenUsage/updated":   # 每次模型呼叫一則，last＝那一次；加總＝這一輪
                 last = (p.get("tokenUsage") or {}).get("last") or {}
                 for k, src in (("in", "inputTokens"), ("out", "outputTokens"), ("cache_read", "cachedInputTokens"),
@@ -7168,6 +7222,100 @@ def _median(xs: list[float]) -> float | None:
     return None if not xs else (xs[len(xs) // 2] if len(xs) % 2 else round((xs[len(xs) // 2 - 1] + xs[len(xs) // 2]) / 2, 1))
 
 
+# ── 等你多久：員工停下來等老闆審批的時間 ─────────────────────────────────────
+# 2026-11-14 對照 Habblaud 的「My day」（agent 等你多久、最久的一次）：審批是這間辦公室最主要的摩擦，
+# 「以後都准」、守則改寫有沒有讓等待變少，要量得到。資料全在稽核帳本（approval.asked → approved／rejected／timeout）。
+_wait_cache: dict = {"key": None, "rows": []}
+APPROVAL_DONE = {"approval.approved": "approved", "approval.rejected": "rejected", "approval.timeout": "timeout"}
+
+
+def approval_key(tool: str, params: str) -> str:
+    """把一次審批歸成「哪一種」：Bash 看指令（git 看到子指令）、WebFetch 看網域、其他看工具名。"""
+    try:
+        ti = json.loads(params) if params else {}
+    except ValueError:   # 帳上的參數截在 300 字：太長的 JSON 讀不回來，就從字面抓
+        ti = {k: m.group(1) for k in ("command", "url") if (m := re.search(rf'"{k}":\s*"([^"]{{1,200}})', params or ""))}
+    if tool == "Bash" and isinstance(ti, dict):
+        w = str(ti.get("command") or "").split()
+        if w and w[0] == "cd" and "&&" in w:   # cd 某處 && 真正的指令
+            w = w[w.index("&&") + 1:]
+        while w and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", w[0]):   # 前面帶的環境變數不是指令
+            w = w[1:]
+        return "Bash: " + " ".join(w[:2] if w[:1] == ["git"] else w[:1]) if w else "Bash"
+    if tool == "WebFetch" and isinstance(ti, dict):
+        return f"WebFetch: {urlsplit(str(ti.get('url') or '')).hostname or '?'}"
+    return tool or "?"
+
+
+def approval_waits() -> list[dict]:
+    """帳本裡每一次審批等了多久：{agent, day, at, key, wait_s, outcome, permit}。同一個人的審批照先後配對；
+    收工時還沒處理掉的（行程沒了、被中止）算 abandoned，不計等待——那不是在等老闆。"""
+    path = audit_path()
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _wait_cache["key"] == key:
+        return _wait_cache["rows"]
+    queue: dict[str, list[dict]] = {}
+    rows: list[dict] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        k, aid = d.get("kind"), str(d.get("agent") or "")
+        try:
+            t = time.mktime(time.strptime(str(d.get("at"))[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            continue
+        if k == "approval.asked":
+            tool, params = str(d.get("tool") or ""), str(d.get("params") or "")
+            try:
+                ti = json.loads(params)
+            except ValueError:
+                ti = None
+            queue.setdefault(aid, []).append({"agent": aid, "day": str(d["at"])[:10], "at": str(d["at"])[11:16], "_t": t,
+                                              "key": approval_key(tool, params), "permit": permit_rule(tool, ti) if ti is not None else None})
+        elif k in APPROVAL_DONE and queue.get(aid):
+            r = queue[aid].pop(0)
+            r["wait_s"], r["outcome"] = round(t - r.pop("_t")), APPROVAL_DONE[k]
+            rows.append(r)
+        elif k == "task.done":
+            queue.pop(aid, None)
+    _wait_cache.update(key=key, rows=rows)
+    return rows
+
+
+@app.get("/office/approvals/stats")
+def office_approval_stats(days: int = 7):
+    """最近 days 天員工等老闆審批：總共幾次、等了多久、最久那次；依員工、依審批種類（附可不可以「以後都准」）、依天。"""
+    days = max(1, min(int(days), 90))
+    since = (date.today() - timedelta(days=days - 1)).isoformat()
+    rows = [r for r in approval_waits() if r["day"] >= since]
+    who = lambda a: agents[a].name if a in agents else a
+
+    def group(field: str) -> list[dict]:
+        g: dict[str, dict] = {}
+        for r in rows:
+            x = g.setdefault(r[field], {field: r[field], "n": 0, "wait_s": 0, "timeout": 0, "permit": r.get("permit")})
+            x["n"] += 1
+            x["wait_s"] += r["wait_s"]
+            x["timeout"] += r["outcome"] == "timeout"
+        return sorted(g.values(), key=lambda x: -x["wait_s"])
+    by_agent = group("agent")
+    for x in by_agent:
+        x["who"] = who(x["agent"])
+        x.pop("permit", None)
+    longest = max(rows, key=lambda r: r["wait_s"], default=None)
+    return {"ok": True, "days": days, "n": len(rows), "wait_s": sum(r["wait_s"] for r in rows),
+            "median_s": _median([r["wait_s"] for r in rows]),
+            "outcomes": {o: sum(r["outcome"] == o for r in rows) for o in APPROVAL_DONE.values()},
+            "longest": {**longest, "who": who(longest["agent"])} if longest else None,
+            "by_agent": by_agent, "by_key": group("key")[:12], "by_day": sorted(group("day"), key=lambda x: x["day"])}
+
+
 @app.get("/office/schedule/stats")
 def office_schedule_stats(days: int = 14):
     """每條班表最近 days 天：每次的耗時／結果／花費，加中位數與趨勢（後半段中位耗時 − 前半段）。"""
@@ -7486,6 +7634,7 @@ def save_state() -> None:
             # 不存的話每次重啟能力面板就空白，得先派一次工才看得到（實際回報）。
             "cli_caps": cli_caps, "cli_model": cli_model,
             "codex_model": codex_model, "codex_threads": codex_threads, "codex_model_sent": codex_model_sent,
+            "sub_usage": sub_usage,   # 訂閱用量：重啟後左欄照樣有數字（標明多久以前回報的）
             "memory_seen": memory_seen,   # 記憶檔記過哪些：重啟後不該把舊檔當成新寫的再記一次
             # 生活模擬的心智與今天的花費：重啟不失憶、預算不歸零。還沒交給 Agent 的（畫面外的人）原樣留著
             "life": {**life_saved, **{aid: a.life_state() for aid, a in npcs().items()}}, "life_spend": life_spend}
@@ -7540,6 +7689,7 @@ def load_state() -> None:
     cli_model.update(data.get("cli_model", {}))
     codex_model.update(data.get("codex_model", {}))
     codex_threads.update(data.get("codex_threads", {}))
+    sub_usage.update({k: v for k, v in (data.get("sub_usage") or {}).items() if isinstance(v, dict) and v.get("windows")})
     codex_model_sent.update(data.get("codex_model_sent", {}))
     cli_effort_pick.update(data.get("cli_effort_pick", {}))
     codex_effort_pick.update(data.get("codex_effort_pick", {}))
